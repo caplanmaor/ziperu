@@ -1,0 +1,10 @@
+/target
+/tmp
+/pkg
+/Gemfile.lock
+/lib/ziperu/*.so
+/lib/ziperu/*.bundle
+/lib/ziperu/*/
+/ext/ziperu/Makefile
+/ext/ziperu/*.so
+/ext/ziperu/target

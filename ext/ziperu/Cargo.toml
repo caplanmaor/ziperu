@@ -1,0 +1,24 @@
+[package]
+name = "ziperu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+rust-version = "1.88"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+magnus = { version = "0.9", features = ["rb-sys"] }
+rb-sys = { version = "0.9", default-features = false, features = ["stable-api-compiled-fallback"] }
+zip = { version = "9", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+    "deflate64",
+    "bzip2",
+    "zstd",
+    "aes-crypto",
+    "time",
+] }
+
+[build-dependencies]
+rb-sys-env = "0.2"
