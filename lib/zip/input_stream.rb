@@ -1,0 +1,162 @@
+# frozen_string_literal: true
+
+module Zip
+  # Reads the entries of an archive one after another, exposing each as an
+  # IO-like stream, exactly as rubyzip's `Zip::InputStream` does:
+  #
+  #   Zip::InputStream.open("my.zip") do |io|
+  #     while (entry = io.get_next_entry)
+  #       puts "Contents of #{entry.name}: '#{io.read}'"
+  #     end
+  #   end
+  #
+  # Unlike rubyzip, entries are located through the central directory rather
+  # than by walking local headers, so archives whose local headers lack sizes
+  # (general-purpose bit 3, as written by OS X Archive Utility and most
+  # streaming writers) read fine instead of raising `Zip::StreamingError`.
+  class InputStream
+    CHUNK_SIZE = IOExtras::CHUNK_SIZE # :nodoc:
+
+    include ::Zip::IOExtras::AbstractInputStream
+
+    # Opens the indicated zip file.
+    #
+    # @param context [String||IO||StringIO] file path or IO/StringIO object
+    # @param offset [Integer] byte offset of the local header to start at
+    # This method also accepts the standard IO encoding options:
+    # `external_encoding:`, `internal_encoding:` and `encoding:`.
+    def initialize(context, offset: 0, decrypter: nil, **opts)
+      super(**opts)
+      @archive = context.kind_of?(Native::Archive) ? context : self.class.open_archive(context)
+      @decrypter = decrypter
+      @next_index = offset.zero? ? 0 : index_at_offset(offset)
+      @reader = nil
+      @current_entry = nil
+      @complete_entry = nil
+    end
+
+    # Close this InputStream. All further IO will raise an IOError.
+    def close
+      @reader = nil
+      @archive = nil
+    end
+
+    # Returns an Entry object and positions the stream at the beginning of
+    # the entry data. Returns nil when there are no more entries.
+    def get_next_entry
+      raise IOError, 'closed stream' if @archive.nil?
+      return @current_entry = nil if @next_index >= @archive.entry_count
+
+      @current_entry = Entry.new(@archive, @archive.entry_meta(@next_index))
+      @next_index += 1
+      open_entry
+      @current_entry
+    end
+
+    # Rewinds the stream to the beginning of the current entry.
+    def rewind
+      return if @current_entry.nil?
+
+      @lineno = 0
+      @pos    = 0
+      wrap_errors { @reader.rewind }
+      flush
+    end
+
+    # Modelled after IO#sysread. Reads up to maxlen bytes from the stream,
+    # bypassing the line buffer; returns a string (either a new string or the
+    # given out_string).
+    def sysread(maxlen = nil, out_string = nil)
+      return (maxlen.nil? || maxlen.zero? ? '' : nil) if eof?
+
+      output = produce_input(maxlen) || +''.b
+
+      if out_string.nil?
+        output.force_encoding(@internal_encoding || @external_encoding)
+      else
+        encoding = out_string.encoding
+        out_string.replace(output).force_encoding(encoding)
+      end
+    end
+
+    # Returns the size of the current entry, or `nil` if there isn't one.
+    def size
+      return if @current_entry.nil?
+
+      @current_entry.size
+    end
+
+    class << self
+      # Same as #initialize but if a block is passed the opened stream is
+      # passed to the block and closed when the block returns.
+      def open(filename_or_io, offset: 0, decrypter: nil, **opts)
+        zio = new(filename_or_io, offset: offset, decrypter: decrypter, **opts)
+        return zio unless block_given?
+
+        begin
+          yield zio
+        ensure
+          zio.close if zio
+        end
+      end
+
+      # @api private
+      def open_archive(context)
+        if context.respond_to?(:read)
+          # Until the Rust core can drive a Ruby IO directly, materialize it.
+          context.seek(0, ::IO::SEEK_SET) if context.respond_to?(:seek)
+          Native::Archive.open_bytes(context.read.b)
+        else
+          Native::Archive.open_path(context.to_s)
+        end
+      end
+    end
+
+    protected
+
+    def open_entry # :nodoc:
+      entry = @current_entry
+      unless COMPRESSION_METHODS.key?(entry.compression_method)
+        raise CompressionMethodError, entry.compression_method
+      end
+
+      if entry.encrypted? && @decrypter.nil?
+        raise Error, PASSWORD_REQUIRED_MESSAGE
+      end
+
+      password = @decrypter&.password&.b
+      @reader = wrap_errors { @archive.open_entry(entry.index, password) }
+      flush
+    end
+
+    def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
+      return nil if @reader.nil?
+
+      wrap_errors { @reader.read(maxlen) }
+    end
+
+    def input_finished? # :nodoc:
+      @reader.nil? || @reader.eof?
+    end
+
+    private
+
+    def index_at_offset(offset)
+      found = @archive.entries.find { |meta| meta[:header_offset] == offset }
+      raise Error, "no local header at offset #{offset}" if found.nil?
+
+      found[:index]
+    end
+
+    # Re-raise the native core's errors as the rubyzip-shaped ones.
+    def wrap_errors
+      yield
+    rescue Native::SizeLimitError
+      raise EntrySizeError, @current_entry
+    rescue Native::PasswordError => e
+      raise Error, e.message
+    rescue Native::UnsupportedError => e
+      raise Error, e.message
+    end
+  end
+end

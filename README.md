@@ -14,9 +14,19 @@ Zip::File.open("archive.zip") do |zf|
 end
 ```
 
-**Status: early.** Read-only `Zip::File` works; streams, writing and
-`commit` are in progress. Tracks the rubyzip 3.x API
+**Status: early.** Read-only `Zip::File`, `Zip::InputStream` and
+`get_input_stream` (with ZipCrypto/AES passwords) work; extraction, writing
+and `commit` are in progress. Tracks the rubyzip 3.x API
 (`Zip::RUBYZIP_COMPAT_VERSION`).
+
+### Deliberate differences from rubyzip
+
+- `Zip::InputStream` locates entries through the central directory instead
+  of walking local headers, so archives written in streaming mode (general
+  purpose bit 3, e.g. by macOS Archive Utility) read normally instead of
+  raising `Zip::StreamingError`.
+- Every read path stops at the entry's declared size, so a header that lies
+  can't inflate into a zip bomb; a `Zip::EntrySizeError` is raised instead.
 
 ## Why
 

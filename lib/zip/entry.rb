@@ -9,8 +9,8 @@ module Zip
                 :index
 
     # @api private
-    def initialize(zipfile, meta)
-      @zipfile = zipfile
+    def initialize(archive, meta)
+      @archive = archive
       @index = meta[:index]
       @name = meta[:name].force_encoding(Encoding::UTF_8)
       @size = meta[:size]
@@ -29,6 +29,7 @@ module Zip
     end
 
     alias to_s name
+    alias local_header_offset header_offset
 
     def directory?
       @directory
@@ -43,6 +44,12 @@ module Zip
       @encrypted
     end
 
+    # Always false: sizes come from the central directory, so an entry is
+    # never missing the metadata needed to read it.
+    def incomplete?
+      false
+    end
+
     def time
       @time ||= DOSTime.parse_binary_dos_format(@dos_date, @dos_time)
     end
@@ -52,17 +59,32 @@ module Zip
       directory? ? :directory : :file
     end
 
-    def get_input_stream
-      io = StringIO.new(get_raw_input_string)
-      io.set_encoding(Encoding::BINARY)
-      return io unless block_given?
+    # An IO-like stream over the entry's decompressed contents. Yields it and
+    # closes it afterwards when given a block.
+    def get_input_stream(decrypter: nil, &block)
+      if directory?
+        yield ::Zip::NullInputStream if block
+        return ::Zip::NullInputStream
+      end
 
-      yield io
+      zis = ::Zip::InputStream.new(@archive, offset: @header_offset, decrypter: decrypter)
+      zis.get_next_entry
+      return zis unless block
+
+      begin
+        yield zis
+      ensure
+        zis.close
+      end
     end
 
     # Decompressed contents as a binary String.
     def get_raw_input_string
-      @zipfile.send(:native).read_entry(@index)
+      return ''.b if directory?
+
+      @archive.read_entry(@index)
+    rescue Native::SizeLimitError
+      raise EntrySizeError, self
     end
 
     def ==(other)

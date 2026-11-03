@@ -24,8 +24,7 @@ module Zip
     end
 
     def self.open_buffer(io, **)
-      bytes = io.respond_to?(:read) ? io.read : io.to_str
-      zf = new(nil, bytes: bytes)
+      zf = new(nil, archive: InputStream.open_archive(io.respond_to?(:read) ? io : StringIO.new(io.to_str)))
       return zf unless block_given?
 
       yield zf
@@ -36,16 +35,11 @@ module Zip
       open(path) { |zf| zf.each(&block) }
     end
 
-    def initialize(path, bytes: nil)
+    def initialize(path, archive: nil)
       @name = path
-      @native =
-        if bytes
-          Native::Archive.open_bytes(bytes.b)
-        else
-          Native::Archive.open_path(path.to_s)
-        end
+      @native = archive || Native::Archive.open_path(path.to_s)
       @comment = @native.comment.force_encoding(Encoding::UTF_8)
-      @entries = @native.entries.map { |meta| Entry.new(self, meta) }
+      @entries = @native.entries.map { |meta| Entry.new(@native, meta) }
     end
 
     def entries
@@ -81,8 +75,11 @@ module Zip
       get_entry(name).get_raw_input_string
     end
 
-    def get_input_stream(name, &block)
-      get_entry(name).get_input_stream(&block)
+    # Returns an input stream to the specified entry. If a block is passed
+    # the stream object is passed to the block and closed afterwards.
+    def get_input_stream(entry, &block)
+      entry = get_entry(entry) unless entry.is_a?(Entry)
+      entry.get_input_stream(&block)
     end
 
     def close
@@ -91,12 +88,6 @@ module Zip
 
     def to_s
       @name.to_s
-    end
-
-    private
-
-    def native
-      @native or raise Error, "zip file is closed"
     end
   end
 end

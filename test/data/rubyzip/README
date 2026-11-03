@@ -1,0 +1,2 @@
+Archives under rubyzip/ are fixtures copied from the rubyzip test suite
+(https://github.com/rubyzip/rubyzip, test/data), used to check compatibility.
