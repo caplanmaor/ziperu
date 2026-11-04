@@ -36,8 +36,10 @@ class ZipFileTest < Minitest::Test
     assert_equal "hello, world!\n", zf.read("hello.txt")
   end
 
-  def test_missing_file_raises_enoent
-    assert_raises(Errno::ENOENT) { Zip::File.open(fixture("nope.zip")) }
+  # rubyzip raises its own error here, not Errno::ENOENT.
+  def test_missing_file_raises_zip_error
+    error = assert_raises(Zip::Error) { Zip::File.open(fixture("nope.zip")) }
+    assert_match(/not found/, error.message)
   end
 
   def test_garbage_raises_zip_error

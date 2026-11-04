@@ -193,6 +193,14 @@ impl EntryReader {
         self.inner.borrow().finished
     }
 
+    /// Releases the entry and its file handle now rather than at GC time;
+    /// reads afterwards return nil.
+    pub fn close(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.entry.file = None;
+        inner.finished = true;
+    }
+
     /// Up to `maxlen` bytes (all remaining bytes when nil) as a binary
     /// String, or nil once the entry is exhausted. Short only at EOF.
     pub fn read(

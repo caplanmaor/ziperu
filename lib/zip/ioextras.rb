@@ -12,5 +12,20 @@ module Zip
   # that `gets`, `readline`, `each_line` and friends behave identically.
   module IOExtras # :nodoc:
     CHUNK_SIZE = 32_768
+
+    class << self
+      def copy_stream(ostream, istream)
+        ostream.write(istream.read(CHUNK_SIZE, +'')) until istream.eof?
+      end
+
+      def copy_stream_n(ostream, istream, nbytes)
+        toread = nbytes
+        while toread > 0 && !istream.eof?
+          tr = [toread, CHUNK_SIZE].min
+          ostream.write(istream.read(tr, +''))
+          toread -= tr
+        end
+      end
+    end
   end
 end

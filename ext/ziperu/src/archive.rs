@@ -4,7 +4,7 @@
 //! `entries`, or one at a time via `entry_meta`); afterwards Ruby only talks
 //! to the archive by index.
 
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -19,7 +19,9 @@ use crate::source::Source;
 #[magnus::wrap(class = "Zip::Native::Archive", free_immediately)]
 pub struct Archive {
     // Single-threaded under the GVL; RefCell gives us &mut for by_index.
-    pub(crate) inner: RefCell<ZipArchive<Source>>,
+    // `None` once closed, which releases the file handle at once rather
+    // than when the GC gets round to it (commit renames over the file).
+    inner: RefCell<Option<ZipArchive<Source>>>,
 }
 
 impl Archive {
@@ -37,21 +39,37 @@ impl Archive {
     fn from_source(ruby: &Ruby, source: Source) -> Result<Self, Error> {
         let archive = ZipArchive::new(source).map_err(|e| zip_error(ruby, e))?;
         Ok(Self {
-            inner: RefCell::new(archive),
+            inner: RefCell::new(Some(archive)),
         })
     }
 
-    pub fn entry_count(&self) -> usize {
-        self.inner.borrow().len()
+    /// The open archive, or an IOError once closed.
+    pub(crate) fn archive(&self, ruby: &Ruby) -> Result<RefMut<'_, ZipArchive<Source>>, Error> {
+        RefMut::filter_map(self.inner.borrow_mut(), Option::as_mut)
+            .map_err(|_| Error::new(ruby.exception_io_error(), "closed archive"))
     }
 
-    pub fn comment(ruby: &Ruby, rb_self: &Self) -> RString {
-        ruby.str_from_slice(rb_self.inner.borrow().comment())
+    /// Releases the underlying file. Readers already opened keep their own
+    /// handle and continue to work.
+    pub fn close(&self) {
+        self.inner.borrow_mut().take();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.borrow().is_none()
+    }
+
+    pub fn entry_count(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        Ok(rb_self.archive(ruby)?.len())
+    }
+
+    pub fn comment(ruby: &Ruby, rb_self: &Self) -> Result<RString, Error> {
+        Ok(ruby.str_from_slice(rb_self.archive(ruby)?.comment()))
     }
 
     /// One Hash per entry, in central-directory order.
     pub fn entries(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let mut archive = rb_self.inner.borrow_mut();
+        let mut archive = rb_self.archive(ruby)?;
         let mut raw = archive.clone().into_inner();
         let out = ruby.ary_new_capa(archive.len());
         for i in 0..archive.len() {
@@ -65,7 +83,7 @@ impl Archive {
 
     /// The Hash for a single entry.
     pub fn entry_meta(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RHash, Error> {
-        let mut archive = rb_self.inner.borrow_mut();
+        let mut archive = rb_self.archive(ruby)?;
         let mut raw = archive.clone().into_inner();
         let entry = archive
             .by_index_raw(index)
@@ -86,13 +104,13 @@ impl Archive {
         enforce_size: bool,
     ) -> Result<EntryReader, Error> {
         let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
-        let archive = rb_self.inner.borrow().clone();
+        let archive = rb_self.archive(ruby)?.clone();
         EntryReader::open(ruby, archive, index, password, enforce_size)
     }
 
     /// Whole decompressed entry as a binary String.
     pub fn read_entry(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RString, Error> {
-        let mut archive = rb_self.inner.borrow_mut();
+        let mut archive = rb_self.archive(ruby)?;
         let mut entry = archive.by_index(index).map_err(|e| zip_error(ruby, e))?;
         let mut buf = Vec::with_capacity(entry.size().min(u32::MAX as u64) as usize);
         entry.read_to_end(&mut buf).map_err(|e| io_error(ruby, e))?;

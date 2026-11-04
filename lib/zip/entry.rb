@@ -59,6 +59,7 @@ module Zip
       @zipfile            = zipfile
       @archive            = nil
       @index              = nil
+      @original_name      = nil
       @comment            = comment || ''
       @compression_method = compression_method || DEFLATED
       @compression_level  = compression_level || ::Zip.default_compression
@@ -257,8 +258,94 @@ module Zip
 
     # Returns an IO like object for the given ZipEntry.
     # Optional decrypter can be provided for an encrypted entry
+    # Warning: may behave weird with symlinks.
     def get_input_stream(decrypter: nil, &block)
-      open_input_stream(decrypter: decrypter, &block)
+      return open_input_stream(decrypter: decrypter, &block) if @filepath.nil? || ftype == :directory
+
+      # Not yet in an archive: the data is a file on disk.
+      case ftype
+      when :file
+        ::File.open(@filepath, 'rb', &block)
+      when :symlink
+        stringio = ::StringIO.new(::File.readlink(@filepath))
+        yield(stringio) if block
+        stringio
+      else
+        raise "unknown @file_type #{ftype}"
+      end
+    end
+
+    def gather_fileinfo_from_srcpath(src_path) # :nodoc:
+      stat   = file_stat(src_path)
+      @ftype = case stat.ftype
+               when 'file'
+                 if name_is_directory?
+                   raise ArgumentError,
+                         "entry name '#{@name}' indicates a directory entry, but " \
+                         "'#{src_path}' is not a directory"
+                 end
+                 :file
+               when 'directory'
+                 @name += '/' unless name_is_directory?
+                 :directory
+               when 'link'
+                 if name_is_directory?
+                   raise ArgumentError,
+                         "entry name '#{@name}' indicates a directory entry, but " \
+                         "'#{src_path}' is not a directory"
+                 end
+                 :symlink
+               else
+                 raise "unknown file type: #{src_path.inspect} #{stat.inspect}"
+               end
+
+      @filepath = src_path
+      @size = stat.size
+      get_extra_attributes_from_path(@filepath)
+    end
+
+    # Writes this entry (header and data) to an OutputStream. Entries read
+    # from an archive are copied without recompression.
+    def write_to_zip_output_stream(zip_output_stream) # :nodoc:
+      if ftype == :directory
+        zip_output_stream.put_next_entry(self)
+      elsif @filepath
+        zip_output_stream.put_next_entry(self)
+        get_input_stream do |is|
+          ::Zip::IOExtras.copy_stream(zip_output_stream, is)
+        end
+      else
+        new_name = (@name if @name != @original_name)
+        zip_output_stream.copy_raw_entry(self, new_name)
+      end
+    end
+
+    def parent_as_string # :nodoc:
+      entry_name  = name.chomp('/')
+      slash_index = entry_name.rindex('/')
+      slash_index ? entry_name.slice(0, slash_index + 1) : nil
+    end
+
+    def clean_up # :nodoc:
+      @dirty = false # Any changes are written at this point.
+    end
+
+    def file_stat(path) # :nodoc:
+      if @follow_symlinks
+        ::File.stat(path)
+      else
+        ::File.lstat(path)
+      end
+    end
+
+    def get_extra_attributes_from_path(path) # :nodoc:
+      stat = file_stat(path)
+      @time = DOSTime.from_time(stat.mtime)
+      return if ::Zip::RUNNING_ON_WINDOWS
+
+      @unix_uid   = stat.uid
+      @unix_gid   = stat.gid
+      @unix_perms = stat.mode & 0o7777
     end
 
     # Decompressed contents as a binary String.
@@ -400,6 +487,7 @@ module Zip
       @archive = archive
       @index = meta[:index]
       @name = meta[:name].dup.force_encoding(Encoding::UTF_8)
+      @original_name = @name.dup
       @size = meta[:size]
       @compressed_size = meta[:compressed_size]
       @crc = meta[:crc]

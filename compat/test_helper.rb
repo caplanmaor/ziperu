@@ -10,3 +10,12 @@ require 'zip'
 require 'gentestfiles'
 
 Minitest::Test.make_my_diffs_pretty!
+
+# If a `require "zip/..."` for a file this gem lacks falls through to an
+# installed rubyzip gem, the run is measuring the wrong library.
+Minitest.after_run do
+  if Gem.loaded_specs['rubyzip']
+    warn 'COMPAT LEAK: the rubyzip gem was activated during this run'
+    exit!(99)
+  end
+end

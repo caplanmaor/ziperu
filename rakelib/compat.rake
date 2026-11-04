@@ -120,6 +120,11 @@ def run_test_file(file)
   out, status = run_unbundled(cmd, chdir: RUBYZIP_DIR)
   File.write(File.join(RUBYZIP_DIR, "..", "compat-logs", "#{file.tr('/', '_')}.log"), out)
 
+  if out.include?("COMPAT LEAK")
+    return { file: file, load_error: true, exit: 99, failed_tests: [],
+             reason: "rubyzip gem activated (uninstall it: results would be rubyzip's, not ours)" }
+  end
+
   summary = out[/^(\d+) runs, (\d+) assertions, (\d+) failures, (\d+) errors, (\d+) skips/]
   if summary.nil?
     return { file: file, load_error: true, exit: status&.exitstatus, failed_tests: [],

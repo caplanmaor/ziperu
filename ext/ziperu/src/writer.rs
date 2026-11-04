@@ -219,7 +219,7 @@ impl Writer {
         index: usize,
         new_name: Option<String>,
     ) -> Result<(), Error> {
-        let mut source = archive.inner.borrow_mut();
+        let mut source = archive.archive(ruby)?;
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
         rb_self.with_writer(ruby, |w| {
             match new_name {

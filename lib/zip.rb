@@ -35,6 +35,9 @@ require_relative "zip/null_input_stream"
 require_relative "zip/input_stream"
 require_relative "zip/output_stream"
 require_relative "zip/entry"
+require_relative "zip/entry_set"
+require_relative "zip/streamable_stream"
+require_relative "zip/streamable_directory"
 require_relative "zip/file"
 
 # Drop-in replacement for rubyzip, backed by a Rust core.

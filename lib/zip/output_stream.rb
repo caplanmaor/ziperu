@@ -96,7 +96,7 @@ module Zip
       raise Error, 'zip stream is closed' if @closed
 
       new_entry =
-        if entry_name.kind_of?(Entry)
+        if entry_name.kind_of?(Entry) || entry_name.kind_of?(StreamableStream)
           entry_name
         else
           Entry.new(

@@ -39,6 +39,7 @@ module Zip
 
     # Close this InputStream. All further IO will raise an IOError.
     def close
+      @reader&.close
       @reader = nil
       @archive = nil
     end

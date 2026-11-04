@@ -26,6 +26,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("open_entry", method!(archive::Archive::open_entry, 3))?;
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
+    archive.define_method("close", method!(archive::Archive::close, 0))?;
+    archive.define_method("closed?", method!(archive::Archive::is_closed, 0))?;
 
     let reader = native.define_class("EntryReader", ruby.class_object())?;
     reader.define_method("size", method!(reader::EntryReader::size, 0))?;
@@ -33,6 +35,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     reader.define_method("eof?", method!(reader::EntryReader::is_eof, 0))?;
     reader.define_method("read", method!(reader::EntryReader::read, 1))?;
     reader.define_method("rewind", method!(reader::EntryReader::rewind, 0))?;
+    reader.define_method("close", method!(reader::EntryReader::close, 0))?;
 
     let writer = native.define_class("Writer", ruby.class_object())?;
     writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;
