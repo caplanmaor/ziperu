@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Seek, SeekFrom};
 
 use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby};
 use zip::read::ZipFile;
@@ -19,7 +19,7 @@ use crate::source::Source;
 #[magnus::wrap(class = "Zip::Native::Archive", free_immediately)]
 pub struct Archive {
     // Single-threaded under the GVL; RefCell gives us &mut for by_index.
-    inner: RefCell<ZipArchive<Source>>,
+    pub(crate) inner: RefCell<ZipArchive<Source>>,
 }
 
 impl Archive {
@@ -52,10 +52,13 @@ impl Archive {
     /// One Hash per entry, in central-directory order.
     pub fn entries(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let mut archive = rb_self.inner.borrow_mut();
+        let mut raw = archive.clone().into_inner();
         let out = ruby.ary_new_capa(archive.len());
         for i in 0..archive.len() {
             let entry = archive.by_index_raw(i).map_err(|e| zip_error(ruby, e))?;
-            out.push(entry_hash(ruby, i, &entry)?)?;
+            let extra = raw_central_extra(&mut raw, entry.central_header_start())
+                .map_err(|e| io_error(ruby, e))?;
+            out.push(entry_hash(ruby, i, &entry, &extra)?)?;
         }
         Ok(out)
     }
@@ -63,10 +66,13 @@ impl Archive {
     /// The Hash for a single entry.
     pub fn entry_meta(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RHash, Error> {
         let mut archive = rb_self.inner.borrow_mut();
+        let mut raw = archive.clone().into_inner();
         let entry = archive
             .by_index_raw(index)
             .map_err(|e| zip_error(ruby, e))?;
-        entry_hash(ruby, index, &entry)
+        let extra = raw_central_extra(&mut raw, entry.central_header_start())
+            .map_err(|e| io_error(ruby, e))?;
+        entry_hash(ruby, index, &entry, &extra)
     }
 
     /// A chunked reader over entry `index`, with its own cursor. With
@@ -94,7 +100,37 @@ impl Archive {
     }
 }
 
-fn entry_hash(ruby: &Ruby, index: usize, entry: &ZipFile<'_, Source>) -> Result<RHash, Error> {
+/// The extra field bytes of a central directory record, exactly as stored.
+/// The crate re-serializes the fields it parsed, which drops some (an
+/// extended timestamp without the local-only parts, for one); rubyzip hands
+/// out the raw bytes, so we read them ourselves.
+fn raw_central_extra(source: &mut Source, central_offset: u64) -> io::Result<Vec<u8>> {
+    const SIGNATURE: u32 = 0x0201_4b50;
+    const HEADER_LEN: usize = 46;
+
+    source.seek(SeekFrom::Start(central_offset))?;
+    let mut header = [0u8; HEADER_LEN];
+    source.read_exact(&mut header)?;
+    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "central directory signature not found",
+        ));
+    }
+    let name_len = u16::from_le_bytes([header[28], header[29]]) as i64;
+    let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
+    source.seek(SeekFrom::Current(name_len))?;
+    let mut extra = vec![0u8; extra_len];
+    source.read_exact(&mut extra)?;
+    Ok(extra)
+}
+
+fn entry_hash(
+    ruby: &Ruby,
+    index: usize,
+    entry: &ZipFile<'_, Source>,
+    extra: &[u8],
+) -> Result<RHash, Error> {
     let h = ruby.hash_new();
     let set = |key: &str, value: magnus::Value| -> Result<(), Error> {
         h.aset(ruby.to_symbol(key), value)
@@ -131,8 +167,7 @@ fn entry_hash(ruby: &Ruby, index: usize, entry: &ZipFile<'_, Source>) -> Result<
         "comment",
         ruby.str_from_slice(entry.comment().as_bytes()).as_value(),
     )?;
-    let extra = entry.extra_data().unwrap_or_default();
-    set("extra", ruby.str_from_slice(&extra).as_value())?;
+    set("extra", ruby.str_from_slice(extra).as_value())?;
     set("header_offset", ruby.into_value(entry.header_start()))?;
     set("data_offset", ruby.into_value(entry.data_start()))?;
     set(

@@ -2,7 +2,7 @@
 
 rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-04).
 
-**176 of 452 tests pass (38.9%)** across the files that load; 4 test files fail to load (usually a missing class), so the true total is higher.
+**216 of 476 tests pass (45.4%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -12,13 +12,13 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/central_directory_entry_test.rb | 0 | 5 | 2 | 3 | 0 |
 | test/central_directory_test.rb | 0 | 11 | 2 | 8 | 1 |
 | test/constants_test.rb | 1 | 1 | 0 | 0 | 0 |
-| test/crypto/aes_encryption_test.rb | — | load error | | | |
-| test/crypto/null_encryption_test.rb | 0 | 5 | 0 | 5 | 0 |
+| test/crypto/aes_encryption_test.rb | 0 | 13 | 0 | 13 | 0 |
+| test/crypto/null_encryption_test.rb | 0 | 5 | 1 | 4 | 0 |
 | test/crypto/traditional_encryption_test.rb | 0 | 9 | 0 | 9 | 0 |
 | test/decompressor_test.rb | 0 | 1 | 0 | 1 | 0 |
-| test/deflater_test.rb | — | load error | | | |
+| test/deflater_test.rb | 0 | 4 | 1 | 3 | 0 |
 | test/dos_time_test.rb | 2 | 12 | 1 | 9 | 0 |
-| test/encryption_test.rb | 1 | 12 | 1 | 10 | 0 |
+| test/encryption_test.rb | 8 | 12 | 3 | 1 | 0 |
 | test/entry_set_test.rb | 0 | 15 | 0 | 15 | 0 |
 | test/entry_test.rb | 12 | 20 | 5 | 3 | 0 |
 | test/extra_field_test.rb | 9 | 11 | 2 | 0 | 0 |
@@ -40,18 +40,18 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/inflater_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/input_stream_test.rb | 28 | 30 | 2 | 0 | 0 |
 | test/ioextras/abstract_input_stream_test.rb | 31 | 31 | 0 | 0 | 0 |
-| test/ioextras/abstract_output_stream_test.rb | — | load error | | | |
+| test/ioextras/abstract_output_stream_test.rb | 5 | 5 | 0 | 0 | 0 |
 | test/ioextras/fake_io_test.rb | 24 | 24 | 0 | 0 | 0 |
 | test/local_entry_test.rb | 0 | 12 | 1 | 11 | 0 |
-| test/output_stream_test.rb | 0 | 28 | 1 | 27 | 0 |
-| test/pass_thru_compressor_test.rb | — | load error | | | |
+| test/output_stream_test.rb | 27 | 28 | 1 | 0 | 0 |
+| test/pass_thru_compressor_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/pass_thru_decompressor_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/path_traversal_test.rb | 15 | 15 | 0 | 0 | 0 |
 | test/require_test.rb | 3 | 3 | 0 | 0 | 0 |
 | test/samples/example_recursive_test.rb | 0 | 1 | 0 | 1 | 0 |
 | test/settings_test.rb | 3 | 6 | 2 | 1 | 0 |
 | test/stored_support_test.rb | 2 | 2 | 0 | 0 | 0 |
-| test/unicode_file_names_and_comments_test.rb | 0 | 2 | 0 | 2 | 0 |
+| test/unicode_file_names_and_comments_test.rb | 1 | 2 | 0 | 1 | 0 |
 | test/version_test.rb | 1 | 1 | 0 | 0 | 0 |
 | test/zip64_full_test.rb | 0 | 1 | 0 | 0 | 1 |
 | test/zip64_support_test.rb | 1 | 1 | 0 | 0 | 0 |
@@ -85,12 +85,27 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `ZipCentralDirectoryTest#test_warn_file_with_too_high_number_of_entries_declared:`
 - `ZipCentralDirectoryTest#test_write_to_stream:`
 
+**test/crypto/aes_encryption_test.rb**
+- `AESDecrypterTest#test_decrypt_aes128:`
+- `AESDecrypterTest#test_decrypt_aes256:`
+- `AESDecrypterTest#test_gp_flags:`
+- `AESDecrypterTest#test_header_bytesize:`
+- `AESDecrypterTest#test_reset!:`
+- `AESEncrypterTest#test_data_descriptor_and_crc_are_suppressed:`
+- `AESEncrypterTest#test_decrypt_with_wrong_password_raises:`
+- `AESEncrypterTest#test_encrypt_decrypt_round_trip:`
+- `AESEncrypterTest#test_encrypt_decrypt_round_trip_in_chunks:`
+- `AESEncrypterTest#test_gp_flags:`
+- `AESEncrypterTest#test_header_bytesize:`
+- `AESEncrypterTest#test_reset_generates_a_fresh_salt_each_time:`
+- `AESEncrypterTest#test_tampered_ciphertext_fails_integrity_check:`
+
 **test/crypto/null_encryption_test.rb**
 - `NullEncrypterTest#test_encrypt:`
 - `NullEncrypterTest#test_gp_flags:`
 - `NullEncrypterTest#test_header:`
 - `NullEncrypterTest#test_header_bytesize:`
-- `NullEncrypterTest#test_reset!:`
+- `NullEncrypterTest#test_reset!`
 
 **test/crypto/traditional_encryption_test.rb**
 - `TraditionalDecrypterTest#test_decrypt:`
@@ -106,6 +121,12 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 **test/decompressor_test.rb**
 - `DecompressorTest#test_decompressor_registration:`
 
+**test/deflater_test.rb**
+- `DeflaterTest#test_data_error`
+- `DeflaterTest#test_default_compression:`
+- `DeflaterTest#test_deflate_strategy:`
+- `DeflaterTest#test_output_operator:`
+
 **test/dos_time_test.rb**
 - `DOSTimeTest#test_at:`
 - `DOSTimeTest#test_binary_dos_fields_are_clamped_to_the_representable_range`
@@ -119,15 +140,8 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `DOSTimeTest#test_utc:`
 
 **test/encryption_test.rb**
-- `EncryptionTest#test_aes_128_decrypt:`
-- `EncryptionTest#test_aes_256_decrypt:`
-- `EncryptionTest#test_aes_256_entry_decrypt:`
-- `EncryptionTest#test_aes_decrypt_keka:`
-- `EncryptionTest#test_aes_encrypt:`
-- `EncryptionTest#test_aes_encrypt_stored:`
-- `EncryptionTest#test_aes_encrypt_via_entry:`
-- `EncryptionTest#test_aes_encrypt_with_directory:`
-- `EncryptionTest#test_aes_encrypt_wrong_password:`
+- `EncryptionTest#test_aes_encrypt`
+- `EncryptionTest#test_aes_encrypt_wrong_password`
 - `EncryptionTest#test_decrypt_with_wrong_password`
 - `EncryptionTest#test_encrypt:`
 
@@ -347,34 +361,11 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `ZipLocalEntryTest#test_write_entry_with_zip64:`
 
 **test/output_stream_test.rb**
-- `ZipOutputStreamTest#test_cannot_open_file:`
-- `ZipOutputStreamTest#test_chained_put_into_next_entry:`
-- `ZipOutputStreamTest#test_new:`
-- `ZipOutputStreamTest#test_only_zip64_not_ut_suppressed_with_large_size:`
-- `ZipOutputStreamTest#test_only_zip64_not_ut_suppressed_with_large_size_file:`
-- `ZipOutputStreamTest#test_only_zip64_suppressed:`
-- `ZipOutputStreamTest#test_only_zip64_suppressed_file:`
-- `ZipOutputStreamTest#test_open:`
-- `ZipOutputStreamTest#test_open_without_block_forwards_options:`
-- `ZipOutputStreamTest#test_print_deflated:`
-- `ZipOutputStreamTest#test_printf_deflated:`
-- `ZipOutputStreamTest#test_put_next_entry:`
-- `ZipOutputStreamTest#test_put_next_entry_using_zip_entry_creates_entries_with_correct_timestamps:`
-- `ZipOutputStreamTest#test_ut_but_not_zip64_suppressed_with_large_size:`
-- `ZipOutputStreamTest#test_ut_but_not_zip64_suppressed_with_large_size_file:`
-- `ZipOutputStreamTest#test_write_buffer:`
-- `ZipOutputStreamTest#test_write_buffer_binmode:`
-- `ZipOutputStreamTest#test_write_buffer_with_default_io:`
-- `ZipOutputStreamTest#test_write_buffer_with_temp_file2:`
-- `ZipOutputStreamTest#test_write_buffer_with_temp_file:`
-- `ZipOutputStreamTest#test_write_deflated:`
-- `ZipOutputStreamTest#test_writing_to_closed_stream`
-- `ZipOutputStreamTest#test_zip64_and_ut_suppressed:`
-- `ZipOutputStreamTest#test_zip64_and_ut_suppressed_file:`
-- `ZipOutputStreamTest#test_zip64_default_usage:`
-- `ZipOutputStreamTest#test_zip64_default_usage_file:`
-- `ZipOutputStreamTest#test_zip64_off_by_default:`
-- `ZipOutputStreamTest#test_zip64_off_by_default_file:`
+- `ZipOutputStreamTest#test_put_next_entry_using_zip_entry_creates_entries_with_correct_timestamps`
+
+**test/pass_thru_compressor_test.rb**
+- `PassThruCompressorTest#test_crc:`
+- `PassThruCompressorTest#test_size:`
 
 **test/pass_thru_decompressor_test.rb**
 - `PassThruDecompressorTest#test_read_everything:`
@@ -390,5 +381,4 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 
 **test/unicode_file_names_and_comments_test.rb**
 - `ZipUnicodeFileNamesAndComments#test_unicode_comment:`
-- `ZipUnicodeFileNamesAndComments#test_unicode_file_name:`
 

@@ -8,6 +8,7 @@ mod archive;
 mod errors;
 mod reader;
 mod source;
+mod writer;
 
 use magnus::{function, method, prelude::*, Error, Ruby};
 
@@ -32,6 +33,17 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     reader.define_method("eof?", method!(reader::EntryReader::is_eof, 0))?;
     reader.define_method("read", method!(reader::EntryReader::read, 1))?;
     reader.define_method("rewind", method!(reader::EntryReader::rewind, 0))?;
+
+    let writer = native.define_class("Writer", ruby.class_object())?;
+    writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;
+    writer.define_singleton_method("open_memory", function!(writer::Writer::open_memory, 0))?;
+    writer.define_method("start_entry", method!(writer::Writer::start_entry, 2))?;
+    writer.define_method("add_directory", method!(writer::Writer::add_directory, 2))?;
+    writer.define_method("write", method!(writer::Writer::write, 1))?;
+    writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 3))?;
+    writer.define_method("comment=", method!(writer::Writer::set_comment, 1))?;
+    writer.define_method("finish", method!(writer::Writer::finish, 0))?;
+    writer.define_method("closed?", method!(writer::Writer::is_closed, 0))?;
 
     Ok(())
 }

@@ -5,6 +5,7 @@ require 'English'
 
 require_relative 'ioextras/fake_io'
 require_relative 'ioextras/abstract_input_stream'
+require_relative 'ioextras/abstract_output_stream'
 
 module Zip
   # IO-like conveniences shared by the stream classes. Ported from rubyzip so

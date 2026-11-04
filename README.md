@@ -15,8 +15,10 @@ end
 ```
 
 **Status: early.** Read-only `Zip::File`, `Zip::InputStream`,
-`get_input_stream` (with ZipCrypto/AES passwords), `extract` and
-`extract_all` work; writing and `commit` are in progress. Tracks the rubyzip 3.x API
+`get_input_stream` (with ZipCrypto/AES passwords), `extract`,
+`extract_all` and `Zip::OutputStream` (including `write_buffer`, AES
+encryption and raw entry copies) work; `Zip::File` mutation and `commit`
+are in progress. Tracks the rubyzip 3.x API
 (`Zip::RUBYZIP_COMPAT_VERSION`).
 
 ### Deliberate differences from rubyzip
@@ -30,6 +32,9 @@ end
   (rubyzip only checks this in `extract`, not in `InputStream`.)
   `Zip.validate_entry_sizes = false` restores rubyzip's behaviour of
   extracting the full data with a warning.
+- Writing ZipCrypto ("traditional") encryption is not supported: the Rust
+  crate deliberately keeps that broken cipher read-only. `AESEncrypter`
+  works; `TraditionalEncrypter` raises `Zip::Error` on the first entry.
 - Extraction never creates symlinks (same as rubyzip 3.x) and refuses paths
   that resolve outside the destination directory, checking the resolved
   absolute path with a trailing separator, the fix for CVE-2026-85396.

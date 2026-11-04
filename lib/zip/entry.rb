@@ -34,6 +34,9 @@ module Zip
     # entry that is not (yet) in an archive.
     attr_reader :index # :nodoc:
 
+    # The native archive the entry was read from, or nil.
+    attr_reader :archive # :nodoc:
+
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,
                :unix_gid=, :unix_perms=, :unix_uid=

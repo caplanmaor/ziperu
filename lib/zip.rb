@@ -33,6 +33,7 @@ require_relative "zip/extra_field"
 require_relative "zip/crypto"
 require_relative "zip/null_input_stream"
 require_relative "zip/input_stream"
+require_relative "zip/output_stream"
 require_relative "zip/entry"
 require_relative "zip/file"
 

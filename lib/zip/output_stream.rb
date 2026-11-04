@@ -1,0 +1,174 @@
+# frozen_string_literal: true
+
+module Zip
+  # Writes zip archives entry by entry, with rubyzip's `Zip::OutputStream`
+  # API: `put_next_entry` opens an entry, then the IO-like methods (`<<`,
+  # `write`, `puts`, `print`) fill it.
+  #
+  #   Zip::OutputStream.open("my.zip") do |io|
+  #     io.put_next_entry("first_entry.txt")
+  #     io.write "Hello world!"
+  #   end
+  #
+  # `write_buffer` writes to an IO (a StringIO by default) instead of a file.
+  class OutputStream
+    include ::Zip::IOExtras::AbstractOutputStream
+
+    attr_accessor :comment
+
+    # Opens the indicated zip file. If a file with that name already exists
+    # it will be overwritten. With `stream: true`, `file_name` is an IO
+    # object that receives the archive bytes on `close_buffer`.
+    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false, **opts)
+      super(**opts)
+      @file_name = file_name
+      @io = nil
+      if stream
+        @io = file_name
+        @io.binmode if @io.respond_to?(:binmode)
+        @writer = Native::Writer.open_memory
+      else
+        @writer = Native::Writer.open_path(file_name.to_s)
+      end
+      @encrypter = encrypter || ::Zip::NullEncrypter.new
+      @suppress_extra_fields = suppress_extra_fields
+      @comment = ''
+      @closed = false
+      @current_entry = nil
+    end
+
+    class << self
+      # Same as #initialize but if a block is passed the opened stream is
+      # passed to the block and closed when the block returns.
+      def open(file_name, encrypter: nil, suppress_extra_fields: false, **opts)
+        unless block_given?
+          return new(file_name, encrypter: encrypter,
+                                suppress_extra_fields: suppress_extra_fields, **opts)
+        end
+
+        zos = new(file_name, stream: false, encrypter: encrypter,
+                             suppress_extra_fields: suppress_extra_fields, **opts)
+        yield zos
+      ensure
+        zos.close if zos
+      end
+
+      # Same as #open but writes to an IO instead; returns the IO.
+      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false, **opts)
+        zos = new(io, stream: true, encrypter: encrypter,
+                      suppress_extra_fields: suppress_extra_fields, **opts)
+        yield zos
+        zos.close_buffer
+      end
+    end
+
+    # Closes the stream and writes the central directory to the zip file.
+    def close
+      return if @closed
+
+      finish_archive
+      @closed = true
+      nil
+    end
+
+    # Closes the stream and writes the archive to the IO given to
+    # `write_buffer`; returns that IO.
+    def close_buffer
+      return @io if @closed
+
+      bytes = finish_archive
+      if @io
+        # Like rubyzip, the archive is written from the start of the IO.
+        @io.rewind if @io.respond_to?(:rewind)
+        @io.write(bytes)
+        @io.flush if @io.respond_to?(:flush)
+      end
+      @closed = true
+      @io
+    end
+
+    # Closes the current entry and opens a new one for writing. `entry_name`
+    # can be a Zip::Entry or a string.
+    def put_next_entry(
+      entry_name, comment = '', extra = ExtraField.new,
+      compression_method = Entry::DEFLATED, level = Zip.default_compression
+    )
+      raise Error, 'zip stream is closed' if @closed
+
+      new_entry =
+        if entry_name.kind_of?(Entry)
+          entry_name
+        else
+          Entry.new(
+            @file_name, entry_name.to_s, comment: comment, extra: extra,
+            compression_method: compression_method, compression_level: level
+          )
+        end
+
+      init_next_entry(new_entry)
+      @current_entry = new_entry
+    end
+
+    # Copies an entry from another archive without recompressing it.
+    def copy_raw_entry(entry, new_name = nil) # :nodoc:
+      raise Error, 'zip stream is closed' if @closed
+      raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
+      raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
+
+      @writer.raw_copy(entry.archive, entry.index, new_name)
+      @current_entry = nil
+    end
+
+    # Modeled after IO.<<
+    def <<(data)
+      raise IOError, 'closed stream' if @closed || @current_entry.nil?
+
+      @writer.write(data.to_s.b)
+      self
+    end
+
+    private
+
+    def finish_archive
+      @writer.comment = @comment.to_s.b
+      @current_entry = nil
+      @writer.finish
+    end
+
+    def init_next_entry(entry)
+      unless [Entry::STORED, Entry::DEFLATED].include?(entry.compression_method)
+        raise ::Zip::CompressionMethodError, entry.compression_method
+      end
+
+      opts = native_entry_options(entry)
+      if entry.directory?
+        @writer.add_directory(entry.name, opts)
+      else
+        opts.merge!(@encrypter.native_options)
+        @writer.start_entry(entry.name.b, opts)
+      end
+    end
+
+    # Translate a Zip::Entry into the Hash the native writer takes.
+    def native_entry_options(entry)
+      suppress = @suppress_extra_fields
+      zip64_suppressed = suppress == true || [*suppress].include?(:zip64)
+      extra = entry.extra.dup
+      extra.suppress_fields!(suppress) if suppress
+      extra.delete(:zip64) # the native writer emits its own
+
+      level = entry.compression_level
+      time = entry.time
+      {
+        method: entry.compression_method,
+        level: (level if level && level != Zlib::DEFAULT_COMPRESSION),
+        dos_date: time.to_binary_dos_date,
+        dos_time: time.to_binary_dos_time,
+        unix_perms: entry.unix_perms,
+        large_file: (Zip.write_zip64_support && !zip64_suppressed) || entry.size >= 0xFFFFFFFF,
+        comment: entry.comment.to_s,
+        extra: extra.to_local_bin.b
+      }
+    end
+  end
+end
