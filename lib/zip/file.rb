@@ -37,9 +37,9 @@ module Zip
 
     def initialize(path, archive: nil)
       @name = path
-      @native = archive || Native::Archive.open_path(path.to_s)
+      @native = archive || InputStream.open_archive(path.to_s)
       @comment = @native.comment.force_encoding(Encoding::UTF_8)
-      @entries = @native.entries.map { |meta| Entry.new(@native, meta) }
+      @entries = @native.entries.map { |meta| Entry.from_meta(@native, meta, self) }
     end
 
     def entries

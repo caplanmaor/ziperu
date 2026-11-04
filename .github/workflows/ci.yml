@@ -28,6 +28,26 @@ jobs:
         env:
           GC_STRESS: "true"
 
+  # rubyzip's own suite against this gem; informational until it passes.
+  compat:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - run: bundle exec rake compile
+      - run: bundle exec rake compat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compat-report
+          path: |
+            COMPAT.md
+            tmp/compat-logs/
+
   clippy:
     runs-on: ubuntu-latest
     steps:

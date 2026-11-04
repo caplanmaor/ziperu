@@ -27,6 +27,7 @@ module Zip
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
     def initialize(context, offset: 0, decrypter: nil, **opts)
       super(**opts)
+      @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       @archive = context.kind_of?(Native::Archive) ? context : self.class.open_archive(context)
       @decrypter = decrypter
       @next_index = offset.zero? ? 0 : index_at_offset(offset)
@@ -45,10 +46,26 @@ module Zip
     # the entry data. Returns nil when there are no more entries.
     def get_next_entry
       raise IOError, 'closed stream' if @archive.nil?
+      # Like rubyzip, we don't read split archives; it raises on the first
+      # local header, so raise here rather than at open.
+      raise SplitArchiveError if @split
       return @current_entry = nil if @next_index >= @archive.entry_count
 
-      @current_entry = Entry.new(@archive, @archive.entry_meta(@next_index))
+      @current_entry = Entry.from_meta(@archive, @archive.entry_meta(@next_index))
       @next_index += 1
+      open_entry
+      @current_entry
+    end
+
+    # Position the stream at an entry that already exists as an object
+    # (used by Entry#get_input_stream to avoid rebuilding it).
+    #
+    # @api private
+    def get_next_stream_entry(entry)
+      raise IOError, 'closed stream' if @archive.nil?
+
+      @current_entry = entry
+      @next_index = entry.index + 1
       open_entry
       @current_entry
     end
@@ -110,13 +127,28 @@ module Zip
           Native::Archive.open_path(context.to_s)
         end
       end
+
+      # The first part of a multi-part archive starts with a split-file
+      # signature.
+      #
+      # @api private
+      def split_archive?(context)
+        head =
+          if context.respond_to?(:read)
+            context.seek(0, ::IO::SEEK_SET) if context.respond_to?(:seek)
+            context.read(4)
+          elsif ::File.file?(context.to_s)
+            ::File.binread(context.to_s, 4)
+          end
+        !head.nil? && head.bytesize == 4 && head.unpack1('V') == SPLIT_FILE_SIGNATURE
+      end
     end
 
     protected
 
     def open_entry # :nodoc:
       entry = @current_entry
-      unless COMPRESSION_METHODS.key?(entry.compression_method)
+      unless READABLE_COMPRESSION_METHODS.include?(entry.compression_method)
         raise CompressionMethodError, entry.compression_method
       end
 

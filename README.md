@@ -63,6 +63,14 @@ then in each shell:
 bundle exec rake compile test
 ```
 
+### rubyzip compatibility
+
+`rake compat` downloads rubyzip's source into `tmp/`, generates its fixtures
+with the real rubyzip, then runs rubyzip's own test suite with
+`require "zip"` resolving to this gem. The per-file scorecard is written to
+[COMPAT.md](COMPAT.md); per-file logs land in `tmp/compat-logs/`. Use
+`ONLY=input_stream rake compat` to run a subset.
+
 ## Layout
 
 - `ext/ziperu/` — the Rust extension (`Zip::Native::*`): a few primitive,

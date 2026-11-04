@@ -108,6 +108,16 @@ fn entry_hash(ruby: &Ruby, index: usize, entry: &ZipFile<'_, Source>) -> Result<
     set("directory", ruby.into_value(entry.is_dir()))?;
     set("encrypted", ruby.into_value(entry.encrypted()))?;
     set("unix_mode", ruby.into_value(entry.unix_mode()))?;
+    set("flags", ruby.into_value(entry.flags().as_u16()))?;
+    set(
+        "external_attributes",
+        ruby.into_value(entry.external_attributes()),
+    )?;
+    // "Version made by": high byte is the host system, low byte the spec
+    // version; rubyzip keeps them as fstype / version.
+    set("fstype", ruby.into_value(u8::from(entry.system())))?;
+    let (major, minor) = entry.version_made_by();
+    set("version_made_by", ruby.into_value(major * 10 + minor))?;
     let (date, time) = entry
         .last_modified()
         .map(|dt| (dt.datepart(), dt.timepart()))
