@@ -220,25 +220,42 @@ module Zip
       to_s <=> other.to_s
     end
 
+    # Extracts this entry to a file at `entry_path`, with
+    # `destination_directory` as the base location in the filesystem.
+    #
+    # NB: The caller is responsible for making sure `destination_directory` is
+    # safe, if it is passed.
+    #
+    # `create_parent_directories`, if true, creates any missing intermediate
+    # directories for a file entry before writing it. This defaults to
+    # false: a missing intermediate directory usually means an earlier
+    # entry (e.g. a symlink) was deliberately skipped as unsafe, and letting
+    # a later entry silently succeed by re-creating that path as a plain
+    # directory would mask that. `File#extract_all` opts into it.
+    def extract(entry_path = @name, destination_directory: '.',
+                create_parent_directories: false, &block)
+      dest_dir = ::File.absolute_path(destination_directory || '.')
+      extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
+
+      unless extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
+        warn "WARNING: skipped extracting '#{@name}' to '#{extract_path}' as unsafe."
+        return self
+      end
+
+      block ||= proc { ::Zip.on_exists_proc }
+
+      raise "unknown file type #{inspect}" unless directory? || file? || symlink?
+
+      ::FileUtils.mkdir_p(::File.dirname(extract_path)) if create_parent_directories && file?
+
+      __send__(:"create_#{ftype}", extract_path, &block)
+      self
+    end
+
     # Returns an IO like object for the given ZipEntry.
     # Optional decrypter can be provided for an encrypted entry
     def get_input_stream(decrypter: nil, &block)
-      if ftype == :directory
-        yield ::Zip::NullInputStream if block
-        return ::Zip::NullInputStream
-      end
-
-      raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
-
-      zis = ::Zip::InputStream.new(@archive, offset: @local_header_offset, decrypter: decrypter)
-      zis.get_next_stream_entry(self)
-      return zis unless block
-
-      begin
-        yield zis
-      ensure
-        zis.close
-      end
+      open_input_stream(decrypter: decrypter, &block)
     end
 
     # Decompressed contents as a binary String.
@@ -256,6 +273,91 @@ module Zip
     end
 
     private
+
+    # Like get_input_stream, with `enforce_size: false` reading past a
+    # declared size that is too small (what rubyzip does when
+    # Zip.validate_entry_sizes is off) instead of stopping at it.
+    def open_input_stream(decrypter: nil, enforce_size: true)
+      if ftype == :directory
+        yield ::Zip::NullInputStream if block_given?
+        return ::Zip::NullInputStream
+      end
+
+      raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
+
+      zis = ::Zip::InputStream.new(@archive, offset: @local_header_offset, decrypter: decrypter,
+                                             enforce_size: enforce_size)
+      zis.get_next_stream_entry(self)
+      return zis unless block_given?
+
+      begin
+        yield zis
+      ensure
+        zis.close
+      end
+    end
+
+    def create_file(dest_path, _continue_on_exists_proc = proc { Zip.continue_on_exists_proc })
+      if ::File.exist?(dest_path) && !yield(self, dest_path)
+        raise DestinationExistsError, dest_path
+      end
+
+      ::File.open(dest_path, 'wb') do |os|
+        open_input_stream(enforce_size: Zip.validate_entry_sizes) do |is|
+          bytes_written = 0
+          while (buf = is.sysread(IOExtras::CHUNK_SIZE))
+            os << buf
+            bytes_written += buf.bytesize
+          end
+          # With enforcement on, the native reader has already raised
+          # EntrySizeError; without it, warn as rubyzip does.
+          warn "WARNING: #{EntrySizeError.new(self).message}" if bytes_written > size
+        end
+      end
+
+      set_extra_attributes_on_path(dest_path)
+    end
+
+    def create_directory(dest_path)
+      return if ::File.directory?(dest_path)
+
+      if ::File.exist?(dest_path)
+        raise ::Zip::DestinationExistsError, dest_path unless block_given? && yield(self, dest_path)
+
+        ::FileUtils.rm_f dest_path
+      end
+
+      ::FileUtils.mkdir_p(dest_path)
+      set_extra_attributes_on_path(dest_path)
+    end
+
+    # Symlinks are never created on extraction: a link pointing outside the
+    # destination would let a later entry write through it.
+    def create_symlink(dest_path)
+      warn "WARNING: skipped symlink '#{dest_path}'."
+    end
+
+    def set_unix_attributes_on_path(dest_path) # :nodoc:
+      # Ignore setuid/setgid bits by default. Honour if @restore_ownership.
+      unix_perms_mask = (@restore_ownership ? 0o7777 : 0o1777)
+      if @restore_permissions && @unix_perms
+        ::FileUtils.chmod(@unix_perms & unix_perms_mask, dest_path)
+      end
+      return unless @restore_ownership && @unix_uid && @unix_gid && ::Process.egid == 0
+
+      ::FileUtils.chown(@unix_uid, @unix_gid, dest_path)
+    end
+
+    def set_extra_attributes_on_path(dest_path) # :nodoc:
+      return unless file? || directory?
+
+      set_unix_attributes_on_path(dest_path) if @fstype == ::Zip::FSTYPE_UNIX
+
+      # Restore the timestamp on a file. This will either have come from the
+      # original source file that was copied into the archive, or from the
+      # creation date of the archive if there was no original source file.
+      ::FileUtils.touch(dest_path, mtime: time) if @restore_times
+    end
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0

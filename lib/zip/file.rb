@@ -35,6 +35,14 @@ module Zip
       open(path) { |zf| zf.each(&block) }
     end
 
+    # Extracts every entry of the archive at `zip_file_name` into
+    # `destination_directory`.
+    def self.extract_all(zip_file_name, destination_directory = '.', &block)
+      open(zip_file_name) do |zf|
+        zf.extract_all(destination_directory, &block)
+      end
+    end
+
     def initialize(path, archive: nil)
       @name = path
       @native = archive || InputStream.open_archive(path.to_s)
@@ -80,6 +88,37 @@ module Zip
     def get_input_stream(entry, &block)
       entry = get_entry(entry) unless entry.is_a?(Entry)
       entry.get_input_stream(&block)
+    end
+
+    # Extracts `entry` to a file at `entry_path`, with
+    # `destination_directory` as the base. The block (or Zip.on_exists_proc)
+    # decides whether an existing file is overwritten.
+    def extract(entry, entry_path = nil, destination_directory: '.', &block)
+      block ||= proc { ::Zip.on_exists_proc }
+      found_entry = get_entry(entry)
+      entry_path ||= found_entry.name
+      found_entry.extract(entry_path, destination_directory: destination_directory, &block)
+    end
+
+    # Extracts every entry in the archive into `destination_directory`,
+    # preserving the archive's directory structure. Symlink entries are
+    # skipped with a warning; see `Entry#extract` for the path-safety checks
+    # applied to every other entry.
+    def extract_all(destination_directory = '.', &block)
+      # Directories first, so files have somewhere to go.
+      dirs, others = entries.partition(&:directory?)
+
+      (dirs + others).each do |entry|
+        if entry.symlink?
+          warn "WARNING: skipped symlink '#{entry.name}' during extract_all."
+          next
+        end
+
+        entry.extract(entry.name, destination_directory:     destination_directory,
+                                  create_parent_directories: true, &block)
+      end
+
+      self
     end
 
     def close

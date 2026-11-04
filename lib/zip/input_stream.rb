@@ -25,11 +25,12 @@ module Zip
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, **opts)
+    def initialize(context, offset: 0, decrypter: nil, enforce_size: true, **opts)
       super(**opts)
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       @archive = context.kind_of?(Native::Archive) ? context : self.class.open_archive(context)
       @decrypter = decrypter
+      @enforce_size = enforce_size
       @next_index = offset.zero? ? 0 : index_at_offset(offset)
       @reader = nil
       @current_entry = nil
@@ -157,7 +158,7 @@ module Zip
       end
 
       password = @decrypter&.password&.b
-      @reader = wrap_errors { @archive.open_entry(entry.index, password) }
+      @reader = wrap_errors { @archive.open_entry(entry.index, password, @enforce_size) }
       flush
     end
 

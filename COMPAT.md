@@ -2,7 +2,7 @@
 
 rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-04).
 
-**149 of 452 tests pass (33.0%)** across the files that load; 4 test files fail to load (usually a missing class), so the true total is higher.
+**176 of 452 tests pass (38.9%)** across the files that load; 4 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -26,9 +26,9 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/extra_field_ut_test.rb | 6 | 6 | 0 | 0 | 0 |
 | test/file_add_recursive_test.rb | 0 | 9 | 0 | 8 | 1 |
 | test/file_extract_all_test.rb | 0 | 6 | 0 | 6 | 0 |
-| test/file_extract_directory_test.rb | 0 | 4 | 1 | 3 | 0 |
-| test/file_extract_test.rb | 0 | 7 | 3 | 4 | 0 |
-| test/file_options_test.rb | 0 | 7 | 0 | 7 | 0 |
+| test/file_extract_directory_test.rb | 4 | 4 | 0 | 0 | 0 |
+| test/file_extract_test.rb | 5 | 7 | 0 | 2 | 0 |
+| test/file_options_test.rb | 1 | 7 | 0 | 6 | 0 |
 | test/file_permissions_test.rb | 0 | 4 | 0 | 4 | 0 |
 | test/file_split_test.rb | 0 | 3 | 1 | 2 | 0 |
 | test/file_test.rb | 11 | 53 | 8 | 33 | 1 |
@@ -46,10 +46,10 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/output_stream_test.rb | 0 | 28 | 1 | 27 | 0 |
 | test/pass_thru_compressor_test.rb | — | load error | | | |
 | test/pass_thru_decompressor_test.rb | 0 | 2 | 0 | 2 | 0 |
-| test/path_traversal_test.rb | 0 | 15 | 0 | 15 | 0 |
+| test/path_traversal_test.rb | 15 | 15 | 0 | 0 | 0 |
 | test/require_test.rb | 3 | 3 | 0 | 0 | 0 |
 | test/samples/example_recursive_test.rb | 0 | 1 | 0 | 1 | 0 |
-| test/settings_test.rb | 1 | 6 | 3 | 2 | 0 |
+| test/settings_test.rb | 3 | 6 | 2 | 1 | 0 |
 | test/stored_support_test.rb | 2 | 2 | 0 | 0 | 0 |
 | test/unicode_file_names_and_comments_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/version_test.rb | 1 | 1 | 0 | 0 | 0 |
@@ -180,23 +180,11 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `ZipFileExtractAllTest#test_extract_all_round_trips_a_tree:`
 - `ZipFileExtractAllTest#test_extract_all_skips_symlinks:`
 
-**test/file_extract_directory_test.rb**
-- `ZipFileExtractDirectoryTest#test_extract_directory:`
-- `ZipFileExtractDirectoryTest#test_extract_directory_exists_as_dir:`
-- `ZipFileExtractDirectoryTest#test_extract_directory_exists_as_file`
-- `ZipFileExtractDirectoryTest#test_extract_directory_exists_as_file_overwrite:`
-
 **test/file_extract_test.rb**
-- `ZipFileExtractTest#test_extract:`
-- `ZipFileExtractTest#test_extract_another_non_entry`
-- `ZipFileExtractTest#test_extract_exists`
-- `ZipFileExtractTest#test_extract_exists_overwrite:`
 - `ZipFileExtractTest#test_extract_incorrect_size:`
 - `ZipFileExtractTest#test_extract_incorrect_size_zip64:`
-- `ZipFileExtractTest#test_extract_non_entry`
 
 **test/file_options_test.rb**
-- `FileOptionsTest#test_get_find_consistency:`
 - `FileOptionsTest#test_restore_permissions_as_default:`
 - `FileOptionsTest#test_restore_permissions_false:`
 - `FileOptionsTest#test_restore_permissions_true:`
@@ -392,31 +380,12 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `PassThruDecompressorTest#test_read_everything:`
 - `PassThruDecompressorTest#test_read_in_chunks:`
 
-**test/path_traversal_test.rb**
-- `PathTraversalTest#test_directory_symlink:`
-- `PathTraversalTest#test_entry_name_with_absolute_path_does_not_extract_by_accident:`
-- `PathTraversalTest#test_entry_name_with_absolute_path_extract_when_given_different_path:`
-- `PathTraversalTest#test_entry_name_with_absolute_path_extracts_to_cwd_by_default:`
-- `PathTraversalTest#test_entry_name_with_relative_symlink:`
-- `PathTraversalTest#test_entry_name_with_tilde:`
-- `PathTraversalTest#test_file_symlink:`
-- `PathTraversalTest#test_leading_dot_dot:`
-- `PathTraversalTest#test_leading_slash:`
-- `PathTraversalTest#test_multiple_leading_slashes:`
-- `PathTraversalTest#test_non_leading_dot_dot_with_existing_folder:`
-- `PathTraversalTest#test_non_leading_dot_dot_without_existing_folder:`
-- `PathTraversalTest#test_prevent_breakout_of_declared_destination_directory:`
-- `PathTraversalTest#test_two_directory_symlinks_a:`
-- `PathTraversalTest#test_two_directory_symlinks_b:`
-
 **test/samples/example_recursive_test.rb**
 - `ExampleRecursiveTest#test_write:`
 
 **test/settings_test.rb**
 - `ZipSettingsTest#test_false_continue_on_exists_proc`
-- `ZipSettingsTest#test_false_on_exists_proc`
 - `ZipSettingsTest#test_true_continue_on_exists_proc:`
-- `ZipSettingsTest#test_true_on_exists_proc:`
 - `ZipSettingsTest#test_true_warn_invalid_date`
 
 **test/unicode_file_names_and_comments_test.rb**

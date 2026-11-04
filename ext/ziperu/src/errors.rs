@@ -60,6 +60,14 @@ pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
     match err.kind() {
         io::ErrorKind::NotFound => Error::new(ruby.get_inner(&ENOENT), err.to_string()),
         io::ErrorKind::PermissionDenied => Error::new(ruby.get_inner(&EACCES), err.to_string()),
+        // The crate's size check reports as plain InvalidData (crc32.rs).
+        io::ErrorKind::InvalidData
+            if err
+                .to_string()
+                .contains("larger than its declared uncompressed size") =>
+        {
+            size_limit_error(ruby)
+        }
         io::ErrorKind::InvalidData => decompression_error(ruby, &err.to_string()),
         _ => Error::new(ruby.exception_io_error(), err.to_string()),
     }

@@ -14,9 +14,9 @@ Zip::File.open("archive.zip") do |zf|
 end
 ```
 
-**Status: early.** Read-only `Zip::File`, `Zip::InputStream` and
-`get_input_stream` (with ZipCrypto/AES passwords) work; extraction, writing
-and `commit` are in progress. Tracks the rubyzip 3.x API
+**Status: early.** Read-only `Zip::File`, `Zip::InputStream`,
+`get_input_stream` (with ZipCrypto/AES passwords), `extract` and
+`extract_all` work; writing and `commit` are in progress. Tracks the rubyzip 3.x API
 (`Zip::RUBYZIP_COMPAT_VERSION`).
 
 ### Deliberate differences from rubyzip
@@ -27,6 +27,12 @@ and `commit` are in progress. Tracks the rubyzip 3.x API
   raising `Zip::StreamingError`.
 - Every read path stops at the entry's declared size, so a header that lies
   can't inflate into a zip bomb; a `Zip::EntrySizeError` is raised instead.
+  (rubyzip only checks this in `extract`, not in `InputStream`.)
+  `Zip.validate_entry_sizes = false` restores rubyzip's behaviour of
+  extracting the full data with a warning.
+- Extraction never creates symlinks (same as rubyzip 3.x) and refuses paths
+  that resolve outside the destination directory, checking the resolved
+  absolute path with a trailing separator, the fix for CVE-2026-85396.
 
 ## Why
 

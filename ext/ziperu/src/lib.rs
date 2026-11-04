@@ -23,7 +23,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("entries", method!(archive::Archive::entries, 0))?;
     archive.define_method("entry_meta", method!(archive::Archive::entry_meta, 1))?;
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
-    archive.define_method("open_entry", method!(archive::Archive::open_entry, 2))?;
+    archive.define_method("open_entry", method!(archive::Archive::open_entry, 3))?;
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
 
     let reader = native.define_class("EntryReader", ruby.class_object())?;

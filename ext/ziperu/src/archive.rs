@@ -69,16 +69,19 @@ impl Archive {
         entry_hash(ruby, index, &entry)
     }
 
-    /// A chunked reader over entry `index`, with its own cursor.
+    /// A chunked reader over entry `index`, with its own cursor. With
+    /// `enforce_size` false it reads past the declared size to the true end
+    /// of the data.
     pub fn open_entry(
         ruby: &Ruby,
         rb_self: &Self,
         index: usize,
         password: Option<RString>,
+        enforce_size: bool,
     ) -> Result<EntryReader, Error> {
         let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
         let archive = rb_self.inner.borrow().clone();
-        EntryReader::open(ruby, archive, index, password)
+        EntryReader::open(ruby, archive, index, password, enforce_size)
     }
 
     /// Whole decompressed entry as a binary String.
