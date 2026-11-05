@@ -23,6 +23,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("entry_count", method!(archive::Archive::entry_count, 0))?;
     archive.define_method("entries", method!(archive::Archive::entries, 0))?;
     archive.define_method("entry_meta", method!(archive::Archive::entry_meta, 1))?;
+    archive.define_method("local_extra", method!(archive::Archive::local_extra, 1))?;
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("open_entry", method!(archive::Archive::open_entry, 3))?;
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
@@ -43,7 +44,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_method("start_entry", method!(writer::Writer::start_entry, 2))?;
     writer.define_method("add_directory", method!(writer::Writer::add_directory, 2))?;
     writer.define_method("write", method!(writer::Writer::write, 1))?;
-    writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 3))?;
+    writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 4))?;
     writer.define_method("comment=", method!(writer::Writer::set_comment, 1))?;
     writer.define_method("finish", method!(writer::Writer::finish, 0))?;
     writer.define_method("closed?", method!(writer::Writer::is_closed, 0))?;

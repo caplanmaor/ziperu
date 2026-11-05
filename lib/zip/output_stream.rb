@@ -109,13 +109,22 @@ module Zip
       @current_entry = new_entry
     end
 
-    # Copies an entry from another archive without recompressing it.
-    def copy_raw_entry(entry, new_name = nil) # :nodoc:
+    # Copies an entry from another archive without recompressing it. With
+    # `touch: true` the entry's current permissions and mtime are written
+    # instead of the source's (so `chmod`/`time=` on an existing entry
+    # persist); the native writer can do that or a rename, not both.
+    def copy_raw_entry(entry, new_name = nil, touch: false) # :nodoc:
       raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
       raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
 
-      @writer.raw_copy(entry.archive, entry.index, new_name)
+      touch_opts =
+        if touch && new_name.nil?
+          time = entry.time
+          { dos_date: time.to_binary_dos_date, dos_time: time.to_binary_dos_time,
+            unix_perms: entry.unix_perms }
+        end
+      @writer.raw_copy(entry.archive, entry.index, new_name, touch_opts)
       @current_entry = nil
     end
 

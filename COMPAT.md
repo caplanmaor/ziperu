@@ -2,7 +2,7 @@
 
 rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-04).
 
-**292 of 399 tests pass (73.2%)** across the files that load; 5 test files fail to load (usually a missing class), so the true total is higher.
+**371 of 476 tests pass (77.9%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -21,7 +21,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/encryption_test.rb | 8 | 12 | 3 | 1 | 0 |
 | test/entry_set_test.rb | 15 | 15 | 0 | 0 | 0 |
 | test/entry_test.rb | 16 | 20 | 4 | 0 | 0 |
-| test/extra_field_test.rb | 9 | 11 | 2 | 0 | 0 |
+| test/extra_field_test.rb | 11 | 11 | 0 | 0 | 0 |
 | test/extra_field_unknown_test.rb | 4 | 4 | 0 | 0 | 0 |
 | test/extra_field_ut_test.rb | 6 | 6 | 0 | 0 | 0 |
 | test/file_add_recursive_test.rb | 8 | 9 | 0 | 0 | 1 |
@@ -32,11 +32,11 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/file_permissions_test.rb | 4 | 4 | 0 | 0 | 0 |
 | test/file_split_test.rb | 0 | 3 | 1 | 2 | 0 |
 | test/file_test.rb | 42 | 53 | 5 | 5 | 1 |
-| test/filesystem/dir_test.rb | — | load error | | | |
-| test/filesystem/directory_iterator_test.rb | — | load error | | | |
-| test/filesystem/file_mutating_test.rb | — | load error | | | |
-| test/filesystem/file_nonmutating_test.rb | — | load error | | | |
-| test/filesystem/file_stat_test.rb | — | load error | | | |
+| test/filesystem/dir_test.rb | 7 | 7 | 0 | 0 | 0 |
+| test/filesystem/directory_iterator_test.rb | 5 | 5 | 0 | 0 | 0 |
+| test/filesystem/file_mutating_test.rb | 5 | 5 | 0 | 0 | 0 |
+| test/filesystem/file_nonmutating_test.rb | 48 | 48 | 0 | 0 | 0 |
+| test/filesystem/file_stat_test.rb | 12 | 12 | 0 | 0 | 0 |
 | test/inflater_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/input_stream_test.rb | 28 | 30 | 2 | 0 | 0 |
 | test/ioextras/abstract_input_stream_test.rb | 31 | 31 | 0 | 0 | 0 |
@@ -145,10 +145,6 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `ZipEntryTest#test_constructor_and_getters`
 - `ZipEntryTest#test_equality`
 - `ZipEntryTest#test_incomplete?`
-
-**test/extra_field_test.rb**
-- `ZipExtraFieldTest#test_load_unknown_extra_field`
-- `ZipExtraFieldTest#test_read_local_extra_field`
 
 **test/file_split_test.rb**
 - `ZipFileSplitTest#test_raise_error_on_open_split_zip:`

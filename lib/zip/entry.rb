@@ -26,7 +26,19 @@ module Zip
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
                   :internal_file_attributes, :local_header_offset # :nodoc:
 
-    attr_reader :extra, :compression_level, :filepath # :nodoc:
+    attr_reader :compression_level, :filepath # :nodoc:
+
+    # The entry's extra fields. For an entry read from an archive, the
+    # local header's fields (which is where Info-ZIP unix uid/gid and the
+    # extended timestamp's atime/ctime live) are merged in on first use,
+    # rather than by seeking to every local header when the archive opens.
+    def extra
+      if @archive && !@local_extra_merged
+        @local_extra_merged = true
+        @extra.merge(@archive.local_extra(@index), local: true)
+      end
+      @extra
+    end
 
     attr_writer :size # :nodoc:
 
@@ -108,10 +120,10 @@ module Zip
     # default.
     def time(component: :mtime)
       time =
-        if @extra[:universaltime]
-          @extra[:universaltime].send(component)
-        elsif @extra[:ntfs]
-          @extra[:ntfs].send(component)
+        if extra[:universaltime]
+          extra[:universaltime].send(component)
+        elsif extra[:ntfs]
+          extra[:ntfs].send(component)
         end
 
       time || (@time if component == :mtime)
@@ -129,13 +141,13 @@ module Zip
 
     def time=(value, component: :mtime)
       @dirty = true
-      unless @extra.member?(:universaltime) || @extra.member?(:ntfs)
-        @extra.create(:universaltime)
+      unless extra.member?(:universaltime) || extra.member?(:ntfs)
+        extra.create(:universaltime)
       end
 
       value = DOSTime.from_time(value)
       comp = "#{component}=" unless component.to_s.end_with?('=')
-      (@extra[:universaltime] || @extra[:ntfs]).send(comp, value)
+      (extra[:universaltime] || extra[:ntfs]).send(comp, value)
       @time = value if component == :mtime
     end
 
@@ -151,7 +163,7 @@ module Zip
 
     # Does this entry return time fields with accurate timezone information?
     def absolute_time?
-      @extra.member?(:universaltime) || @extra.member?(:ntfs)
+      extra.member?(:universaltime) || extra.member?(:ntfs)
     end
 
     # Returns STORED if the entry is a directory or the compression level is 0.
@@ -167,11 +179,11 @@ module Zip
     end
 
     def zip64?
-      !@extra[:zip64].nil?
+      !extra[:zip64].nil?
     end
 
     def aes?
-      !@extra[:aes].nil?
+      !extra[:aes].nil?
     end
 
     def file_type_is?(type) # :nodoc:
@@ -316,7 +328,7 @@ module Zip
         end
       else
         new_name = (@name if @name != @original_name)
-        zip_output_stream.copy_raw_entry(self, new_name)
+        zip_output_stream.copy_raw_entry(self, new_name, touch: dirty?)
       end
     end
 
@@ -501,6 +513,7 @@ module Zip
       @time = DOSTime.parse_binary_dos_format(meta[:dos_date], meta[:dos_time])
       @comment = meta[:comment].dup.force_encoding(Encoding::UTF_8)
       @extra = ExtraField.new(meta[:extra])
+      @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
       @data_offset = meta[:data_offset]
       set_ftype_from_c_dir_entry

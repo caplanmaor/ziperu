@@ -93,6 +93,20 @@ impl Archive {
         entry_hash(ruby, index, &entry, &extra)
     }
 
+    /// The raw extra field bytes of entry `index`'s local header. Some
+    /// fields (Info-ZIP unix uid/gid, extended timestamp atime/ctime) only
+    /// carry their data there; Ruby merges them lazily.
+    pub fn local_extra(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RString, Error> {
+        let mut archive = rb_self.archive(ruby)?;
+        let header_start = archive
+            .by_index_raw(index)
+            .map_err(|e| zip_error(ruby, e))?
+            .header_start();
+        let mut raw = archive.clone().into_inner();
+        let extra = raw_local_extra(&mut raw, header_start).map_err(|e| io_error(ruby, e))?;
+        Ok(ruby.str_from_slice(&extra))
+    }
+
     /// A chunked reader over entry `index`, with its own cursor. With
     /// `enforce_size` false it reads past the declared size to the true end
     /// of the data.
@@ -137,6 +151,28 @@ fn raw_central_extra(source: &mut Source, central_offset: u64) -> io::Result<Vec
     }
     let name_len = u16::from_le_bytes([header[28], header[29]]) as i64;
     let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
+    source.seek(SeekFrom::Current(name_len))?;
+    let mut extra = vec![0u8; extra_len];
+    source.read_exact(&mut extra)?;
+    Ok(extra)
+}
+
+/// The extra field bytes of a local file header, exactly as stored.
+fn raw_local_extra(source: &mut Source, header_offset: u64) -> io::Result<Vec<u8>> {
+    const SIGNATURE: u32 = 0x0403_4b50;
+    const HEADER_LEN: usize = 30;
+
+    source.seek(SeekFrom::Start(header_offset))?;
+    let mut header = [0u8; HEADER_LEN];
+    source.read_exact(&mut header)?;
+    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local file header signature not found",
+        ));
+    }
+    let name_len = u16::from_le_bytes([header[26], header[27]]) as i64;
+    let extra_len = u16::from_le_bytes([header[28], header[29]]) as usize;
     source.seek(SeekFrom::Current(name_len))?;
     let mut extra = vec![0u8; extra_len];
     source.read_exact(&mut extra)?;

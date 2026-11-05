@@ -17,9 +17,9 @@ end
 **Status: early.** `Zip::File` (read, `extract`/`extract_all`, `add`,
 `add_recursive`, `get_output_stream`, `remove`, `rename`, `replace`,
 `mkdir`, `commit`, `write_buffer`/`open_buffer`), `Zip::InputStream` and
-`Zip::OutputStream` (with AES) work. `Zip::FileSystem`, ZipCrypto writing
-and a few corners are still missing; see [COMPAT.md](COMPAT.md) for what
-rubyzip's own test suite says. Tracks the rubyzip 3.x API
+`Zip::OutputStream` (with AES) and `Zip::FileSystem` work. ZipCrypto
+writing and a few corners are still missing; see [COMPAT.md](COMPAT.md)
+for what rubyzip's own test suite says. Tracks the rubyzip 3.x API
 (`Zip::RUBYZIP_COMPAT_VERSION`).
 
 ### Deliberate differences from rubyzip

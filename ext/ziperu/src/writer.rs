@@ -211,20 +211,31 @@ impl Writer {
     }
 
     /// Copies entry `index` of `archive` without decompressing it, under
-    /// `new_name` if given.
+    /// `new_name` if given. `touch` is an optional Hash with `dos_date`,
+    /// `dos_time` and `unix_perms` to write instead of the source's; the
+    /// crate offers that or a rename, not both.
     pub fn raw_copy(
         ruby: &Ruby,
         rb_self: &Self,
         archive: &Archive,
         index: usize,
         new_name: Option<String>,
+        touch: Option<RHash>,
     ) -> Result<(), Error> {
         let mut source = archive.archive(ruby)?;
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
+        let touch = touch
+            .map(|h| EntryOptions::from_hash(ruby, h))
+            .transpose()?;
         rb_self.with_writer(ruby, |w| {
-            match new_name {
-                Some(name) => w.raw_copy_file_rename(file, name),
-                None => w.raw_copy_file(file),
+            match (new_name, touch) {
+                (Some(name), _) => w.raw_copy_file_rename(file, name),
+                (None, Some(t)) => {
+                    let mtime = DateTime::try_from_msdos(t.dos_date, t.dos_time)
+                        .unwrap_or_else(|_| DateTime::default_for_write());
+                    w.raw_copy_file_touch(file, mtime, t.unix_perms)
+                }
+                (None, None) => w.raw_copy_file(file),
             }
             .map_err(|e| zip_error(ruby, e))
         })

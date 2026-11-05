@@ -18,6 +18,7 @@ zip = { version = "9", default-features = false, features = [
     "zstd",
     "aes-crypto",
     "time",
+    "unreserved",
 ] }
 
 [build-dependencies]
