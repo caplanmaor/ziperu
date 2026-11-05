@@ -19,6 +19,11 @@ module Zip
     # Language encoding flag (EFS) bit
     EFS = 0b100000000000 # :nodoc:
 
+    # Compression level flags (bits 1 and 2 of the gp flags).
+    COMPRESSION_LEVEL_SUPERFAST_GPFLAG = 0b110 # :nodoc:
+    COMPRESSION_LEVEL_FAST_GPFLAG = 0b100      # :nodoc:
+    COMPRESSION_LEVEL_MAX_GPFLAG = 0b010       # :nodoc:
+
     attr_accessor :comment, :compressed_size, :follow_symlinks, :name,
                   :restore_ownership, :restore_permissions, :restore_times,
                   :unix_gid, :unix_perms, :unix_uid
@@ -35,9 +40,23 @@ module Zip
     def extra
       if @archive && !@local_extra_merged
         @local_extra_merged = true
-        @extra.merge(@archive.local_extra(@index), local: true)
+        @extra.merge(archive.local_extra(@index), local: true)
       end
       @extra
+    end
+
+    # The native archive this entry was read from, reopened if the owning
+    # Zip::File has released it (rubyzip lets entries be read after `close`).
+    def archive # :nodoc:
+      if @archive&.closed? && @zipfile.kind_of?(::Zip::File)
+        reopened = @zipfile.native_archive
+        if reopened.entry_meta(@index)[:name] != @original_name.b
+          raise Error, "entry '#{@original_name}' is no longer at index #{@index} of #{@zipfile.name}"
+        end
+
+        @archive = reopened
+      end
+      @archive
     end
 
     attr_writer :size # :nodoc:
@@ -47,7 +66,6 @@ module Zip
     attr_reader :index # :nodoc:
 
     # The native archive the entry was read from, or nil.
-    attr_reader :archive # :nodoc:
 
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,
@@ -88,6 +106,8 @@ module Zip
                             end
       @extra              =
         extra.kind_of?(ExtraField) ? extra : ExtraField.new(extra.to_s)
+
+      set_compression_level_flags
     end
 
     # Build an entry from the metadata Hash the native core produces for
@@ -105,10 +125,17 @@ module Zip
       gp_flags & 1 == 1
     end
 
-    # Always false for entries read by this gem: sizes come from the central
-    # directory, so reading never depends on the local header.
+    # Was this entry written in streaming mode with sizes still unknown?
+    # Only informational here: reading goes through the central directory,
+    # so an incomplete local header does not stop `get_input_stream`.
     def incomplete? # :nodoc:
-      false
+      (gp_flags & 8 == 8) && (crc == 0 || size == 0 || compressed_size == 0)
+    end
+
+    # Was a size given, or is it still unknown (as for an entry that is
+    # about to be streamed)? Decides whether a zip64 placeholder is needed.
+    def size_known? # :nodoc:
+      !@size.nil?
     end
 
     # The uncompressed size of the entry.
@@ -387,8 +414,8 @@ module Zip
 
       raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
 
-      zis = ::Zip::InputStream.new(@archive, offset: @local_header_offset, decrypter: decrypter,
-                                             enforce_size: enforce_size)
+      zis = ::Zip::InputStream.new(archive, offset: @local_header_offset, decrypter: decrypter,
+                                            enforce_size: enforce_size)
       zis.get_next_stream_entry(self)
       return zis unless block_given?
 
@@ -510,13 +537,35 @@ module Zip
       @version = meta[:version_made_by]
       @external_file_attributes = meta[:external_attributes]
       @unix_perms = meta[:unix_mode] & 0o7777 if meta[:unix_mode]
-      @time = DOSTime.parse_binary_dos_format(meta[:dos_date], meta[:dos_time])
+      set_time(meta[:dos_date], meta[:dos_time])
       @comment = meta[:comment].dup.force_encoding(Encoding::UTF_8)
       @extra = ExtraField.new(meta[:extra])
       @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
       @data_offset = meta[:data_offset]
       set_ftype_from_c_dir_entry
+    end
+
+    # Like rubyzip, an unparseable DOS timestamp is reported (when
+    # `Zip.warn_invalid_date` is set) and the entry keeps "now".
+    def set_time(binary_dos_date, binary_dos_time)
+      @time = ::Zip::DOSTime.parse_binary_dos_format(binary_dos_date, binary_dos_time)
+    rescue ArgumentError
+      @time = ::Zip::DOSTime.now
+      warn 'WARNING: invalid date/time in zip entry.' if ::Zip.warn_invalid_date
+    end
+
+    def set_compression_level_flags
+      return unless compression_method == DEFLATED
+
+      case @compression_level
+      when 1
+        @gp_flags |= COMPRESSION_LEVEL_SUPERFAST_GPFLAG
+      when 2
+        @gp_flags |= COMPRESSION_LEVEL_FAST_GPFLAG
+      when 8, 9
+        @gp_flags |= COMPRESSION_LEVEL_MAX_GPFLAG
+      end
     end
 
     def set_ftype_from_c_dir_entry # :nodoc:

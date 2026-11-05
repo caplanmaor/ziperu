@@ -28,7 +28,14 @@ module Zip
     def initialize(context, offset: 0, decrypter: nil, enforce_size: true, **opts)
       super(**opts)
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
-      @archive = context.kind_of?(Native::Archive) ? context : self.class.open_archive(context)
+      # A split segment has no central directory to open; rubyzip fails on
+      # the first entry, so defer the error to `get_next_entry`.
+      @archive =
+        if context.kind_of?(Native::Archive)
+          context
+        elsif !@split
+          self.class.open_archive(context)
+        end
       @decrypter = decrypter
       @enforce_size = enforce_size
       @next_index = offset.zero? ? 0 : index_at_offset(offset)
@@ -47,10 +54,8 @@ module Zip
     # Returns an Entry object and positions the stream at the beginning of
     # the entry data. Returns nil when there are no more entries.
     def get_next_entry
-      raise IOError, 'closed stream' if @archive.nil?
-      # Like rubyzip, we don't read split archives; it raises on the first
-      # local header, so raise here rather than at open.
       raise SplitArchiveError if @split
+      raise IOError, 'closed stream' if @archive.nil?
       return @current_entry = nil if @next_index >= @archive.entry_count
 
       @current_entry = Entry.from_meta(@archive, @archive.entry_meta(@next_index))
@@ -188,7 +193,11 @@ module Zip
     rescue Native::SizeLimitError
       raise EntrySizeError, @current_entry
     rescue Native::PasswordError => e
-      raise Error, e.message
+      # rubyzip verifies AES passwords up front but just inflates garbage for
+      # a wrong ZipCrypto one, so the exception classes differ.
+      raise Error, 'Bad password' if @decrypter.kind_of?(AESDecrypter)
+
+      raise DecompressionError, e
     rescue Native::UnsupportedError => e
       raise Error, e.message
     end

@@ -27,6 +27,7 @@ end
 
 require_relative "zip/constants"
 require_relative "zip/dos_time"
+require_relative "zip/central_directory"
 require_relative "zip/ioextras"
 require_relative "zip/dirtyable"
 require_relative "zip/extra_field"
@@ -38,6 +39,7 @@ require_relative "zip/entry"
 require_relative "zip/entry_set"
 require_relative "zip/streamable_stream"
 require_relative "zip/streamable_directory"
+require_relative "zip/file_split"
 require_relative "zip/file"
 
 # Drop-in replacement for rubyzip, backed by a Rust core.

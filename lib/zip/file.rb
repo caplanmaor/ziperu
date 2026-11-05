@@ -58,6 +58,8 @@ module Zip
     end
 
     class << self
+      include FileSplit
+
       # Similar to ::new. If a block is passed the Zip::File object is passed
       # to the block and is automatically closed afterwards.
       def open(file_name, create: false,
@@ -124,10 +126,7 @@ module Zip
 
       # Count the entries in a zip archive without building entry objects.
       def count_entries(path_or_io)
-        archive = InputStream.open_archive(path_or_io)
-        archive.entry_count
-      ensure
-        archive&.close
+        CentralDirectory.count_entries(path_or_io)
       end
 
       # Recursively adds the contents of `src_dir` to the new archive
@@ -325,7 +324,18 @@ module Zip
     # Closes the zip file committing any changes that has been made.
     def close
       commit
-      release_native
+      # A buffer stays readable after close (it is the caller's IO); a file
+      # handle is released and reopened on demand by `native_archive`.
+      release_native unless @buffer
+    end
+
+    # The open native archive behind this file, reopening it after `close`
+    # so entries can still be read, as rubyzip allows.
+    #
+    # @api private
+    def native_archive
+      @native = InputStream.open_archive(@name) if @native.nil? || @native.closed?
+      @native
     end
 
     # Returns true if any changes has been made to this archive since the
@@ -400,6 +410,7 @@ module Zip
     # archive.
     def initialize_cdir(path_or_io, buffer: false)
       release_native
+      @buffer = buffer
       @cdir = ::Zip::EntrySet.new
       @comment = ''
       @dirty = false

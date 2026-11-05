@@ -154,7 +154,7 @@ class ZipOutputStreamTest < Minitest::Test
 
     Zip::InputStream.open(@zip) do |io|
       entry = io.get_next_entry
-      assert(Zip::DOSTime.at(mtime).dos_equals(Zip::DOSTime.at(entry.mtime)))
+      assert_equal(Zip::DOSTime.at(mtime), Zip::DOSTime.at(entry.mtime))
     end
   end
 

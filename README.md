@@ -36,6 +36,11 @@ for what rubyzip's own test suite says. Tracks the rubyzip 3.x API
 - Writing ZipCrypto ("traditional") encryption is not supported: the Rust
   crate deliberately keeps that broken cipher read-only. `AESEncrypter`
   works; `TraditionalEncrypter` raises `Zip::Error` on the first entry.
+- Archives compressed with bzip2, Deflate64 or zstd read normally; rubyzip
+  raises `Zip::CompressionMethodError` for anything but Stored and Deflate.
+- AES entries of 20 bytes or more are written as AE-1 (with a real CRC in the
+  header) rather than rubyzip's always-AE-2 with a zero CRC; both are read
+  by every AES-aware tool, and AE-1 adds an integrity check.
 - Extraction never creates symlinks (same as rubyzip 3.x) and refuses paths
   that resolve outside the destination directory, checking the resolved
   absolute path with a trailing separator, the fix for CVE-2026-85396.

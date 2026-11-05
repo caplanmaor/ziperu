@@ -49,6 +49,9 @@ namespace :compat do
     # rubyzip's helper regenerates fixtures with Info-ZIP's `zip`; ours
     # skips that (see compat:fixtures) and otherwise does the same.
     FileUtils.cp(File.join(COMPAT_DIR, "test_helper.rb"), File.join(RUBYZIP_DIR, "test", "test_helper.rb"))
+    # Archives rubyzip's file_test writes and deletes itself; a run that
+    # died midway leaves them behind and fails the next run with EntryExists.
+    FileUtils.rm_f(Dir[File.join(RUBYZIP_DIR, "test", "data", "{fast,default,best}_comp.zip")])
   end
 
   desc "Generate rubyzip's test fixtures using the real rubyzip"
@@ -64,7 +67,7 @@ namespace :compat do
   task run: :fixtures do
     files = Dir.glob("test/**/*_test.rb", base: RUBYZIP_DIR).sort
     only = ENV["ONLY"]
-    files.select! { |f| f.include?(only) } if only
+    files.select! { |f| only.split.any? { |sub| f.include?(sub) } } if only
     FileUtils.mkdir_p(File.join(RUBYZIP_DIR, "..", "compat-logs"))
 
     results = files.map do |file|

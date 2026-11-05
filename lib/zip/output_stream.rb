@@ -170,14 +170,26 @@ module Zip
       time = entry.time
       {
         method: entry.compression_method,
-        level: (level if level && level != Zlib::DEFAULT_COMPRESSION),
+        level: (level if entry.compression_method == Entry::DEFLATED && level &&
+                         level != Zlib::DEFAULT_COMPRESSION),
         dos_date: time.to_binary_dos_date,
         dos_time: time.to_binary_dos_time,
         unix_perms: entry.unix_perms,
-        large_file: (Zip.write_zip64_support && !zip64_suppressed) || entry.size >= 0xFFFFFFFF,
+        large_file: zip64_needed?(entry, zip64_suppressed),
         comment: entry.comment.to_s,
         extra: extra.to_local_bin.b
       }
+    end
+
+    # rubyzip writes a zip64 extra for a file entry only when it has to:
+    # the size is unknown up front (it may turn out huge) or is already
+    # over the 32-bit limit. The native writer does the same with
+    # `large_file`.
+    def zip64_needed?(entry, suppressed)
+      return true if entry.size >= 0xFFFFFFFF || entry.compressed_size >= 0xFFFFFFFF
+      return false if suppressed || !Zip.write_zip64_support || !entry.file?
+
+      entry.zip64? || !entry.size_known?
     end
   end
 end
