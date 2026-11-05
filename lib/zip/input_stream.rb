@@ -126,13 +126,29 @@ module Zip
 
       # @api private
       def open_archive(context)
-        if context.respond_to?(:read)
-          # Until the Rust core can drive a Ruby IO directly, materialize it.
-          context.seek(0, ::IO::SEEK_SET) if context.respond_to?(:seek)
-          Native::Archive.open_bytes(context.read.b)
+        return Native::Archive.open_path(context.to_s) unless context.respond_to?(:read)
+
+        context.binmode if context.respond_to?(:binmode)
+        if seekable?(context)
+          # Driven lazily through seek/read; nothing is copied up front.
+          Native::Archive.open_io(context)
         else
-          Native::Archive.open_path(context.to_s)
+          # A pipe or socket: there is no way back to the central directory
+          # once the data has gone past, so take it all.
+          bytes = context.read.to_s.b
+          raise SplitArchiveError if split_signature?(bytes)
+
+          Native::Archive.open_bytes(bytes)
         end
+      end
+
+      def seekable?(io)
+        return false unless io.respond_to?(:seek) && io.respond_to?(:tell)
+
+        io.seek(0, ::IO::SEEK_CUR)
+        true
+      rescue SystemCallError, IOError
+        false
       end
 
       # The first part of a multi-part archive starts with a split-file
@@ -142,12 +158,19 @@ module Zip
       def split_archive?(context)
         head =
           if context.respond_to?(:read)
-            context.seek(0, ::IO::SEEK_SET) if context.respond_to?(:seek)
+            # A pipe cannot be peeked at; `open_archive` checks what it reads.
+            return false unless seekable?(context)
+
+            context.seek(0, ::IO::SEEK_SET)
             context.read(4)
           elsif ::File.file?(context.to_s)
             ::File.binread(context.to_s, 4)
           end
-        !head.nil? && head.bytesize == 4 && head.unpack1('V') == SPLIT_FILE_SIGNATURE
+        split_signature?(head)
+      end
+
+      def split_signature?(head)
+        !head.nil? && head.bytesize >= 4 && head.unpack1('V') == SPLIT_FILE_SIGNATURE
       end
     end
 

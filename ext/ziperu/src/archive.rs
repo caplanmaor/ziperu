@@ -8,11 +8,12 @@ use std::cell::{RefCell, RefMut};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 
-use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby};
+use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby, Value};
 use zip::read::ZipFile;
 use zip::ZipArchive;
 
 use crate::errors::{io_error, zip_error};
+use crate::gvl::maybe_without_gvl;
 use crate::reader::EntryReader;
 use crate::source::Source;
 
@@ -22,6 +23,8 @@ pub struct Archive {
     // `None` once closed, which releases the file handle at once rather
     // than when the GC gets round to it (commit renames over the file).
     inner: RefCell<Option<ZipArchive<Source>>>,
+    /// True for a Ruby IO source, whose reads must hold the GVL.
+    needs_gvl: bool,
 }
 
 impl Archive {
@@ -36,11 +39,23 @@ impl Archive {
         Self::from_source(ruby, Source::memory(vec))
     }
 
+    /// Any seekable IO-like Ruby object; read lazily, never copied.
+    pub fn open_io(ruby: &Ruby, io: Value) -> Result<Self, Error> {
+        Self::from_source(ruby, Source::ruby(io)?)
+    }
+
     fn from_source(ruby: &Ruby, source: Source) -> Result<Self, Error> {
-        let archive = ZipArchive::new(source).map_err(|e| zip_error(ruby, e))?;
+        let needs_gvl = source.needs_gvl();
+        let archive = maybe_without_gvl(needs_gvl, || ZipArchive::new(source))
+            .map_err(|e| zip_error(ruby, e))?;
         Ok(Self {
             inner: RefCell::new(Some(archive)),
+            needs_gvl,
         })
+    }
+
+    pub(crate) fn needs_gvl(&self) -> bool {
+        self.needs_gvl
     }
 
     /// The open archive, or an IOError once closed.
@@ -119,7 +134,14 @@ impl Archive {
     ) -> Result<EntryReader, Error> {
         let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
         let archive = rb_self.archive(ruby)?.clone();
-        EntryReader::open(ruby, archive, index, password, enforce_size)
+        EntryReader::open(
+            ruby,
+            archive,
+            index,
+            password,
+            enforce_size,
+            rb_self.needs_gvl,
+        )
     }
 
     /// Whole decompressed entry as a binary String.
@@ -127,7 +149,8 @@ impl Archive {
         let mut archive = rb_self.archive(ruby)?;
         let mut entry = archive.by_index(index).map_err(|e| zip_error(ruby, e))?;
         let mut buf = Vec::with_capacity(entry.size().min(u32::MAX as u64) as usize);
-        entry.read_to_end(&mut buf).map_err(|e| io_error(ruby, e))?;
+        maybe_without_gvl(rb_self.needs_gvl, || entry.read_to_end(&mut buf))
+            .map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&buf))
     }
 }

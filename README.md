@@ -50,7 +50,10 @@ for what rubyzip's own test suite says. Tracks the rubyzip 3.x API
 rubyzip is pure Ruby and does per-entry work in Ruby objects. ziperu parses
 the central directory once in Rust and hands Ruby a flat metadata dump, reads
 entries in large chunks, copies unchanged entries byte-for-byte on `commit`,
-and releases the GVL while inflating from a real file. The intent is
+and releases the GVL while inflating from a file or String buffer and while
+deflating, so other Ruby threads keep running. An archive opened from any
+other IO object (`open_buffer(io)`, `InputStream.open(io)`) is read through
+it lazily, under the GVL; a pipe is read to its end first. The intent is
 precompiled gems for every platform rubyzip runs on, zero runtime dependencies,
 and stricter defaults on path traversal and declared-size checks.
 

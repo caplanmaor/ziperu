@@ -9,7 +9,7 @@
 //! off.
 
 use std::cell::RefCell;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 use magnus::{Error, RString, Ruby};
 use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipReadOptions};
@@ -17,6 +17,7 @@ use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
 use crate::errors::{io_error, size_limit_error, zip_error};
+use crate::gvl::maybe_without_gvl;
 use crate::source::Source;
 
 const CHUNK: usize = 64 * 1024;
@@ -132,6 +133,8 @@ struct Inner {
     size: Option<u64>,
     consumed: u64,
     finished: bool,
+    /// Reads over a Ruby IO must keep the GVL; the rest release it.
+    needs_gvl: bool,
 }
 
 #[magnus::wrap(class = "Zip::Native::EntryReader", free_immediately)]
@@ -151,6 +154,7 @@ impl EntryReader {
         index: usize,
         password: Option<Vec<u8>>,
         enforce_size: bool,
+        needs_gvl: bool,
     ) -> Result<Self, Error> {
         let (declared, info) = {
             let raw = archive
@@ -176,6 +180,7 @@ impl EntryReader {
                 size,
                 consumed: 0,
                 finished: size == Some(0),
+                needs_gvl,
             }),
         })
     }
@@ -218,39 +223,28 @@ impl EntryReader {
             None => remaining,
         };
 
-        let mut buf = Vec::with_capacity(want.min(CHUNK as u64) as usize);
-        let mut filled = 0u64;
-        while filled < want {
-            let step = (want - filled).min(CHUNK as u64) as usize;
-            let start = buf.len();
-            buf.resize(start + step, 0);
-            let n = inner
-                .entry
-                .file()
-                .read(&mut buf[start..])
+        // This read reaches the declared size: one more byte would mean the
+        // header lied, so probe for it.
+        let probe = inner.size == Some(inner.consumed + want);
+        let needs_gvl = inner.needs_gvl;
+        let (buf, eof, oversize) =
+            maybe_without_gvl(needs_gvl, || fill(inner.entry.file(), want, probe))
                 .map_err(|e| io_error(ruby, e))?;
-            buf.truncate(start + n);
-            if n == 0 {
-                inner.finished = true;
-                break;
-            }
-            filled += n as u64;
-        }
 
+        let filled = buf.len() as u64;
         inner.consumed += filled;
+        if eof {
+            inner.finished = true;
+        }
         if filled == 0 {
             // Shorter than declared; the crate's CRC check normally raises
             // before we get here. Treat as end of stream.
             return Ok(None);
         }
-        if inner.size == Some(inner.consumed) {
-            // One more byte would mean the header lied about the size.
-            let mut probe = [0u8; 1];
-            match inner.entry.file().read(&mut probe) {
-                Ok(0) => {}
-                Ok(_) => return Err(size_limit_error(ruby)),
-                Err(e) => return Err(io_error(ruby, e)),
-            }
+        if oversize {
+            return Err(size_limit_error(ruby));
+        }
+        if probe && filled == want {
             inner.finished = true;
         }
         Ok(Some(ruby.str_from_slice(&buf)))
@@ -264,4 +258,33 @@ impl EntryReader {
         inner.finished = inner.size == Some(0);
         Ok(())
     }
+}
+
+/// Reads up to `want` bytes in `CHUNK` steps, pure Rust so it can run
+/// without the GVL. Returns the bytes, whether the entry ended early, and
+/// (when `probe`) whether data continues past the declared size.
+fn fill(
+    file: &mut ZipFile<'static, Source>,
+    want: u64,
+    probe: bool,
+) -> io::Result<(Vec<u8>, bool, bool)> {
+    let mut buf = Vec::with_capacity(want.min(CHUNK as u64) as usize);
+    let mut eof = false;
+    while (buf.len() as u64) < want {
+        let step = (want - buf.len() as u64).min(CHUNK as u64) as usize;
+        let start = buf.len();
+        buf.resize(start + step, 0);
+        let n = file.read(&mut buf[start..])?;
+        buf.truncate(start + n);
+        if n == 0 {
+            eof = true;
+            break;
+        }
+    }
+    let mut oversize = false;
+    if probe && buf.len() as u64 == want {
+        let mut extra = [0u8; 1];
+        oversize = file.read(&mut extra)? != 0;
+    }
+    Ok((buf, eof, oversize))
 }

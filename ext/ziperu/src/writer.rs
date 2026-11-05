@@ -15,6 +15,7 @@ use zip::{AesMode, CompressionMethod, DateTime, ZipWriter};
 
 use crate::archive::Archive;
 use crate::errors::{io_error, zip_error};
+use crate::gvl::{maybe_without_gvl, without_gvl};
 
 pub enum Sink {
     File(BufWriter<fs::File>),
@@ -203,9 +204,11 @@ impl Writer {
     }
 
     pub fn write(ruby: &Ruby, rb_self: &Self, data: RString) -> Result<usize, Error> {
-        let bytes = unsafe { data.as_slice() };
+        // Copied out of the Ruby heap so compression can run without the
+        // GVL (the string could be moved by compaction meanwhile).
+        let bytes = unsafe { data.as_slice() }.to_vec();
         rb_self.with_writer(ruby, |w| {
-            w.write_all(bytes).map_err(|e| io_error(ruby, e))?;
+            without_gvl(|| w.write_all(&bytes)).map_err(|e| io_error(ruby, e))?;
             Ok(bytes.len())
         })
     }
@@ -222,13 +225,14 @@ impl Writer {
         new_name: Option<String>,
         touch: Option<RHash>,
     ) -> Result<(), Error> {
+        let needs_gvl = archive.needs_gvl();
         let mut source = archive.archive(ruby)?;
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
         let touch = touch
             .map(|h| EntryOptions::from_hash(ruby, h))
             .transpose()?;
         rb_self.with_writer(ruby, |w| {
-            match (new_name, touch) {
+            maybe_without_gvl(needs_gvl, || match (new_name, touch) {
                 (Some(name), _) => w.raw_copy_file_rename(file, name),
                 (None, Some(t)) => {
                     let mtime = DateTime::try_from_msdos(t.dos_date, t.dos_time)
@@ -236,7 +240,7 @@ impl Writer {
                     w.raw_copy_file_touch(file, mtime, t.unix_perms)
                 }
                 (None, None) => w.raw_copy_file(file),
-            }
+            })
             .map_err(|e| zip_error(ruby, e))
         })
     }
