@@ -2,7 +2,7 @@
 
 rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-06).
 
-**408 of 476 tests pass (85.7%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
+**409 of 476 tests pass (85.9%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -18,7 +18,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/decompressor_test.rb | 1 | 1 | 0 | 0 | 0 |
 | test/deflater_test.rb | 2 | 4 | 0 | 2 | 0 |
 | test/dos_time_test.rb | 12 | 12 | 0 | 0 | 0 |
-| test/encryption_test.rb | 10 | 12 | 1 | 1 | 0 |
+| test/encryption_test.rb | 11 | 12 | 1 | 0 | 0 |
 | test/entry_set_test.rb | 15 | 15 | 0 | 0 | 0 |
 | test/entry_test.rb | 20 | 20 | 0 | 0 | 0 |
 | test/extra_field_test.rb | 11 | 11 | 0 | 0 | 0 |
@@ -118,7 +118,6 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 
 **test/encryption_test.rb**
 - `EncryptionTest#test_aes_encrypt`
-- `EncryptionTest#test_encrypt:`
 
 **test/file_test.rb**
 - `ZipFileTest#test_get_input_stream_stored_with_gpflag_bit3`

@@ -835,6 +835,9 @@ dependencies = [
 name = "ziperu"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom",
  "magnus",
  "rb-sys",
  "rb-sys-env",

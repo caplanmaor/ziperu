@@ -45,11 +45,13 @@ module Ziperu
     end
   end
 
-  # ZipCrypto. The Rust core only decrypts it (the crate keeps the weak
-  # legacy encrypter private), so this can only be used for reading.
+  # ZipCrypto, the weak legacy cipher that Windows Explorer and other
+  # AES-less tools can open. Entries are written with general purpose bits
+  # 0 and 3 set, as rubyzip writes them; only Stored and Deflate entries
+  # can be encrypted this way.
   class TraditionalEncrypter < Encrypter
     def native_options # :nodoc:
-      raise Error, 'Writing ZipCrypto (traditional) encryption is not supported; use AESEncrypter.'
+      { password: @password.b, zipcrypto: true }
     end
   end
 

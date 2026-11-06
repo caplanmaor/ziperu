@@ -293,9 +293,15 @@ class ZipOutputStreamTest < Minitest::Test
     end
   end
 
-  def test_traditional_encrypter_is_rejected
+  def test_traditional_encrypter_writes_zipcrypto_entries
     Ziperu::OutputStream.open(@zip, encrypter: Ziperu::TraditionalEncrypter.new("pw")) do |zos|
-      assert_raises(Ziperu::Error) { zos.put_next_entry("x") }
+      zos.put_next_entry("x")
+      zos.write("top secret")
+    end
+    Ziperu::InputStream.open(@zip, decrypter: Ziperu::TraditionalDecrypter.new("pw")) do |zis|
+      entry = zis.get_next_entry
+      assert_predicate entry, :encrypted?
+      assert_equal "top secret", zis.read
     end
   end
 

@@ -560,7 +560,22 @@ module Ziperu
       raise unless ::Ziperu::RUNNING_ON_WINDOWS
 
       GC.start
-      ::File.rename(tmp_filename, name)
+      begin
+        ::File.rename(tmp_filename, name)
+      rescue Errno::EACCES
+        # Something else (another Ziperu::File, say) still has the archive
+        # open. Renaming an open file is allowed where replacing one is
+        # not, so move the old archive aside first; that handle keeps
+        # reading the old bytes, as it would on Unix.
+        aside = "#{name}.#{Process.pid}.#{rand(1 << 32).to_s(36)}.old"
+        ::File.rename(name, aside)
+        ::File.rename(tmp_filename, name)
+        begin
+          ::File.delete(aside)
+        rescue SystemCallError
+          warn "WARNING: could not remove '#{aside}' (still open elsewhere); delete it once it is closed."
+        end
+      end
     end
 
     def check_entry_exists(entry_name, continue_on_exists_proc, proc_name)

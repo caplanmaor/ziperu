@@ -25,5 +25,11 @@ zip = { version = "9", default-features = false, features = [
     "unreserved",
 ] }
 
+# For ZipCrypto writing (the zip crate keeps its encrypter private): the
+# same deflate backend the crate uses, a CRC and some randomness.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+crc32fast = "1"
+getrandom = { version = "0.4", features = ["std"] }
+
 [build-dependencies]
 rb-sys-env = "0.2"

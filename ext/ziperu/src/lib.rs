@@ -11,6 +11,7 @@ mod gvl;
 mod reader;
 mod source;
 mod writer;
+mod zipcrypto;
 
 use magnus::{function, method, prelude::*, Error, Ruby};
 

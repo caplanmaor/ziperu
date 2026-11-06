@@ -139,6 +139,59 @@ class FeaturesTest < Minitest::Test
     assert_equal [["dir/", 1], ["dir/one.txt", 2], ["two.txt", 3]], seen
   end
 
+  def test_zipcrypto_entries_write_and_read_back
+    [Ziperu::Entry::DEFLATED, Ziperu::Entry::STORED].each do |method|
+      path = File.join(@tmp, "crypto#{method}.zip")
+      data = "secret #{method} " * 300
+      Ziperu::OutputStream.open(path, encrypter: Ziperu::TraditionalEncrypter.new("pw")) do |zos|
+        zos.put_next_entry("s.txt", "", Ziperu::ExtraField.new, method)
+        zos.write(data[0, 1000])
+        zos.write(data[1000..])
+        zos.put_next_entry("plain.txt")
+        zos.write("x")
+      end
+      Ziperu::File.open(path) do |zf|
+        entry = zf.get_entry("s.txt")
+        assert_predicate entry, :encrypted?
+        assert_equal 9, entry.gp_flags & 9
+        assert_equal method, entry.compression_method
+        assert_equal data.bytesize, entry.size
+        assert_equal Zlib.crc32(data), entry.crc
+        assert_equal data, entry.get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("pw"), &:read)
+        assert_raises(Ziperu::Error) { entry.get_input_stream(&:read) }
+        assert_raises(Ziperu::Error) { entry.get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("no"), &:read) }
+        # The stream's encrypter applies to every entry, as in rubyzip.
+        assert_predicate zf.get_entry("plain.txt"), :encrypted?
+        assert_equal "x", zf.get_entry("plain.txt").get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("pw"), &:read)
+        assert_empty zf.verify(decrypter: Ziperu::TraditionalDecrypter.new("pw"))
+      end
+      Ziperu::InputStream.open(path, decrypter: Ziperu::TraditionalDecrypter.new("pw")) do |zis|
+        zis.get_next_entry
+        assert_equal data, zis.read
+      end
+    end
+  end
+
+  def test_zipcrypto_refuses_methods_it_cannot_encrypt
+    assert_raises(ArgumentError) do
+      Ziperu::OutputStream.write_buffer(encrypter: Ziperu::TraditionalEncrypter.new("pw")) do |zos|
+        zos.put_next_entry("z", "", Ziperu::ExtraField.new, Ziperu::Entry::ZSTD)
+      end
+    end
+  end
+
+  def test_a_commit_succeeds_while_another_instance_holds_the_archive_open
+    outer = Ziperu::File.open(@zip)
+    assert_equal "two " * 200, outer.read("two.txt")
+    Ziperu::File.open(@zip) { |inner| inner.mkdir("added") }
+    # The first instance keeps working on what it opened.
+    assert_equal "two " * 200, outer.read("two.txt")
+    outer.close
+    Ziperu::File.open(@zip) { |zf| assert_includes zf.entries.map(&:name), "added/" }
+    leftovers = Dir.children(@tmp).grep(/\.old\z/)
+    assert_empty leftovers
+  end
+
   private
 
   def symlinks_supported?

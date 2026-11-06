@@ -17,10 +17,9 @@ end
 **Status: early.** `Ziperu::File` (read, `extract`/`extract_all`, `add`,
 `add_recursive`, `get_output_stream`, `remove`, `rename`, `replace`,
 `mkdir`, `commit`, `write_buffer`/`open_buffer`), `Ziperu::InputStream` and
-`Ziperu::OutputStream` (with AES) and `Ziperu::FileSystem` work. ZipCrypto
-writing and a few corners are still missing; see [COMPAT.md](COMPAT.md)
-for what rubyzip's own test suite says. Tracks the rubyzip 3.x API
-(`Ziperu::RUBYZIP_COMPAT_VERSION`).
+`Ziperu::OutputStream` (with AES and ZipCrypto) and `Ziperu::FileSystem`
+work; see [COMPAT.md](COMPAT.md) for what rubyzip's own test suite says.
+Tracks the rubyzip 3.x API (`Ziperu::RUBYZIP_COMPAT_VERSION`).
 
 ### Migrating from rubyzip
 
@@ -50,9 +49,12 @@ until it goes. Exception classes follow the namespace, so rescue
   (rubyzip only checks this in `extract`, not in `InputStream`.)
   `Ziperu.validate_entry_sizes = false` restores rubyzip's behaviour of
   extracting the full data with a warning.
-- Writing ZipCrypto ("traditional") encryption is not supported: the Rust
-  crate deliberately keeps that broken cipher read-only. `AESEncrypter`
-  works; `TraditionalEncrypter` raises `Ziperu::Error` on the first entry.
+- ZipCrypto ("traditional") encryption is written by ziperu itself (the
+  crate keeps that broken cipher read-only), with the same header layout
+  rubyzip produces: general purpose bits 0 and 3 set, the check byte from
+  the DOS time. Only Stored and Deflate entries can be encrypted this way,
+  and a committed `Ziperu::File` never encrypts. `AESEncrypter` is the
+  better choice wherever the consumer can open AES.
 - Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
   PKZIP 1.x methods (Shrink, Reduce, Implode) read normally; rubyzip raises
   `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
@@ -97,9 +99,11 @@ until it goes. Exception classes follow the namespace, so rescue
 - `Zip::VERSION` is ziperu's own version, not rubyzip's. Code that gates on
   it (`Gem::Version.new(Zip::VERSION) >= "3"`) should check
   `Ziperu::RUBYZIP_COMPAT_VERSION` instead.
-- An open `Ziperu::File` holds its file open until `close`. On Windows that
-  blocks a commit by *another* `Ziperu::File` on the same path with
-  `Errno::EACCES`; rubyzip closes the file between operations.
+- An open `Ziperu::File` holds its file open until `close`. On Windows a
+  commit by *another* `Ziperu::File` on the same path therefore moves the
+  old archive aside before putting the new one in place, and removes it
+  once nothing holds it; the first instance keeps reading the old bytes,
+  as it would on Unix. rubyzip closes the file between operations.
 - Using one `InputStream`, `OutputStream` or `Zip::File` from two threads
   at the same time raises `ThreadError` ("in use by another thread")
   rather than corrupting state; rubyzip's objects are not thread-safe
