@@ -2,6 +2,12 @@
 /tmp
 /pkg
 /Gemfile.lock
+/.bundle
+*.gem
+/doc
+/coverage
+.DS_Store
+Thumbs.db
 /lib/ziperu/*.so
 /lib/ziperu/*.bundle
 /lib/ziperu/*/

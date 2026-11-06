@@ -174,4 +174,8 @@ manual `gem push` from that draft.
 
 ## License
 
-MIT.
+MIT, see [LICENSE.txt](LICENSE.txt). The Ruby layer ports a good part of
+rubyzip (the extra-field, filesystem, DOS time, entry-set and split code,
+and the test fixtures under `test/data/rubyzip/`), which is BSD-2-Clause;
+its notice is in [LICENSE-rubyzip.txt](LICENSE-rubyzip.txt) and the ported
+files say so at the top.

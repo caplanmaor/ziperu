@@ -27,6 +27,7 @@ Gem::Specification.new do |spec|
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE.txt",
+    "LICENSE-rubyzip.txt",
     "README.md"
   ]
   spec.require_paths = ["lib"]
