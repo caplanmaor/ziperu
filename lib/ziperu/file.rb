@@ -281,8 +281,18 @@ module Ziperu
     def extract_all(destination_directory = '.', &block)
       # Directories first, so files have somewhere to go.
       dirs, others = entries.partition(&:directory?)
+      ordered = dirs + others
 
-      (dirs + others).each do |entry|
+      # With no overwrite decision to make (no block, and Ziperu.on_exists_proc
+      # left at its default of raising) the native core extracts every
+      # qualifying entry in one call; the rest take the per-entry path.
+      slow = if block.nil? && !::Ziperu.on_exists_proc && !@restore_ownership
+               extract_all_native(ordered, destination_directory)
+             else
+               ordered
+             end
+
+      slow.each do |entry|
         if entry.symlink?
           warn "WARNING: skipped symlink '#{entry.name}' during extract_all."
           next
@@ -386,6 +396,59 @@ module Ziperu
     end
 
     private
+
+    # Entries the native core cannot take are returned for the Ruby loop:
+    # symlinks (skipped there with a warning), encrypted entries, entries
+    # not read from this archive, and names it cannot represent.
+    def extract_all_native(ordered, destination_directory)
+      native = native_archive
+      dest = ::File.absolute_path(destination_directory || '.')
+      slow = []
+      specs = []
+      by_index = {}
+      ordered.each do |entry|
+        if entry.symlink? || entry.encrypted? || !native_extractable?(entry, native)
+          slow << entry
+        else
+          specs << native_extract_spec(entry)
+          by_index[entry.index] = entry
+        end
+      end
+
+      # A few hundred entries per call, so an interrupt is noticed between
+      # calls rather than after the whole archive.
+      specs.each_slice(NATIVE_EXTRACT_BATCH) do |batch|
+        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes).each do |index, kind, path|
+          entry = by_index[index]
+          case kind
+          when :unsafe
+            warn "WARNING: skipped extracting '#{entry.name}' to '#{path}' as unsafe."
+          when :oversize
+            warn "WARNING: #{EntrySizeError.new(entry).message}"
+          end
+        end
+      end
+
+      slow
+    end
+
+    NATIVE_EXTRACT_BATCH = 256 # :nodoc:
+
+    def native_extractable?(entry, native)
+      return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.archive.equal?(native)
+      return false unless entry.file? || entry.directory?
+
+      name = entry.name
+      name.ascii_only? || (name.encoding == ::Encoding::UTF_8 && name.valid_encoding?)
+    end
+
+    # What `Entry#extract` would do for the entry, as plain values:
+    # [entry, index, name, mtime seconds, mtime nanoseconds, unix mode, directory?].
+    def native_extract_spec(entry)
+      mtime = entry.time if @restore_times
+      mode = entry.unix_perms & 0o1777 if @restore_permissions && entry.fstype == FSTYPE_UNIX && entry.unix_perms
+      [entry, entry.index, entry.name, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
+    end
 
     def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc)
       ::Dir.children(src_dir).sort.each do |child|
