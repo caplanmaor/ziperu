@@ -18,7 +18,7 @@ class PathTraversalTest < Minitest::Test
   end
 
   def extract_paths(zip_path, entries)
-    ::Zip::File.open(::File.join(TEST_FILE_ROOT, zip_path)) do |zip|
+    ::Ziperu::File.open(::File.join(TEST_FILE_ROOT, zip_path)) do |zip|
       entries.each do |entry, test|
         if test == :error
           assert_raises(Errno::ENOENT) do
@@ -144,7 +144,7 @@ class PathTraversalTest < Minitest::Test
   def test_entry_name_with_absolute_path_does_not_extract_by_accident
     in_tmpdir do |test_path|
       zip_path = File.join(TEST_FILE_ROOT, "tuzovakaoff", "absolutepath.zip")
-      Zip::File.open(zip_path) do |zip_file|
+      Ziperu::File.open(zip_path) do |zip_file|
         zip_file.each do |entry|
           entry.extract(entry.name, destination_directory: nil)
           assert File.exist?(File.join(test_path, entry.name))
@@ -157,7 +157,7 @@ class PathTraversalTest < Minitest::Test
   def test_entry_name_with_absolute_path_extracts_to_cwd_by_default
     in_tmpdir do |test_path|
       zip_path = File.join(TEST_FILE_ROOT, "tuzovakaoff", "absolutepath.zip")
-      Zip::File.open(zip_path) do |zip_file|
+      Ziperu::File.open(zip_path) do |zip_file|
         zip_file.each(&:extract)
       end
 
@@ -169,7 +169,7 @@ class PathTraversalTest < Minitest::Test
   def test_entry_name_with_absolute_path_extract_when_given_different_path
     in_tmpdir do |test_path|
       zip_path = File.join(TEST_FILE_ROOT, "tuzovakaoff", "absolutepath.zip")
-      Zip::File.open(zip_path) do |zip_file|
+      Ziperu::File.open(zip_path) do |zip_file|
         zip_file.each do |entry|
           entry.extract(destination_directory: test_path)
         end
@@ -202,7 +202,7 @@ class PathTraversalTest < Minitest::Test
     dest_dir = "out"
     in_tmpdir do |test_path|
       Dir.mkdir(dest_dir)
-      Zip::File.open(File.join(TEST_FILE_ROOT, "out_evil.zip")) do |zf|
+      Ziperu::File.open(File.join(TEST_FILE_ROOT, "out_evil.zip")) do |zf|
         zf.each do |e|
           assert_output("", /WARNING: skipped extracting '\.\.\/out_evil\//) do
             e.extract(destination_directory: dest_dir)

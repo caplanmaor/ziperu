@@ -40,8 +40,8 @@ class IoSourceTest < Minitest::Test
   BIG = Random.new(7).bytes(2_000_000)
 
   def big_archive
-    @big_archive ||= Zip::OutputStream.write_buffer do |zos|
-      zos.put_next_entry("big.bin", nil, nil, Zip::Entry::STORED)
+    @big_archive ||= Ziperu::OutputStream.write_buffer do |zos|
+      zos.put_next_entry("big.bin", nil, nil, Ziperu::Entry::STORED)
       zos.write(BIG)
       zos.put_next_entry("small.txt")
       zos.write("small\n")
@@ -50,7 +50,7 @@ class IoSourceTest < Minitest::Test
 
   def test_reads_only_what_it_needs
     io = CountingIO.new(StringIO.new(big_archive))
-    Zip::File.open_buffer(io) do |zf|
+    Ziperu::File.open_buffer(io) do |zf|
       assert_equal "small\n", zf.read("small.txt")
     end
     assert_operator io.bytes_read, :<, 300_000, "the 2 MB entry should not have been read"
@@ -61,7 +61,7 @@ class IoSourceTest < Minitest::Test
       tf.binmode
       tf.write(big_archive)
       tf.flush
-      Zip::File.open_buffer(tf) do |zf|
+      Ziperu::File.open_buffer(tf) do |zf|
         assert_equal BIG, zf.read("big.bin")
         assert_equal "small\n", zf.get_entry("small.txt").get_input_stream(&:read)
       end
@@ -69,7 +69,7 @@ class IoSourceTest < Minitest::Test
   end
 
   def test_entries_from_the_same_io_read_independently
-    Zip::InputStream.open(StringIO.new(big_archive)) do |zis|
+    Ziperu::InputStream.open(StringIO.new(big_archive)) do |zis|
       big = zis.get_next_entry
       assert_equal "big.bin", big.name
       first = zis.read(1000)
@@ -88,7 +88,7 @@ class IoSourceTest < Minitest::Test
       wr.close
     end
     names = []
-    Zip::InputStream.open(rd) do |zis|
+    Ziperu::InputStream.open(rd) do |zis|
       while (entry = zis.get_next_entry)
         names << entry.name
         assert_equal "short\n", zis.read if entry.name == "short.txt"
@@ -102,7 +102,7 @@ class IoSourceTest < Minitest::Test
 
   def test_io_exceptions_surface_as_io_errors
     io = ExplodingIO.new(StringIO.new(File.binread(fixture("text.zip"))))
-    Zip::File.open_buffer(io) do |zf|
+    Ziperu::File.open_buffer(io) do |zf|
       io.armed = true
       error = assert_raises(IOError) { zf.read("long.txt") }
       assert_match(/boom from the io/, error.message)
@@ -113,11 +113,11 @@ class IoSourceTest < Minitest::Test
 
   def test_lazy_source_survives_writing_back_to_the_same_buffer
     io = StringIO.new(big_archive.dup)
-    Zip::File.open_buffer(io) do |zf|
+    Ziperu::File.open_buffer(io) do |zf|
       zf.get_output_stream("added.txt") { |os| os.write "added" }
       zf.remove("small.txt")
     end
-    Zip::File.open_buffer(io) do |zf|
+    Ziperu::File.open_buffer(io) do |zf|
       assert_equal %w[added.txt big.bin], zf.entries.map(&:name).sort
       assert_equal "added", zf.read("added.txt")
       assert_equal BIG, zf.read("big.bin")
@@ -125,7 +125,7 @@ class IoSourceTest < Minitest::Test
   end
 
   def test_io_stays_alive_while_a_reader_uses_it
-    zis = Zip::InputStream.new(StringIO.new(big_archive))
+    zis = Ziperu::InputStream.new(StringIO.new(big_archive))
     zis.get_next_entry
     GC.start
     assert_equal BIG.byteslice(0, 65_536), zis.read(65_536)

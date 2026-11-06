@@ -1,4 +1,4 @@
-//! `Zip::Native::Archive`: a read-only handle on a parsed central directory.
+//! `Ziperu::Native::Archive`: a read-only handle on a parsed central directory.
 //!
 //! Entry metadata crosses the Ruby boundary as plain Hashes (all at once via
 //! `entries`, or one at a time via `entry_meta`); afterwards Ruby only talks
@@ -17,7 +17,7 @@ use crate::gvl::maybe_without_gvl;
 use crate::reader::EntryReader;
 use crate::source::Source;
 
-#[magnus::wrap(class = "Zip::Native::Archive", free_immediately)]
+#[magnus::wrap(class = "Ziperu::Native::Archive", free_immediately)]
 pub struct Archive {
     // Single-threaded under the GVL; RefCell gives us &mut for by_index.
     // `None` once closed, which releases the file handle at once rather

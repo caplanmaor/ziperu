@@ -1,9 +1,9 @@
-//! Map `zip::result::ZipError` onto the `Zip::*` exception hierarchy that
-//! `lib/zip/errors.rb` defines.
+//! Map `zip::result::ZipError` onto the `Ziperu::*` exception hierarchy that
+//! `lib/ziperu/errors.rb` defines.
 //!
 //! rubyzip's exception constructors take domain objects (an entry, a Zlib
 //! error) rather than messages, so where Rust lacks the object it raises a
-//! `Zip::Native::*` subclass of `Zip::Error` and the Ruby layer re-raises
+//! `Ziperu::Native::*` subclass of `Ziperu::Error` and the Ruby layer re-raises
 //! the rubyzip-shaped one.
 
 use magnus::{prelude::*, value::Lazy, Error, ExceptionClass, Ruby};
@@ -14,16 +14,16 @@ macro_rules! exception {
     ($name:ident, $path:literal) => {
         static $name: Lazy<ExceptionClass> = Lazy::new(|ruby| {
             ruby.eval::<ExceptionClass>($path)
-                .expect(concat!($path, " must be defined in lib/zip/errors.rb"))
+                .expect(concat!($path, " must be defined in lib/ziperu/errors.rb"))
         });
     };
 }
 
-exception!(ERROR, "Zip::Error");
-exception!(DECOMPRESSION_ERROR, "Zip::DecompressionError");
-exception!(NATIVE_SIZE_LIMIT_ERROR, "Zip::Native::SizeLimitError");
-exception!(NATIVE_PASSWORD_ERROR, "Zip::Native::PasswordError");
-exception!(NATIVE_UNSUPPORTED_ERROR, "Zip::Native::UnsupportedError");
+exception!(ERROR, "Ziperu::Error");
+exception!(DECOMPRESSION_ERROR, "Ziperu::DecompressionError");
+exception!(NATIVE_SIZE_LIMIT_ERROR, "Ziperu::Native::SizeLimitError");
+exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
+exception!(NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
 exception!(ENOENT, "Errno::ENOENT");
 exception!(EACCES, "Errno::EACCES");
 
@@ -80,7 +80,7 @@ pub fn size_limit_error(ruby: &Ruby) -> Error {
     )
 }
 
-/// `Zip::DecompressionError.new(zlib_error)` wants an error object; an
+/// `Ziperu::DecompressionError.new(zlib_error)` wants an error object; an
 /// `IOError` carrying the crate's message plays that role.
 fn decompression_error(ruby: &Ruby, msg: &str) -> Error {
     let cause = match ruby.exception_io_error().new_instance((msg,)) {

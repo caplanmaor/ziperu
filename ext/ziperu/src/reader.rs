@@ -1,11 +1,11 @@
-//! `Zip::Native::EntryReader`: a chunked, decompressing reader over one entry.
+//! `Ziperu::Native::EntryReader`: a chunked, decompressing reader over one entry.
 //!
 //! Returns raw bytes; everything IO-shaped (`gets`, `lineno`, encodings) is
-//! layered on top in `lib/zip/input_stream.rb`. With `enforce_size` (the
+//! layered on top in `lib/ziperu/input_stream.rb`. With `enforce_size` (the
 //! default) it never inflates more than the declared size, so a lying header
 //! cannot become a zip bomb, and reports a header that lies the other way as
-//! `Zip::Native::SizeLimitError`. Without it, it reads to the true end of
-//! the data, which is what rubyzip does when `Zip.validate_entry_sizes` is
+//! `Ziperu::Native::SizeLimitError`. Without it, it reads to the true end of
+//! the data, which is what rubyzip does when `Ziperu.validate_entry_sizes` is
 //! off.
 
 use std::cell::RefCell;
@@ -137,7 +137,7 @@ struct Inner {
     needs_gvl: bool,
 }
 
-#[magnus::wrap(class = "Zip::Native::EntryReader", free_immediately)]
+#[magnus::wrap(class = "Ziperu::Native::EntryReader", free_immediately)]
 pub struct EntryReader {
     // Single-threaded under the GVL.
     inner: RefCell<Inner>,

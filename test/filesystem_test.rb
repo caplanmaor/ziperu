@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-# Smoke test for the Zip::FileSystem mixin (rubyzip's own filesystem tests
+# Smoke test for the Ziperu::FileSystem mixin (rubyzip's own filesystem tests
 # run against it via `rake compat`).
 
 require_relative "test_helper"
-require "zip/filesystem"
+require "ziperu/filesystem"
 require "tmpdir"
 
 class FileSystemTest < Minitest::Test
@@ -21,7 +21,7 @@ class FileSystemTest < Minitest::Test
   end
 
   def test_file_api
-    Zip::File.open(@zip) do |zf|
+    Ziperu::File.open(@zip) do |zf|
       assert zf.file.exist?("short.txt")
       assert zf.file.file?("short.txt")
       assert zf.file.directory?("dir")
@@ -35,7 +35,7 @@ class FileSystemTest < Minitest::Test
   end
 
   def test_dir_api
-    Zip::File.open(@zip) do |zf|
+    Ziperu::File.open(@zip) do |zf|
       assert_equal %w[crlf.txt dir empty.txt long.txt short.txt], zf.dir.entries(".").sort
       assert_equal %w[bin.dat], zf.dir.entries("dir")
       assert_equal %w[crlf.txt empty.txt long.txt short.txt], zf.dir.glob("*.txt").map(&:name).sort
@@ -43,13 +43,13 @@ class FileSystemTest < Minitest::Test
   end
 
   def test_mutation_through_file_api
-    Zip::File.open(@zip) do |zf|
+    Ziperu::File.open(@zip) do |zf|
       zf.file.open("written.txt", "w") { |f| f.puts "via file api" }
       zf.dir.mkdir("made")
       zf.file.rename("short.txt", "renamed.txt")
       zf.file.delete("empty.txt")
     end
-    Zip::File.open(@zip) do |zf|
+    Ziperu::File.open(@zip) do |zf|
       assert_equal "via file api\n", zf.file.read("written.txt")
       assert zf.file.directory?("made")
       assert_equal "short\n", zf.file.read("renamed.txt")
@@ -63,11 +63,11 @@ class FileSystemTest < Minitest::Test
   def test_chmod_persists_through_raw_copy
     zip = File.join(@tmp, "unix.zip")
     FileUtils.cp(fixture("rubyzip/zipWithDirs.zip"), zip)
-    before = Zip::File.open(zip) { |zf| zf.get_entry("dir1/file11").compressed_size }
+    before = Ziperu::File.open(zip) { |zf| zf.get_entry("dir1/file11").compressed_size }
 
-    Zip::File.open(zip) { |zf| zf.file.chmod(0o600, "dir1/file11") }
+    Ziperu::File.open(zip) { |zf| zf.file.chmod(0o600, "dir1/file11") }
 
-    Zip::File.open(zip) do |zf|
+    Ziperu::File.open(zip) do |zf|
       entry = zf.get_entry("dir1/file11")
       assert_equal 0o600, zf.file.stat("dir1/file11").mode & 0o777
       assert_equal before, entry.compressed_size, "entry was copied, not recompressed"
@@ -76,7 +76,7 @@ class FileSystemTest < Minitest::Test
 
   def test_local_extra_fields_merge_lazily
     # ntfs.zip and oddExtraField.zip carry timestamps/uid in local headers.
-    Zip::File.open(fixture("rubyzip/ntfs.zip")) do |zf|
+    Ziperu::File.open(fixture("rubyzip/ntfs.zip")) do |zf|
       entry = zf.first
       assert_predicate entry, :absolute_time?
       refute_nil entry.atime

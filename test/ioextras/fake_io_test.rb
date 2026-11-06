@@ -6,7 +6,7 @@ require_relative "../test_helper"
 
 class FakeIOTest < Minitest::Test
   class FakeIOUsingClass
-    include Zip::IOExtras::FakeIO
+    include Ziperu::IOExtras::FakeIO
   end
 
   def test_kind_of?

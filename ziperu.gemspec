@@ -1,16 +1,17 @@
 # frozen_string_literal: true
 
-require_relative "lib/zip/version"
+require_relative "lib/ziperu/version"
 
 Gem::Specification.new do |spec|
   spec.name = "ziperu"
-  spec.version = Zip::VERSION
+  spec.version = Ziperu::VERSION
   spec.authors = ["Maor Caplan"]
   spec.email = ["caplanmaor@gmail.com"]
 
   spec.summary = "A drop-in rubyzip replacement backed by Rust."
-  spec.description = "Zip reading and writing for Ruby with rubyzip's API, " \
-                     "implemented on the Rust `zip` crate via Magnus. " \
+  spec.description = "Zip reading and writing for Ruby with rubyzip's API under the " \
+                     "Ziperu namespace, implemented on the Rust `zip` crate via Magnus. " \
+                     "`require \"zip\"` aliases Zip = Ziperu so rubyzip code runs unchanged. " \
                      "Precompiled binaries, no C toolchain needed."
   spec.homepage = "https://github.com/maorcaplan/ziperu"
   spec.license = "MIT"

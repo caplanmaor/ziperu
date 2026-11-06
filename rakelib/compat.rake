@@ -3,7 +3,7 @@
 # Runs rubyzip's own test suite against this gem and reports how much of it
 # passes. `rake compat` fetches rubyzip's source into tmp/, generates its
 # fixtures with the real rubyzip, then runs each test file in a subprocess
-# with `require "zip"` resolving to lib/ here. Results land in COMPAT.md.
+# with `require "ziperu"` resolving to lib/ here. Results land in COMPAT.md.
 
 require "fileutils"
 require "json"
@@ -167,7 +167,7 @@ def write_report(results)
   lines = []
   lines << "# rubyzip compatibility"
   lines << ""
-  lines << "rubyzip #{RUBYZIP_VERSION}'s own test suite run against ziperu #{Zip::VERSION rescue "?"} " \
+  lines << "rubyzip #{RUBYZIP_VERSION}'s own test suite run against ziperu #{Ziperu::VERSION rescue "?"} " \
            "(`rake compat`, #{Time.now.utc.strftime("%Y-%m-%d")})."
   lines << ""
   lines << "**#{totals[:passed]} of #{totals[:runs]} tests pass (#{percent(totals[:passed], totals[:runs])}%)** " \

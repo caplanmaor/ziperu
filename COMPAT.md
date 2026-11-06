@@ -1,8 +1,8 @@
 # rubyzip compatibility
 
-rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-05).
+rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-06).
 
-**402 of 476 tests pass (84.5%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
+**401 of 476 tests pass (84.2%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -35,7 +35,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/filesystem/dir_test.rb | 7 | 7 | 0 | 0 | 0 |
 | test/filesystem/directory_iterator_test.rb | 5 | 5 | 0 | 0 | 0 |
 | test/filesystem/file_mutating_test.rb | 5 | 5 | 0 | 0 | 0 |
-| test/filesystem/file_nonmutating_test.rb | 48 | 48 | 0 | 0 | 0 |
+| test/filesystem/file_nonmutating_test.rb | 47 | 48 | 1 | 0 | 0 |
 | test/filesystem/file_stat_test.rb | 12 | 12 | 0 | 0 | 0 |
 | test/inflater_test.rb | 0 | 2 | 0 | 2 | 0 |
 | test/input_stream_test.rb | 28 | 30 | 2 | 0 | 0 |
@@ -127,6 +127,9 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 
 **test/file_test.rb**
 - `ZipFileTest#test_get_input_stream_stored_with_gpflag_bit3`
+
+**test/filesystem/file_nonmutating_test.rb**
+- `FileNonmutatingTest#test_glob`
 
 **test/inflater_test.rb**
 - `InflaterTest#test_read_everything:`

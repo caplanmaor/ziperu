@@ -1,6 +1,6 @@
-//! `Zip::Native::Writer`: writes a new archive entry by entry.
+//! `Ziperu::Native::Writer`: writes a new archive entry by entry.
 //!
-//! The Ruby side (`Zip::OutputStream`) owns entry objects, defaults and the
+//! The Ruby side (`Ziperu::OutputStream`) owns entry objects, defaults and the
 //! IO-like methods; this is the thin layer over `zip::ZipWriter`. The sink
 //! is either a file on disk or an in-memory buffer whose bytes `finish`
 //! returns, which is how `write_buffer(io)` feeds an arbitrary Ruby IO.
@@ -47,7 +47,7 @@ impl Seek for Sink {
     }
 }
 
-#[magnus::wrap(class = "Zip::Native::Writer", free_immediately)]
+#[magnus::wrap(class = "Ziperu::Native::Writer", free_immediately)]
 pub struct Writer {
     // `None` once finished. Single-threaded under the GVL.
     inner: RefCell<Option<ZipWriter<Sink>>>,

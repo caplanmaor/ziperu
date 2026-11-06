@@ -1,6 +1,6 @@
 //! Native core for the `ziperu` gem.
 //!
-//! The Rust side exposes a small set of primitives under `Zip::Native`;
+//! The Rust side exposes a small set of primitives under `Ziperu::Native`;
 //! everything Ruby-shaped (kwargs, blocks, `Enumerable`, error messages)
 //! lives in `lib/`.
 
@@ -15,7 +15,7 @@ use magnus::{function, method, prelude::*, Error, Ruby};
 
 #[magnus::init(name = "ziperu")]
 fn init(ruby: &Ruby) -> Result<(), Error> {
-    let zip = ruby.define_module("Zip")?;
+    let zip = ruby.define_module("Ziperu")?;
     let native = zip.define_module("Native")?;
 
     let archive = native.define_class("Archive", ruby.class_object())?;

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-require "zip"
+require "ziperu"
 require "minitest/autorun"
 
 # CI runs the suite once more under GC stress to catch unmarked Ruby values

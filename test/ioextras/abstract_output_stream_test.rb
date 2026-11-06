@@ -6,7 +6,7 @@ require_relative "../test_helper"
 
 class AbstractOutputStreamTest < Minitest::Test
   class TestOutputStream
-    include ::Zip::IOExtras::AbstractOutputStream
+    include ::Ziperu::IOExtras::AbstractOutputStream
 
     attr_accessor :buffer
 

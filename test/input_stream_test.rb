@@ -33,42 +33,42 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_new
-    zis = ::Zip::InputStream.new(fixture(TEXT_ZIP))
+    zis = ::Ziperu::InputStream.new(fixture(TEXT_ZIP))
     assert_stream_contents(zis)
     assert_equal(true, zis.eof?)
     zis.close
   end
 
   def test_open_with_block
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       assert_stream_contents(zis)
       assert_equal(true, zis.eof?)
     end
   end
 
   def test_open_file_without_block
-    zis = ::Zip::InputStream.open(File.new(fixture(TEXT_ZIP), "rb"))
+    zis = ::Ziperu::InputStream.open(File.new(fixture(TEXT_ZIP), "rb"))
     assert_stream_contents(zis)
   end
 
   def test_open_string_io_with_block
     string_io = ::StringIO.new(File.binread(fixture(TEXT_ZIP)))
-    ::Zip::InputStream.open(string_io) do |zis|
+    ::Ziperu::InputStream.open(string_io) do |zis|
       assert_stream_contents(zis)
       assert_equal(true, zis.eof?)
     end
   end
 
   def test_open_io_like_with_block
-    ::Zip::InputStream.open(IOLike.new(fixture(TEXT_ZIP), "rb")) do |zis|
+    ::Ziperu::InputStream.open(IOLike.new(fixture(TEXT_ZIP), "rb")) do |zis|
       assert_stream_contents(zis)
     end
   end
 
   def test_open_file_with_gp3bit_set_reads_anyway
-    # rubyzip raises Zip::StreamingError here; we read via the central
+    # rubyzip raises Ziperu::StreamingError here; we read via the central
     # directory, so the entry is fully readable.
-    ::Zip::InputStream.open(fixture("rubyzip/gpbit3stored.zip")) do |zis|
+    ::Ziperu::InputStream.open(fixture("rubyzip/gpbit3stored.zip")) do |zis|
       entry = zis.get_next_entry
       assert_equal("file1.txt", entry.name)
       assert_equal(1327, zis.read.bytesize)
@@ -77,16 +77,16 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_open_encrypted_archive_raises_error
-    ::Zip::InputStream.open(fixture("rubyzip/zipWithEncryption.zip")) do |zis|
-      error = assert_raises(::Zip::Error) { zis.get_next_entry }
+    ::Ziperu::InputStream.open(fixture("rubyzip/zipWithEncryption.zip")) do |zis|
+      error = assert_raises(::Ziperu::Error) { zis.get_next_entry }
       assert_equal("A password is required to decode this zip file.", error.message)
     end
   end
 
   def test_encrypted_archive_with_wrong_password
-    decrypter = Zip::TraditionalDecrypter.new("wrong")
-    ::Zip::InputStream.open(fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"), decrypter: decrypter) do |zis|
-      assert_raises(::Zip::Error) do
+    decrypter = Ziperu::TraditionalDecrypter.new("wrong")
+    ::Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"), decrypter: decrypter) do |zis|
+      assert_raises(::Ziperu::Error) do
         zis.get_next_entry
         zis.read
       end
@@ -94,8 +94,8 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_aes_encrypted_archive
-    decrypter = Zip::AESDecrypter.new("password")
-    ::Zip::InputStream.open(fixture("rubyzip/zip-aes-256.zip"), decrypter: decrypter) do |zis|
+    decrypter = Ziperu::AESDecrypter.new("password")
+    ::Ziperu::InputStream.open(fixture("rubyzip/zip-aes-256.zip"), decrypter: decrypter) do |zis|
       entry = zis.get_next_entry
       assert_equal("zip-aes-128.txt", entry.name)
       assert_equal(11, zis.read.bytesize)
@@ -103,30 +103,30 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_size_no_entry
-    zis = ::Zip::InputStream.open(fixture(TEXT_ZIP))
+    zis = ::Ziperu::InputStream.open(fixture(TEXT_ZIP))
     assert_nil(zis.size)
   end
 
   def test_size_with_entry
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
       assert_equal(File.size(fixture("text/long.txt")), zis.size)
     end
   end
 
   def test_get_entry_ftypes
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       assert_equal(:file, zis.get_next_entry.ftype)
       3.times { zis.get_next_entry }
       assert_equal(:directory, zis.get_next_entry.ftype) if false
     end
-    ::Zip::InputStream.open(fixture("rubyzip/zipWithDirs.zip")) do |zis|
+    ::Ziperu::InputStream.open(fixture("rubyzip/zipWithDirs.zip")) do |zis|
       assert_equal(:directory, zis.get_next_entry.ftype)
     end
   end
 
   def test_incomplete_reads
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       entry = zis.get_next_entry # long.txt
       assert_equal(false, zis.eof?)
       assert_equal("long.txt", entry.name)
@@ -150,7 +150,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_read_with_number_of_bytes_returns_nil_at_eof
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       entry = zis.get_next_entry
       zis.read(entry.size)
       assert_equal(true, zis.eof?)
@@ -160,13 +160,13 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_read_with_zero_returns_empty_string
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       assert_equal("", zis.read(0))
     end
   end
 
   def test_rewind
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       e = zis.get_next_entry
       assert_equal("long.txt", e.name)
 
@@ -194,7 +194,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_mix_read_and_gets
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
       assert_equal("#!/usr/bin/env ruby", zis.gets(chomp: true))
       assert_equal(false, zis.eof?)
@@ -206,7 +206,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_ungetc
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
       first_line = zis.gets(chomp: true)
       first_line.reverse.bytes.each { |b| zis.ungetc(b) }
@@ -216,7 +216,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_readline_then_read
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
       assert_equal("#!/usr/bin/env ruby\n", zis.readline)
       refute(zis.eof?)
@@ -226,7 +226,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_each_line_over_crlf
-    ::Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       5.times { zis.get_next_entry }
       assert_equal("crlf.txt", zis.get_next_entry.name)
       assert_equal(["#{'x' * 48}\r\n", "#{'y' * 49}\r\n", "rest"], zis.each_line("\r\n").to_a)
@@ -234,7 +234,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_with_no_maxlen_deflated
-    Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
 
       buffer = zis.sysread
@@ -246,7 +246,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_with_no_maxlen_stored
-    Zip::InputStream.open(fixture("rubyzip/zipWithStoredCompression.zip")) do |zis|
+    Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompression.zip")) do |zis|
       zis.get_next_entry
 
       buffer = zis.sysread
@@ -258,7 +258,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_text_deflated
-    Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry
 
       buffer = zis.sysread(20)
@@ -279,7 +279,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_text_stored
-    Zip::InputStream.open(fixture("rubyzip/zipWithStoredCompression.zip")) do |zis|
+    Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompression.zip")) do |zis|
       zis.get_next_entry
 
       buffer = zis.sysread(24)
@@ -298,9 +298,9 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_text_stored_encrypted
-    Zip::InputStream.open(
+    Ziperu::InputStream.open(
       fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"),
-      decrypter: Zip::TraditionalDecrypter.new("password")
+      decrypter: Ziperu::TraditionalDecrypter.new("password")
     ) do |zis|
       zis.get_next_entry
 
@@ -315,7 +315,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_sysread_binary_stored
-    Zip::InputStream.open(fixture("rubyzip/bin_stored.zip")) do |zis|
+    Ziperu::InputStream.open(fixture("rubyzip/bin_stored.zip")) do |zis|
       zis.get_next_entry
 
       buffer = zis.sysread(8)
@@ -330,7 +330,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_set_encoding
-    Zip::InputStream.open(fixture(TEXT_ZIP), internal_encoding: Encoding::UTF_8) do |zis|
+    Ziperu::InputStream.open(fixture(TEXT_ZIP), internal_encoding: Encoding::UTF_8) do |zis|
       zis.set_encoding(Encoding::UTF_8, Encoding::BINARY)
       zis.get_next_entry
       assert_equal(Encoding::BINARY, zis.readline.encoding)
@@ -338,7 +338,7 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_kind_of_io
-    Zip::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+    Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       assert_kind_of(IO, zis)
       zis.get_next_entry
       out = StringIO.new
@@ -348,9 +348,9 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_offset_positions_at_entry
-    Zip::File.open(fixture(TEXT_ZIP)) do |zf|
+    Ziperu::File.open(fixture(TEXT_ZIP)) do |zf|
       offset = zf.get_entry("short.txt").local_header_offset
-      Zip::InputStream.open(fixture(TEXT_ZIP), offset: offset) do |zis|
+      Ziperu::InputStream.open(fixture(TEXT_ZIP), offset: offset) do |zis|
         assert_equal("short.txt", zis.get_next_entry.name)
         assert_equal("short\n", zis.read)
       end
@@ -358,22 +358,22 @@ class ZipInputStreamTest < Minitest::Test
   end
 
   def test_closed_stream_raises
-    zis = Zip::InputStream.open(fixture(TEXT_ZIP))
+    zis = Ziperu::InputStream.open(fixture(TEXT_ZIP))
     zis.close
     assert_raises(IOError) { zis.get_next_entry }
   end
 
   def test_corrupt_data_raises_decompression_error
     bytes = File.binread(fixture(TEXT_ZIP))
-    Zip::File.open(fixture(TEXT_ZIP)) do |zf|
+    Ziperu::File.open(fixture(TEXT_ZIP)) do |zf|
       e = zf.get_entry("long.txt")
       # Clobber the middle of the deflate stream.
       pos = e.data_offset + (e.compressed_size / 2)
       bytes[pos, 32] = "\xFF".b * 32
     end
-    Zip::InputStream.open(StringIO.new(bytes)) do |zis|
+    Ziperu::InputStream.open(StringIO.new(bytes)) do |zis|
       zis.get_next_entry
-      assert_raises(Zip::DecompressionError, Zip::Error) { zis.read }
+      assert_raises(Ziperu::DecompressionError, Ziperu::Error) { zis.read }
     end
   end
 end

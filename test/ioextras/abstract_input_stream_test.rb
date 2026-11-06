@@ -19,7 +19,7 @@ class AbstractInputStreamTest < Minitest::Test
   ].freeze
 
   class TestAbstractInputStream
-    include ::Zip::IOExtras::AbstractInputStream
+    include ::Ziperu::IOExtras::AbstractInputStream
 
     def initialize(string, **opts)
       super(**opts)
