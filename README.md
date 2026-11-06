@@ -58,6 +58,28 @@ until it goes. Exception classes follow the namespace, so rescue
 - AES entries of 20 bytes or more are written as AE-1 (with a real CRC in the
   header) rather than rubyzip's always-AE-2 with a zero CRC; both are read
   by every AES-aware tool, and AE-1 adds an integrity check.
+- Entry names and comments are the stored bytes (binary strings), as in
+  rubyzip, unless `Ziperu.force_entry_names_encoding` names an encoding.
+  Unlike rubyzip, a lookup (`find_entry`, `get_entry`, `read`) accepts the
+  name in any encoding with the same bytes, so `zf.read("日本.txt")` works
+  without `.b`. Non-ASCII names are written with the UTF-8 flag set.
+- Writing two entries with the same name to one `OutputStream` raises
+  `Ziperu::Error`; rubyzip writes both and the last one wins.
+- A CRC mismatch while reading raises `Ziperu::DecompressionError`;
+  rubyzip hands back the bytes.
+- Every written file entry carries Unix permissions in its external
+  attributes (0644 by default), and such permissions are read back whatever
+  the entry's host system byte says; rubyzip leaves `unix_perms` nil for
+  entries written on Windows. Setuid, setgid and sticky bits are not
+  written, and a symlink added from disk is written as a regular file
+  holding the link target.
+- Editing an existing entry's comment, time or extra fields and committing
+  rewrites that entry's data under a fresh header; a rename or a chmod on
+  its own keeps the byte-for-byte copy.
+- Using one `InputStream`, `OutputStream` or `Zip::File` from two threads
+  at the same time raises `ThreadError` ("in use by another thread")
+  rather than corrupting state; rubyzip's objects are not thread-safe
+  either, they just fail less loudly.
 - Class names are `Ziperu::...` even when loaded through the `Zip` alias:
   `Zip::Entry.name` is `"Ziperu::Entry"`, and so are `inspect` output and
   exception messages. Comparisons against the string `"Zip::Entry"` need

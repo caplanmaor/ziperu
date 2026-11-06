@@ -289,6 +289,40 @@ class FileMutationTest < Minitest::Test
     File.open(@zip, "rb") { |f| assert_equal 6, Ziperu::File.count_entries(f) }
   end
 
+  # Edits the native raw copy cannot carry are written by re-streaming the
+  # entry; a chmod or a rename alone still copies the data as is.
+  def test_metadata_edits_persist_through_commit
+    stamp = Time.utc(2001, 2, 3, 4, 5, 6)
+    Ziperu::File.open(@zip) do |zf|
+      zf.get_entry("long.txt").comment = "edited"
+      e = zf.get_entry("short.txt")
+      e.time = stamp
+      zf.rename(e, "stamped.txt")
+      zf.get_entry("crlf.txt").unix_perms = 0o600
+    end
+    Ziperu::File.open(@zip) do |zf|
+      long = zf.get_entry("long.txt")
+      assert_equal "edited", long.comment
+      stamped = zf.get_entry("stamped.txt")
+      # DOS times are wall-clock fields; the zone they come back in is local.
+      assert_equal stamp.strftime("%F %T"), stamped.time.strftime("%F %T")
+      assert_predicate stamped.time, :absolute_time?, "the extended timestamp was written too"
+      assert_equal 0o600, zf.get_entry("crlf.txt").unix_perms
+      assert_equal "short\n", zf.read("stamped.txt")
+    end
+  end
+
+  def test_host_system_survives_a_rewrite
+    unix = File.join(@tmp, "unix.zip")
+    FileUtils.cp(fixture("rubyzip/zipWithDirs.zip"), unix)
+    Ziperu::File.open(unix) { |zf| zf.get_entry("dir1/file11").comment = "c" }
+    Ziperu::File.open(unix) do |zf|
+      e = zf.get_entry("dir1/file11")
+      assert_equal Ziperu::FSTYPE_UNIX, e.fstype
+      assert_equal "c", e.comment
+    end
+  end
+
   def test_written_archive_is_valid_for_python
     Ziperu::File.open(@zip) do |zf|
       zf.add("src.txt", @src)

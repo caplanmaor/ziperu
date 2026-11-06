@@ -39,6 +39,8 @@ module Ziperu
         id  = binstr[i, 2]
         len = binstr[i + 2, 2].to_s.unpack1('v')
         if id && ID_MAP.member?(id)
+          break if len.nil? # a known header cut off before its length
+
           extra_field_type_exist(binstr, id, len, i)
         elsif id
           break unless extra_field_type_unknown(binstr, len, i, local)

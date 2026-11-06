@@ -34,9 +34,10 @@ pub fn without_gvl<F: FnOnce() -> R, R>(f: F) -> R {
         f: Some(f),
         out: None,
     };
-    // SAFETY: `call` lives for the whole blocking call; no unblock function
-    // is given, so the thread cannot be interrupted mid-call, which is fine
-    // for work bounded by one 64 KiB chunk.
+    // SAFETY: `call` lives for the whole blocking call. No unblock function
+    // is given, so `Thread#kill` or an interrupt waits for `f` to finish:
+    // a chunked read returns within one 64 KiB chunk, but `read_entry`
+    // and `write` of a large String run to the end of the data first.
     unsafe {
         rb_sys::rb_thread_call_without_gvl(
             Some(trampoline::<F, R>),

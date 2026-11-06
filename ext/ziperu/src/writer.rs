@@ -10,11 +10,12 @@ use std::fs;
 use std::io::{self, BufWriter, Cursor, Seek, SeekFrom, Write};
 
 use magnus::{prelude::*, Error, RHash, RString, Ruby};
+use zip::result::ZipError;
 use zip::write::FullFileOptions;
-use zip::{AesMode, CompressionMethod, DateTime, ZipWriter};
+use zip::{AesMode, CompressionMethod, DateTime, System, ZipWriter};
 
 use crate::archive::Archive;
-use crate::errors::{io_error, zip_error};
+use crate::errors::{busy_error, io_error, zip_error, ERROR};
 use crate::gvl::{maybe_without_gvl, without_gvl};
 
 pub enum Sink {
@@ -49,7 +50,8 @@ impl Seek for Sink {
 
 #[magnus::wrap(class = "Ziperu::Native::Writer", free_immediately)]
 pub struct Writer {
-    // `None` once finished. Single-threaded under the GVL.
+    // `None` once finished. A write releases the GVL while borrowed, so a
+    // failed borrow means another thread is writing through this object.
     inner: RefCell<Option<ZipWriter<Sink>>>,
 }
 
@@ -60,6 +62,9 @@ struct EntryOptions {
     dos_date: u16,
     dos_time: u16,
     unix_perms: Option<u32>,
+    /// The "made by" host system byte (rubyzip's fstype), kept from the
+    /// entry rather than defaulting to the platform the writer runs on.
+    fstype: Option<u8>,
     large_file: bool,
     comment: Option<String>,
     /// Concatenated local-format extra fields: id, len, data.
@@ -89,11 +94,14 @@ impl EntryOptions {
                 .transpose()?
                 .unwrap_or(0),
             unix_perms: opt("unix_perms")?.map(u32::try_convert).transpose()?,
+            fstype: opt("fstype")?.map(u8::try_convert).transpose()?,
             large_file: opt("large_file")?
                 .map(bool::try_convert)
                 .transpose()?
                 .unwrap_or(false),
-            comment: opt("comment")?.map(String::try_convert).transpose()?,
+            comment: opt("comment")?
+                .map(|v| utf8_text(ruby, "entry comment", RString::try_convert(v)?))
+                .transpose()?,
             extra: opt("extra")?
                 .map(RString::try_convert)
                 .transpose()?
@@ -130,6 +138,9 @@ impl EntryOptions {
             );
         if let Some(perms) = self.unix_perms {
             options = options.unix_permissions(perms);
+        }
+        if let Some(fstype) = self.fstype {
+            options = options.system(System::from(fstype));
         }
         if let Some(comment) = &self.comment {
             options = options.with_file_comment(comment.as_str());
@@ -184,7 +195,7 @@ impl Writer {
         let file_options = options.to_file_options(ruby)?;
         rb_self.with_writer(ruby, |w| {
             w.start_file_with_options(file_options.name(&name))
-                .map_err(|e| zip_error(ruby, e))
+                .map_err(|e| entry_error(ruby, &name, e))
         })
     }
 
@@ -192,14 +203,15 @@ impl Writer {
     pub fn add_directory(
         ruby: &Ruby,
         rb_self: &Self,
-        name: String,
+        name: RString,
         opts: RHash,
     ) -> Result<(), Error> {
+        let name = utf8_name(ruby, name)?;
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
         rb_self.with_writer(ruby, |w| {
-            w.add_directory(name, file_options)
-                .map_err(|e| zip_error(ruby, e))
+            w.add_directory(&name, file_options)
+                .map_err(|e| entry_error(ruby, name.as_bytes(), e))
         })
     }
 
@@ -222,11 +234,13 @@ impl Writer {
         rb_self: &Self,
         archive: &Archive,
         index: usize,
-        new_name: Option<String>,
+        new_name: Option<RString>,
         touch: Option<RHash>,
     ) -> Result<(), Error> {
         let needs_gvl = archive.needs_gvl();
-        let mut source = archive.archive(ruby)?;
+        let new_name = new_name.map(|n| utf8_name(ruby, n)).transpose()?;
+        // A clone, so the archive's borrow is released before the GVL is.
+        let mut source = archive.archive(ruby)?.clone();
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
         let touch = touch
             .map(|h| EntryOptions::from_hash(ruby, h))
@@ -257,7 +271,8 @@ impl Writer {
     pub fn finish(ruby: &Ruby, rb_self: &Self) -> Result<Option<RString>, Error> {
         let writer = rb_self
             .inner
-            .borrow_mut()
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "writer"))?
             .take()
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
         let sink = writer.finish().map_err(|e| zip_error(ruby, e))?;
@@ -271,7 +286,7 @@ impl Writer {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner.borrow().is_none()
+        self.inner.try_borrow().is_ok_and(|w| w.is_none())
     }
 
     fn with_writer<T>(
@@ -279,10 +294,48 @@ impl Writer {
         ruby: &Ruby,
         f: impl FnOnce(&mut ZipWriter<Sink>) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let mut guard = self.inner.borrow_mut();
+        let mut guard = self
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "writer"))?;
         let writer = guard
             .as_mut()
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
         f(writer)
+    }
+}
+
+/// The crate takes directory names, rename targets and entry comments as
+/// `str` (file names are raw bytes), so this limit is stated plainly
+/// rather than surfacing as a conversion error.
+fn utf8_name(ruby: &Ruby, name: RString) -> Result<String, Error> {
+    utf8_text(ruby, "entry name", name)
+}
+
+fn utf8_text(ruby: &Ruby, what: &str, text: RString) -> Result<String, Error> {
+    let bytes = unsafe { text.as_slice() };
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        Error::new(
+            ruby.get_inner(&ERROR),
+            format!(
+                "{what} {:?} is not valid UTF-8, which the native writer needs for directory names, renames and comments",
+                String::from_utf8_lossy(bytes)
+            ),
+        )
+    })
+}
+
+/// `zip_error`, except that the crate's duplicate-name message (which
+/// shows the name as a Debug dump) is replaced with one naming the entry.
+fn entry_error(ruby: &Ruby, name: &[u8], err: ZipError) -> Error {
+    match &err {
+        ZipError::InvalidArchive(msg) if msg.starts_with("Duplicate filename") => Error::new(
+            ruby.get_inner(&ERROR),
+            format!(
+                "entry {:?} was already written to this stream",
+                String::from_utf8_lossy(name)
+            ),
+        ),
+        _ => zip_error(ruby, err),
     }
 }

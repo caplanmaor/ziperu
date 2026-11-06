@@ -100,12 +100,12 @@ class IoSourceTest < Minitest::Test
     rd&.close
   end
 
-  def test_io_exceptions_surface_as_io_errors
+  def test_io_exceptions_propagate_unchanged
     io = ExplodingIO.new(StringIO.new(File.binread(fixture("text.zip"))))
     Ziperu::File.open_buffer(io) do |zf|
       io.armed = true
-      error = assert_raises(IOError) { zf.read("long.txt") }
-      assert_match(/boom from the io/, error.message)
+      error = assert_raises(RuntimeError) { zf.read("long.txt") }
+      assert_equal "boom from the io", error.message
       io.armed = false
       assert_equal "short\n", zf.read("short.txt")
     end

@@ -65,8 +65,6 @@ module Ziperu
     # entry that is not (yet) in an archive.
     attr_reader :index # :nodoc:
 
-    # The native archive the entry was read from, or nil.
-
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,
                :unix_gid=, :unix_perms=, :unix_uid=
@@ -167,7 +165,7 @@ module Ziperu
     end
 
     def time=(value, component: :mtime)
-      @dirty = true
+      mark_dirty!(:time=)
       unless extra.member?(:universaltime) || extra.member?(:ntfs)
         extra.create(:universaltime)
       end
@@ -343,20 +341,38 @@ module Ziperu
       get_extra_attributes_from_path(@filepath)
     end
 
-    # Writes this entry (header and data) to an OutputStream. Entries read
-    # from an archive are copied without recompression.
+    # Writes this entry (header and data) to an OutputStream. An entry read
+    # from an archive is copied without recompression when it is unchanged,
+    # or when its only change is one the native raw copy can carry: a new
+    # name, or new permissions. Any other edit (comment, time, extra
+    # fields, several at once) is written by re-streaming the data under a
+    # fresh header, as rubyzip's rewrite of every header would. Entries
+    # that cannot be re-streamed (encrypted, or in a method the writer
+    # lacks) fall back to the raw copy, so only the rename or the
+    # permissions persist for them.
     def write_to_zip_output_stream(zip_output_stream) # :nodoc:
       if ftype == :directory
         zip_output_stream.put_next_entry(self)
-      elsif @filepath
+      elsif @filepath || (dirty? && !raw_copy_carries_changes? && restreamable?)
         zip_output_stream.put_next_entry(self)
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
         end
       else
-        new_name = (@name if @name != @original_name)
-        zip_output_stream.copy_raw_entry(self, new_name, touch: dirty?)
+        renamed = @name.b != @original_name.b.tr('\\', '/')
+        zip_output_stream.copy_raw_entry(self, (@name if renamed), touch: dirty? && !renamed)
       end
+    end
+
+    # What `FileSystem#chmod` sets, and what a touch on the raw copy writes.
+    PERMISSION_FIELDS = %i[unix_perms= external_file_attributes= fstype=].freeze # :nodoc:
+
+    def raw_copy_carries_changes? # :nodoc:
+      dirty_fields == [:name=] || (dirty_fields - PERMISSION_FIELDS).empty?
+    end
+
+    def restreamable? # :nodoc:
+      !encrypted? && [STORED, DEFLATED].include?(compression_method)
     end
 
     def parent_as_string # :nodoc:
@@ -367,6 +383,7 @@ module Ziperu
 
     def clean_up # :nodoc:
       @dirty = false # Any changes are written at this point.
+      @dirty_fields = []
     end
 
     def file_stat(path) # :nodoc:
@@ -387,12 +404,12 @@ module Ziperu
       @unix_perms = stat.mode & 0o7777
     end
 
-    # Decompressed contents as a binary String.
+    # Decompressed contents as a binary String, in one native call.
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
-      raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
+      raise Error, "entry '#{@name}' is not in an archive" if archive.nil?
 
-      @archive.read_entry(@index)
+      archive.read_entry(@index)
     rescue Native::SizeLimitError
       raise EntrySizeError, self
     end
@@ -408,7 +425,8 @@ module Ziperu
     # Ziperu.validate_entry_sizes is off) instead of stopping at it.
     def open_input_stream(decrypter: nil, enforce_size: true)
       if ftype == :directory
-        yield ::Ziperu::NullInputStream if block_given?
+        return yield(::Ziperu::NullInputStream) if block_given?
+
         return ::Ziperu::NullInputStream
       end
 
@@ -526,8 +544,15 @@ module Ziperu
       @zipfile = zipfile
       @archive = archive
       @index = meta[:index]
-      @name = meta[:name].dup.force_encoding(Encoding::UTF_8)
-      @original_name = @name.dup
+      # Names and comments are the stored bytes, as in rubyzip: binary
+      # unless `Ziperu.force_entry_names_encoding` says otherwise. (A UTF-8
+      # literal still finds a binary name with the same bytes.) The raw
+      # name, before separators are normalised, is what the archive knows
+      # the entry by.
+      @original_name = meta[:name].dup
+      @name = @original_name.dup
+      @name.force_encoding(::Ziperu.force_entry_names_encoding) if ::Ziperu.force_entry_names_encoding
+      @name.tr!('\\', '/')
       @size = meta[:size]
       @compressed_size = meta[:compressed_size]
       @crc = meta[:crc]
@@ -537,9 +562,8 @@ module Ziperu
       @fstype = meta[:fstype]
       @version = meta[:version_made_by]
       @external_file_attributes = meta[:external_attributes]
-      @unix_perms = meta[:unix_mode] & 0o7777 if meta[:unix_mode]
       set_time(meta[:dos_date], meta[:dos_time])
-      @comment = meta[:comment].dup.force_encoding(Encoding::UTF_8)
+      @comment = meta[:comment].dup
       @extra = ExtraField.new(meta[:extra])
       @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
@@ -584,6 +608,12 @@ module Ziperu
                    name_is_directory? ? :directory : :file
                  end
                else
+                 # Not a Unix host, so rubyzip ignores the high attribute
+                 # bits. The native writer stamps the host of the machine it
+                 # runs on, so archives written here on Windows would lose
+                 # their permissions on reread; a non-zero mode is kept.
+                 perms = (@external_file_attributes >> 16) & 0o7777
+                 @unix_perms = perms unless perms.zero?
                  name_is_directory? ? :directory : :file
                end
     end

@@ -8,23 +8,42 @@ use std::cell::{RefCell, RefMut};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 
-use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby, Value};
+use magnus::{
+    gc::Marker, prelude::*, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash,
+    RString, Ruby, TypedData, Value,
+};
 use zip::read::ZipFile;
 use zip::ZipArchive;
 
-use crate::errors::{io_error, zip_error};
+use crate::errors::{busy_error, io_error, zip_error};
 use crate::gvl::maybe_without_gvl;
 use crate::reader::EntryReader;
 use crate::source::Source;
 
-#[magnus::wrap(class = "Ziperu::Native::Archive", free_immediately)]
+/// Never pre-allocate more than this on the strength of a header field.
+const CAPACITY_HINT_MAX: u64 = 1 << 20;
+
+#[derive(TypedData)]
+#[magnus(class = "Ziperu::Native::Archive", free_immediately, mark)]
 pub struct Archive {
-    // Single-threaded under the GVL; RefCell gives us &mut for by_index.
-    // `None` once closed, which releases the file handle at once rather
-    // than when the GC gets round to it (commit renames over the file).
+    // Borrowed only while holding the GVL and never across a release of it
+    // (work that releases the GVL runs on a clone), so a failed borrow
+    // means another thread is inside a method right now. `None` once
+    // closed, which releases the file handle at once rather than when the
+    // GC gets round to it (commit renames over the file).
     inner: RefCell<Option<ZipArchive<Source>>>,
+    /// The Ruby IO behind a `Source::Ruby`, kept alive by `mark`.
+    io: Option<Opaque<Value>>,
     /// True for a Ruby IO source, whose reads must hold the GVL.
     needs_gvl: bool,
+}
+
+impl DataTypeFunctions for Archive {
+    fn mark(&self, marker: &Marker) {
+        if let Some(io) = self.io {
+            marker.mark(io);
+        }
+    }
 }
 
 impl Archive {
@@ -46,10 +65,12 @@ impl Archive {
 
     fn from_source(ruby: &Ruby, source: Source) -> Result<Self, Error> {
         let needs_gvl = source.needs_gvl();
+        let io = source.ruby_io();
         let archive = maybe_without_gvl(needs_gvl, || ZipArchive::new(source))
             .map_err(|e| zip_error(ruby, e))?;
         Ok(Self {
             inner: RefCell::new(Some(archive)),
+            io,
             needs_gvl,
         })
     }
@@ -60,18 +81,27 @@ impl Archive {
 
     /// The open archive, or an IOError once closed.
     pub(crate) fn archive(&self, ruby: &Ruby) -> Result<RefMut<'_, ZipArchive<Source>>, Error> {
-        RefMut::filter_map(self.inner.borrow_mut(), Option::as_mut)
+        let guard = self
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "archive"))?;
+        RefMut::filter_map(guard, Option::as_mut)
             .map_err(|_| Error::new(ruby.exception_io_error(), "closed archive"))
     }
 
     /// Releases the underlying file. Readers already opened keep their own
     /// handle and continue to work.
-    pub fn close(&self) {
-        self.inner.borrow_mut().take();
+    pub fn close(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
+        rb_self
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "archive"))?
+            .take();
+        Ok(())
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner.borrow().is_none()
+        self.inner.try_borrow().is_ok_and(|a| a.is_none())
     }
 
     pub fn entry_count(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
@@ -89,9 +119,9 @@ impl Archive {
         let out = ruby.ary_new_capa(archive.len());
         for i in 0..archive.len() {
             let entry = archive.by_index_raw(i).map_err(|e| zip_error(ruby, e))?;
-            let extra = raw_central_extra(&mut raw, entry.central_header_start())
+            let fields = raw_central_fields(&mut raw, entry.central_header_start())
                 .map_err(|e| io_error(ruby, e))?;
-            out.push(entry_hash(ruby, i, &entry, &extra)?)?;
+            out.push(entry_hash(ruby, i, &entry, &fields)?)?;
         }
         Ok(out)
     }
@@ -103,9 +133,9 @@ impl Archive {
         let entry = archive
             .by_index_raw(index)
             .map_err(|e| zip_error(ruby, e))?;
-        let extra = raw_central_extra(&mut raw, entry.central_header_start())
+        let fields = raw_central_fields(&mut raw, entry.central_header_start())
             .map_err(|e| io_error(ruby, e))?;
-        entry_hash(ruby, index, &entry, &extra)
+        entry_hash(ruby, index, &entry, &fields)
     }
 
     /// The raw extra field bytes of entry `index`'s local header. Some
@@ -141,25 +171,39 @@ impl Archive {
             password,
             enforce_size,
             rb_self.needs_gvl,
+            rb_self.io,
         )
     }
 
     /// Whole decompressed entry as a binary String.
     pub fn read_entry(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RString, Error> {
-        let mut archive = rb_self.archive(ruby)?;
+        // A clone (the central directory is shared behind an Arc) so the
+        // borrow is released before the GVL is.
+        let mut archive = rb_self.archive(ruby)?.clone();
         let mut entry = archive.by_index(index).map_err(|e| zip_error(ruby, e))?;
-        let mut buf = Vec::with_capacity(entry.size().min(u32::MAX as u64) as usize);
+        // A hint only: the declared size is untrusted and may be a lie.
+        let mut buf = Vec::with_capacity(entry.size().min(CAPACITY_HINT_MAX) as usize);
         maybe_without_gvl(rb_self.needs_gvl, || entry.read_to_end(&mut buf))
             .map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&buf))
     }
 }
 
-/// The extra field bytes of a central directory record, exactly as stored.
-/// The crate re-serializes the fields it parsed, which drops some (an
-/// extended timestamp without the local-only parts, for one); rubyzip hands
-/// out the raw bytes, so we read them ourselves.
-fn raw_central_extra(source: &mut Source, central_offset: u64) -> io::Result<Vec<u8>> {
+/// Fields of a central directory record read straight from the bytes,
+/// where the crate's parsed view is not what rubyzip exposes.
+struct RawCentralFields {
+    /// The extra field exactly as stored. The crate re-serializes the
+    /// fields it parsed, which drops some (an extended timestamp without
+    /// the local-only parts, for one); rubyzip hands out the raw bytes.
+    extra: Vec<u8>,
+    /// The DOS time and date as stored. The crate's `DateTime` rejects
+    /// values a calendar would roll over (February 30th), which rubyzip
+    /// reads as the next day.
+    dos_time: u16,
+    dos_date: u16,
+}
+
+fn raw_central_fields(source: &mut Source, central_offset: u64) -> io::Result<RawCentralFields> {
     const SIGNATURE: u32 = 0x0201_4b50;
     const HEADER_LEN: usize = 46;
 
@@ -172,12 +216,18 @@ fn raw_central_extra(source: &mut Source, central_offset: u64) -> io::Result<Vec
             "central directory signature not found",
         ));
     }
+    let dos_time = u16::from_le_bytes([header[12], header[13]]);
+    let dos_date = u16::from_le_bytes([header[14], header[15]]);
     let name_len = u16::from_le_bytes([header[28], header[29]]) as i64;
     let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
     source.seek(SeekFrom::Current(name_len))?;
     let mut extra = vec![0u8; extra_len];
     source.read_exact(&mut extra)?;
-    Ok(extra)
+    Ok(RawCentralFields {
+        extra,
+        dos_time,
+        dos_date,
+    })
 }
 
 /// The extra field bytes of a local file header, exactly as stored.
@@ -206,7 +256,7 @@ fn entry_hash(
     ruby: &Ruby,
     index: usize,
     entry: &ZipFile<'_, Source>,
-    extra: &[u8],
+    raw: &RawCentralFields,
 ) -> Result<RHash, Error> {
     let h = ruby.hash_new();
     let set = |key: &str, value: magnus::Value| -> Result<(), Error> {
@@ -223,7 +273,6 @@ fn entry_hash(
     )?;
     set("directory", ruby.into_value(entry.is_dir()))?;
     set("encrypted", ruby.into_value(entry.encrypted()))?;
-    set("unix_mode", ruby.into_value(entry.unix_mode()))?;
     set("flags", ruby.into_value(entry.flags().as_u16()))?;
     set(
         "external_attributes",
@@ -234,17 +283,13 @@ fn entry_hash(
     set("fstype", ruby.into_value(u8::from(entry.system())))?;
     let (major, minor) = entry.version_made_by();
     set("version_made_by", ruby.into_value(major * 10 + minor))?;
-    let (date, time) = entry
-        .last_modified()
-        .map(|dt| (dt.datepart(), dt.timepart()))
-        .unwrap_or((0, 0));
-    set("dos_date", ruby.into_value(date))?;
-    set("dos_time", ruby.into_value(time))?;
+    set("dos_date", ruby.into_value(raw.dos_date))?;
+    set("dos_time", ruby.into_value(raw.dos_time))?;
     set(
         "comment",
         ruby.str_from_slice(entry.comment().as_bytes()).as_value(),
     )?;
-    set("extra", ruby.str_from_slice(extra).as_value())?;
+    set("extra", ruby.str_from_slice(&raw.extra).as_value())?;
     set("header_offset", ruby.into_value(entry.header_start()))?;
     set("data_offset", ruby.into_value(entry.data_start()))?;
     set(

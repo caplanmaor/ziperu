@@ -6,10 +6,11 @@
 module Ziperu
   # Reads just the end-of-central-directory records of an archive, in Ruby.
   #
-  # The native core refuses archives whose EOCD lies about the number of
-  # entries; rubyzip tolerates them with a warning (or raises
-  # `EntryNumberMismatchError` when `Ziperu.validate_declared_number_of_entries`
-  # is set), so `Ziperu::File.count_entries` mirrors that here.
+  # The native core refuses archives whose EOCD declares more entries than
+  # the central directory holds, so `Ziperu::File.open` raises on them
+  # where rubyzip warns (or raises `EntryNumberMismatchError` when
+  # `Ziperu.validate_declared_number_of_entries` is set). This gives
+  # `Ziperu::File.count_entries` rubyzip's behaviour at least.
   class CentralDirectory # :nodoc:all
     END_OF_CD_SIG          = 0x06054b50
     ZIP64_END_OF_CD_SIG    = 0x06064b50

@@ -10,11 +10,12 @@
 //! `seek`/`read` calls, so `open_buffer` on a large Tempfile does not have
 //! to be slurped into memory first.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use magnus::{prelude::*, value::BoxValue, Error, RString, Value};
+use magnus::{prelude::*, value::Opaque, Error, RString, Ruby, Value};
 
 const BUF_SIZE: usize = 64 * 1024;
 
@@ -45,6 +46,14 @@ impl Source {
     pub fn needs_gvl(&self) -> bool {
         matches!(self, Source::Ruby(_))
     }
+
+    /// The Ruby IO behind a `Ruby` source, for the owner to mark.
+    pub fn ruby_io(&self) -> Option<Opaque<Value>> {
+        match self {
+            Source::Ruby(r) => Some(r.get_ref().io),
+            _ => None,
+        }
+    }
 }
 
 impl Clone for Source {
@@ -68,7 +77,7 @@ impl Clone for Source {
                 Source::Ruby(BufReader::with_capacity(
                     BUF_SIZE,
                     RubyIo {
-                        io: Arc::clone(&inner.io),
+                        io: inner.io,
                         pos: inner.pos - r.buffer().len() as u64,
                         len: inner.len,
                     },
@@ -136,21 +145,16 @@ impl Seek for SharedFile {
 /// through method calls under the GVL. One object is shared by all cursors
 /// over it, each of which seeks before it reads, so the object's own
 /// position is meaningless between calls (rubyzip moves it around too).
-/// The object is registered with the GC for as long as any cursor exists.
+///
+/// The object is kept alive by the `mark` function of whatever wraps the
+/// source (an `Archive` or `EntryReader`), which gets it from
+/// [`Source::ruby_io`]; nothing here registers a GC root, so dropping a
+/// source never calls into Ruby and the wrappers can be freed immediately.
 pub struct RubyIo {
-    io: Arc<GcRoot>,
+    io: Opaque<Value>,
     pos: u64,
     len: u64,
 }
-
-struct GcRoot(BoxValue<Value>);
-
-// SAFETY: the value is only touched from methods that hold the GVL:
-// `Source::needs_gvl` keeps every read over a Ruby-backed source inside it,
-// and the root is dropped (unregistered) when the owning Archive or
-// EntryReader is freed, also under the GVL.
-unsafe impl Send for GcRoot {}
-unsafe impl Sync for GcRoot {}
 
 const SEEK_SET: i64 = 0;
 const SEEK_END: i64 = 2;
@@ -160,21 +164,47 @@ impl RubyIo {
         io.funcall::<_, _, Value>("seek", (0i64, SEEK_END))?;
         let len: u64 = io.funcall("tell", ())?;
         Ok(Self {
-            io: Arc::new(GcRoot(BoxValue::new(io))),
+            io: Opaque::from(io),
             pos: 0,
             len,
         })
     }
 
-    fn value(&self) -> Value {
-        *self.io.0
+    /// The IO, usable only on a Ruby thread holding the GVL, which every
+    /// read over a Ruby-backed source is.
+    fn value(&self) -> io::Result<Value> {
+        let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(ruby.get_inner(self.io))
     }
 }
 
-/// A Ruby exception from the IO surfaces as an `io::Error` carrying its
-/// message; `errors.rs` turns that into an `IOError` for the caller.
+/// A Ruby exception (or non-local jump: `throw`, `Timeout`) raised inside
+/// the IO's `read` or `seek`, carried through the Rust layers as an
+/// `io::Error` so that `errors::io_error` can re-raise the original.
+pub struct RubyError(pub Error);
+
+// SAFETY: created and consumed only under the GVL (a Ruby-backed source
+// never runs with it released), so the `Value` inside is never touched
+// from another thread; the bounds are only there to fit in `io::Error`.
+unsafe impl Send for RubyError {}
+unsafe impl Sync for RubyError {}
+
+impl fmt::Debug for RubyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for RubyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for RubyError {}
+
 fn ruby_io_error(err: Error) -> io::Error {
-    io::Error::other(err.to_string())
+    io::Error::other(RubyError(err))
 }
 
 impl Read for RubyIo {
@@ -182,7 +212,7 @@ impl Read for RubyIo {
         if buf.is_empty() || self.pos >= self.len {
             return Ok(0);
         }
-        let io = self.value();
+        let io = self.value()?;
         io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
             .map_err(ruby_io_error)?;
         let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(ruby_io_error)?;

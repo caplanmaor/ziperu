@@ -212,6 +212,7 @@ module Ziperu
       new_entry.gather_fileinfo_from_srcpath(src_path)
       @cdir << new_entry
       @dirty = true
+      new_entry
     end
 
     # Convenience method for adding the contents of a file to the archive
@@ -252,6 +253,7 @@ module Ziperu
       found_entry.name = new_name
       @cdir << found_entry
       @dirty = true
+      found_entry
     end
 
     # Replaces the specified entry with the contents of src_path (from
@@ -377,8 +379,10 @@ module Ziperu
 
       entry_name = entry_name.dup.to_s
       entry_name << '/' unless entry_name.end_with?('/')
-      @cdir << ::Ziperu::StreamableDirectory.new(@name, entry_name, nil, permission)
+      new_entry = ::Ziperu::StreamableDirectory.new(@name, entry_name, nil, permission)
+      @cdir << new_entry
       @dirty = true
+      new_entry
     end
 
     private
@@ -424,6 +428,8 @@ module Ziperu
         # This zip is probably a non-empty StringIO.
         @create = false
         read_archive(path_or_io)
+      elsif buffer && !@create
+        raise Error, 'The buffer is empty. Did you mean to pass the create flag?'
       elsif !@create && ::File.empty?(@name)
         raise Error, "File #{@name} has zero size. Did you mean to pass the create flag?"
       elsif !@create
@@ -434,7 +440,7 @@ module Ziperu
     def read_archive(path_or_io)
       path_or_io.binmode if path_or_io.respond_to?(:binmode)
       @native = InputStream.open_archive(path_or_io)
-      @comment = @native.comment.force_encoding(Encoding::UTF_8)
+      @comment = @native.comment # the stored bytes, as rubyzip reads them
       @native.entries.each { |meta| @cdir << Entry.from_meta(@native, meta, self) }
     end
 

@@ -28,10 +28,13 @@ module Ziperu
     def initialize(context, offset: 0, decrypter: nil, enforce_size: true, **opts)
       super(**opts)
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
-      # A split segment has no central directory to open; rubyzip fails on
-      # the first entry, so defer the error to `get_next_entry`.
+      # An archive handed in (by Entry#get_input_stream) stays open for its
+      # owner; one opened here is closed with the stream. A split segment
+      # has no central directory to open; rubyzip fails on the first entry,
+      # so defer the error to `get_next_entry`.
+      @owns_archive = !context.kind_of?(Native::Archive)
       @archive =
-        if context.kind_of?(Native::Archive)
+        if !@owns_archive
           context
         elsif !@split
           self.class.open_archive(context)
@@ -41,13 +44,13 @@ module Ziperu
       @next_index = offset.zero? ? 0 : index_at_offset(offset)
       @reader = nil
       @current_entry = nil
-      @complete_entry = nil
     end
 
     # Close this InputStream. All further IO will raise an IOError.
     def close
       @reader&.close
       @reader = nil
+      @archive&.close if @owns_archive
       @archive = nil
     end
 
@@ -56,7 +59,14 @@ module Ziperu
     def get_next_entry
       raise SplitArchiveError if @split
       raise IOError, 'closed stream' if @archive.nil?
-      return @current_entry = nil if @next_index >= @archive.entry_count
+      if @next_index >= @archive.entry_count
+        # Past the last entry there is nothing to read, not the previous
+        # entry again.
+        @reader&.close
+        @reader = nil
+        flush
+        return @current_entry = nil
+      end
 
       @current_entry = Entry.from_meta(@archive, @archive.entry_meta(@next_index))
       @next_index += 1
@@ -79,6 +89,7 @@ module Ziperu
 
     # Rewinds the stream to the beginning of the current entry.
     def rewind
+      raise IOError, 'closed stream' if @archive.nil?
       return if @current_entry.nil?
 
       @lineno = 0
@@ -196,12 +207,17 @@ module Ziperu
     end
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
+      raise IOError, 'closed stream' if @archive.nil?
+      raise ArgumentError, "negative length #{maxlen} given" if maxlen&.negative?
       return nil if @reader.nil?
 
       wrap_errors { @reader.read(maxlen) }
     end
 
     def input_finished? # :nodoc:
+      # A closed stream is not "at EOF": reading it raises, as with an IO.
+      return false if @archive.nil?
+
       @reader.nil? || @reader.eof?
     end
 

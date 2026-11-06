@@ -10,16 +10,18 @@ use magnus::{prelude::*, value::Lazy, Error, ExceptionClass, Ruby};
 use std::io;
 use zip::result::ZipError;
 
+use crate::source::RubyError;
+
 macro_rules! exception {
-    ($name:ident, $path:literal) => {
-        static $name: Lazy<ExceptionClass> = Lazy::new(|ruby| {
+    ($vis:vis $name:ident, $path:literal) => {
+        $vis static $name: Lazy<ExceptionClass> = Lazy::new(|ruby| {
             ruby.eval::<ExceptionClass>($path)
                 .expect(concat!($path, " must be defined in lib/ziperu/errors.rb"))
         });
     };
 }
 
-exception!(ERROR, "Ziperu::Error");
+exception!(pub ERROR, "Ziperu::Error");
 exception!(DECOMPRESSION_ERROR, "Ziperu::DecompressionError");
 exception!(NATIVE_SIZE_LIMIT_ERROR, "Ziperu::Native::SizeLimitError");
 exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
@@ -38,12 +40,37 @@ pub fn zip_error(ruby: &Ruby, err: ZipError) -> Error {
         ZipError::UnsupportedArchive(msg) => {
             Error::new(ruby.get_inner(&NATIVE_UNSUPPORTED_ERROR), msg)
         }
-        ZipError::InvalidArchive(msg) => Error::new(ruby.get_inner(&ERROR), msg.to_string()),
+        ZipError::InvalidArchive(msg) => {
+            Error::new(ruby.get_inner(&ERROR), invalid_archive_message(&msg))
+        }
         other => Error::new(ruby.get_inner(&ERROR), other.to_string()),
     }
 }
 
+/// The crate's wording, except where rubyzip's is what callers match on.
+fn invalid_archive_message(msg: &str) -> String {
+    if msg.contains("EOCD") {
+        "Zip end of central directory signature not found".to_string()
+    } else {
+        msg.to_string()
+    }
+}
+
+/// Raised when a thread calls into a native object another thread is
+/// using with the GVL released (an inflate or deflate in progress).
+pub fn busy_error(ruby: &Ruby, what: &str) -> Error {
+    Error::new(
+        ruby.exception_thread_error(),
+        format!("{what} is in use by another thread"),
+    )
+}
+
 pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
+    // An exception from a Ruby IO source propagates unchanged.
+    let err = match err.downcast::<RubyError>() {
+        Ok(ruby_err) => return ruby_err.0,
+        Err(err) => err,
+    };
     // The crate funnels its own errors through io::Error while reading.
     if let Some(inner) = err.get_ref().and_then(|e| e.downcast_ref::<ZipError>()) {
         return match inner {

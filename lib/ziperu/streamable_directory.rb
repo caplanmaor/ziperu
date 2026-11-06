@@ -8,7 +8,7 @@ module Ziperu
       super(zipfile, entry)
 
       @ftype = :directory
-      entry.get_extra_attributes_from_path(src_path) if src_path
+      get_extra_attributes_from_path(src_path) if src_path
       @unix_perms = permission if permission
     end
   end

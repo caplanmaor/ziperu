@@ -62,11 +62,17 @@ module Ziperu
       end
     end
 
-    # Closes the stream and writes the central directory to the zip file.
+    # Closes the stream and writes the central directory. A stream over an
+    # IO (`stream: true`) writes the archive to it and closes it, as
+    # rubyzip does; `close_buffer` is the variant that leaves it open.
     def close
       return if @closed
 
-      finish_archive
+      bytes = finish_archive
+      if @io
+        write_archive_to_io(bytes)
+        @io.close if @io.respond_to?(:close)
+      end
       @closed = true
       nil
     end
@@ -77,12 +83,7 @@ module Ziperu
       return @io if @closed
 
       bytes = finish_archive
-      if @io
-        # Like rubyzip, the archive is written from the start of the IO.
-        @io.rewind if @io.respond_to?(:rewind)
-        @io.write(bytes)
-        @io.flush if @io.respond_to?(:flush)
-      end
+      write_archive_to_io(bytes) if @io
       @closed = true
       @io
     end
@@ -111,8 +112,9 @@ module Ziperu
 
     # Copies an entry from another archive without recompressing it. With
     # `touch: true` the entry's current permissions and mtime are written
-    # instead of the source's (so `chmod`/`time=` on an existing entry
-    # persist); the native writer can do that or a rename, not both.
+    # instead of the source's. The native writer can do that or a rename,
+    # not both, and carries nothing else over from the entry object;
+    # `Entry#write_to_zip_output_stream` re-streams edited entries instead.
     def copy_raw_entry(entry, new_name = nil, touch: false) # :nodoc:
       raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
@@ -139,9 +141,19 @@ module Ziperu
     private
 
     def finish_archive
-      @writer.comment = @comment.to_s.b
+      comment = @comment.to_s.b
+      raise ArgumentError, "archive comment is #{comment.bytesize} bytes; the limit is 65535" if comment.bytesize > 0xFFFF
+
+      @writer.comment = comment
       @current_entry = nil
       @writer.finish
+    end
+
+    # Like rubyzip, the archive is written from the start of the IO.
+    def write_archive_to_io(bytes)
+      @io.rewind if @io.respond_to?(:rewind)
+      @io.write(bytes)
+      @io.flush if @io.respond_to?(:flush)
     end
 
     def init_next_entry(entry)
@@ -175,8 +187,9 @@ module Ziperu
         dos_date: time.to_binary_dos_date,
         dos_time: time.to_binary_dos_time,
         unix_perms: entry.unix_perms,
+        fstype: entry.fstype,
         large_file: zip64_needed?(entry, zip64_suppressed),
-        comment: entry.comment.to_s,
+        comment: entry.comment.to_s.b,
         extra: extra.to_local_bin.b
       }
     end

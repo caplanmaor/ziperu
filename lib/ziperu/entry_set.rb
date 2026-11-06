@@ -79,8 +79,11 @@ module Ziperu
 
     private
 
+    # Keyed by name bytes: entry names are binary strings (as in rubyzip),
+    # and a lookup with the same bytes in another encoding should find
+    # them (which in rubyzip it does not).
     def to_key(entry)
-      k = entry.to_s.chomp('/')
+      k = entry.to_s.b.chomp('/')
       k.downcase! if ::Ziperu.case_insensitive_match
       k
     end

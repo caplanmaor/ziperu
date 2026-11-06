@@ -8,15 +8,18 @@
 //! the data, which is what rubyzip does when `Ziperu.validate_entry_sizes` is
 //! off.
 
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::io::{self, Read, Seek, SeekFrom};
 
-use magnus::{Error, RString, Ruby};
+use magnus::{
+    gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RString, Ruby, TypedData,
+    Value,
+};
 use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
-use crate::errors::{io_error, size_limit_error, zip_error};
+use crate::errors::{busy_error, io_error, size_limit_error, zip_error};
 use crate::gvl::maybe_without_gvl;
 use crate::source::Source;
 
@@ -107,10 +110,6 @@ impl OwnedEntry {
         self.file = Some(file);
         Ok(())
     }
-
-    fn file(&mut self) -> &mut ZipFile<'static, Source> {
-        self.file.as_mut().expect("entry is open")
-    }
 }
 
 impl Drop for OwnedEntry {
@@ -127,7 +126,9 @@ impl Drop for OwnedEntry {
 }
 
 struct Inner {
-    entry: OwnedEntry,
+    /// `None` once closed, which frees the entry and the owner it borrows
+    /// from (the file handle or the Ruby IO root) right away.
+    entry: Option<OwnedEntry>,
     info: EntryInfo,
     /// Declared size, or `None` when reading to the true end of the data.
     size: Option<u64>,
@@ -137,10 +138,22 @@ struct Inner {
     needs_gvl: bool,
 }
 
-#[magnus::wrap(class = "Ziperu::Native::EntryReader", free_immediately)]
+#[derive(TypedData)]
+#[magnus(class = "Ziperu::Native::EntryReader", free_immediately, mark)]
 pub struct EntryReader {
-    // Single-threaded under the GVL.
+    // A read releases the GVL while borrowed, so a failed borrow means
+    // another thread is reading through this same object right now.
     inner: RefCell<Inner>,
+    /// The Ruby IO behind a `Source::Ruby`, kept alive by `mark`.
+    io: Option<Opaque<Value>>,
+}
+
+impl DataTypeFunctions for EntryReader {
+    fn mark(&self, marker: &Marker) {
+        if let Some(io) = self.io {
+            marker.mark(io);
+        }
+    }
 }
 
 // SAFETY: the raw pointer in `OwnedEntry` is only dereferenced from methods
@@ -155,6 +168,7 @@ impl EntryReader {
         password: Option<Vec<u8>>,
         enforce_size: bool,
         needs_gvl: bool,
+        io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
         let (declared, info) = {
             let raw = archive
@@ -175,35 +189,43 @@ impl EntryReader {
         let size = enforce_size.then_some(declared);
         Ok(Self {
             inner: RefCell::new(Inner {
-                entry,
+                entry: Some(entry),
                 info,
                 size,
                 consumed: 0,
                 finished: size == Some(0),
                 needs_gvl,
             }),
+            io,
         })
     }
 
+    fn inner(&self, ruby: &Ruby) -> Result<RefMut<'_, Inner>, Error> {
+        self.inner
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "entry reader"))
+    }
+
     /// The declared size, or nil when not enforcing it.
-    pub fn size(&self) -> Option<u64> {
-        self.inner.borrow().size
+    pub fn size(ruby: &Ruby, rb_self: &Self) -> Result<Option<u64>, Error> {
+        Ok(rb_self.inner(ruby)?.size)
     }
 
-    pub fn pos(&self) -> u64 {
-        self.inner.borrow().consumed
+    pub fn pos(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
+        Ok(rb_self.inner(ruby)?.consumed)
     }
 
-    pub fn is_eof(&self) -> bool {
-        self.inner.borrow().finished
+    pub fn is_eof(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
+        Ok(rb_self.inner(ruby)?.finished)
     }
 
-    /// Releases the entry and its file handle now rather than at GC time;
-    /// reads afterwards return nil.
-    pub fn close(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.entry.file = None;
+    /// Releases the entry and what it holds open (the file handle, or the
+    /// Ruby IO) now rather than at GC time; reads afterwards return nil.
+    pub fn close(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
+        let mut inner = rb_self.inner(ruby)?;
+        inner.entry = None;
         inner.finished = true;
+        Ok(())
     }
 
     /// Up to `maxlen` bytes (all remaining bytes when nil) as a binary
@@ -213,7 +235,7 @@ impl EntryReader {
         rb_self: &Self,
         maxlen: Option<usize>,
     ) -> Result<Option<RString>, Error> {
-        let mut inner = rb_self.inner.borrow_mut();
+        let mut inner = rb_self.inner(ruby)?;
         if inner.finished {
             return Ok(None);
         }
@@ -227,9 +249,12 @@ impl EntryReader {
         // header lied, so probe for it.
         let probe = inner.size == Some(inner.consumed + want);
         let needs_gvl = inner.needs_gvl;
-        let (buf, eof, oversize) =
-            maybe_without_gvl(needs_gvl, || fill(inner.entry.file(), want, probe))
-                .map_err(|e| io_error(ruby, e))?;
+        let Some(file) = inner.entry.as_mut().and_then(|e| e.file.as_mut()) else {
+            // Closed, or a rewind failed to reopen it.
+            return Ok(None);
+        };
+        let (buf, eof, oversize) = maybe_without_gvl(needs_gvl, || fill(file, want, probe))
+            .map_err(|e| io_error(ruby, e))?;
 
         let filled = buf.len() as u64;
         inner.consumed += filled;
@@ -251,11 +276,26 @@ impl EntryReader {
     }
 
     pub fn rewind(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
-        let mut inner = rb_self.inner.borrow_mut();
-        let Inner { entry, info, .. } = &mut *inner;
-        entry.reopen(info).map_err(|e| zip_error(ruby, e))?;
-        inner.consumed = 0;
-        inner.finished = inner.size == Some(0);
+        let mut inner = rb_self.inner(ruby)?;
+        let Inner {
+            entry,
+            info,
+            size,
+            consumed,
+            finished,
+            ..
+        } = &mut *inner;
+        let Some(entry) = entry.as_mut() else {
+            return Err(Error::new(ruby.exception_io_error(), "closed stream"));
+        };
+        if let Err(e) = entry.reopen(info) {
+            // The entry is gone; leave the reader at EOF rather than
+            // half-open.
+            *finished = true;
+            return Err(zip_error(ruby, e));
+        }
+        *consumed = 0;
+        *finished = *size == Some(0);
         Ok(())
     }
 }
