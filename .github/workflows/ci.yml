@@ -48,6 +48,31 @@ jobs:
             COMPAT.md
             tmp/compat-logs/
 
+  # Differential fuzzing against Python's zipfile and rubyzip, a few
+  # minutes' worth per run with a fresh seed; failures are uploaded with
+  # the seed to reproduce them.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: bundle exec rake compile
+      - run: bundle exec rake fuzz
+        env:
+          TIME: "180"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-failures
+          path: tmp/fuzz/failures/
+
   clippy:
     runs-on: ubuntu-latest
     steps:

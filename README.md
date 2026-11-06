@@ -72,9 +72,10 @@ rubyzip is pure Ruby and does per-entry work in Ruby objects. ziperu parses
 the central directory once in Rust and hands Ruby a flat metadata dump, reads
 entries in large chunks, copies unchanged entries byte-for-byte on `commit`,
 and releases the GVL while inflating from a file or String buffer and while
-deflating, so other Ruby threads keep running. An archive opened from any
-other IO object (`open_buffer(io)`, `InputStream.open(io)`) is read through
-it lazily, under the GVL; a pipe is read to its end first. The intent is
+deflating, so other Ruby threads keep running. A StringIO is read from its
+string directly; an archive opened from any other IO object
+(`open_buffer(io)`, `InputStream.open(io)`) is read through it lazily,
+under the GVL; a pipe is read to its end first. The intent is
 precompiled gems for every platform rubyzip runs on, zero runtime dependencies,
 and stricter defaults on path traversal and declared-size checks.
 
@@ -113,6 +114,54 @@ complete. The per-file scorecard is written to
 [COMPAT.md](COMPAT.md); per-file logs land in `tmp/compat-logs/`. Use
 `ONLY=input_stream rake compat` to run a subset.
 
+### Fuzzing
+
+`rake fuzz` runs [fuzz/differential.rb](fuzz/differential.rb): random
+archives go through ziperu and Python's `zipfile` (plus rubyzip, once
+`rake compat:fetch` has run) in both directions, random edits are made
+through the `Zip::File` API and checked by the oracles, and corrupted
+archives must fail with ziperu's own error classes while agreeing with the
+oracle on anything both still accept. CI runs three minutes of it per push
+with a fresh seed; a failure is saved under `tmp/fuzz/failures/` with the
+seed that reproduces it (`SEED=n ITERATIONS=m rake fuzz`).
+
+There is deliberately no cargo-fuzz harness: the Rust layer is thin
+wrappers over the `zip` crate, which has its own fuzzing, and the code
+that is ours (entry ownership, the chunked reader, the Ruby IO source) is
+only reachable through the Ruby API, which is what the differential fuzzer
+drives.
+
+### Benchmarks
+
+`rake bench` runs [bench/bench.rb](bench/bench.rb) with rubyzip and ziperu
+loaded side by side. On one Windows machine (Ruby 3.4, median of 5):
+
+| scenario | rubyzip 3.7.0 | ziperu 0.1.0 | speedup |
+|---|---:|---:|---:|
+| open and list 10000 entries | 300 ms | 206 ms | 1.5x |
+| read 1000 x 8 KB deflated entries | 207 ms | 51 ms | 4.1x |
+| InputStream over 1000 entries | 106 ms | 66 ms | 1.6x |
+| inflate one 64 MB entry | 106 ms | 40 ms | 2.6x |
+| extract_all 1000 entries | 992 ms | 859 ms | 1.2x |
+| write 1000 x 8 KB entries (OutputStream) | 89 ms | 34 ms | 2.6x |
+| deflate one 64 MB entry (OutputStream) | 269 ms | 58 ms | 4.6x |
+| open_buffer(String) and read 1000 entries | 62 ms | 20 ms | 3.0x |
+| Zip::File add 100 files and commit | 40 ms | 33 ms | 1.2x |
+
+Inflating and deflating are where the Rust core pays off. Listing a large
+central directory and `extract_all` are dominated by building Ruby `Entry`
+objects and creating files, which both libraries do in Ruby.
+
+### Releasing
+
+A `v*` tag runs [release.yml](.github/workflows/release.yml): the source
+gem plus one precompiled gem per platform (built with
+[oxidize-rb/actions/cross-gem](https://github.com/oxidize-rb/actions), each
+holding the extension for every stable Ruby), a smoke test that installs
+the right gem on Linux, macOS and Windows without a Rust toolchain, and a
+draft GitHub release with the gems attached. Pushing to rubygems.org is a
+manual `gem push` from that draft.
+
 ## Layout
 
 - `ext/ziperu/` — the Rust extension (`Ziperu::Native::*`): a few primitive,
@@ -120,6 +169,8 @@ complete. The per-file scorecard is written to
 - `lib/ziperu/` — the rubyzip-shaped API in Ruby: kwargs, blocks, `Enumerable`,
   the error hierarchy, extra-field parsing.
 - `test/` — minitest; `test/data/` holds fixture archives.
+- `fuzz/` — the differential fuzzer and its Python and rubyzip oracles.
+- `bench/` — the rubyzip comparison benchmark.
 
 ## License
 

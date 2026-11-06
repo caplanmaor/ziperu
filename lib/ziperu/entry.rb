@@ -414,8 +414,9 @@ module Ziperu
 
       raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
 
-      zis = ::Ziperu::InputStream.new(archive, offset: @local_header_offset, decrypter: decrypter,
-                                            enforce_size: enforce_size)
+      # No offset: get_next_stream_entry positions by index, and resolving
+      # an offset would walk the whole central directory on every read.
+      zis = ::Ziperu::InputStream.new(archive, decrypter: decrypter, enforce_size: enforce_size)
       zis.get_next_stream_entry(self)
       return zis unless block_given?
 
