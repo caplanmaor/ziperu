@@ -3,8 +3,9 @@
 //! Inflating a chunk or deflating one takes real CPU time; letting other
 //! Ruby threads run meanwhile is the point of a native core. Only work that
 //! touches no Ruby object may run this way, which here means anything over a
-//! `Source::File`, `Source::Memory` or the writer's sinks, never a
-//! `Source::Ruby` (its reads call back into the interpreter).
+//! `Source::File`, `Source::Memory` or the writer's file and memory sinks,
+//! never a `Source::Ruby` or `Sink::Ruby` (their reads and writes call
+//! back into the interpreter).
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};

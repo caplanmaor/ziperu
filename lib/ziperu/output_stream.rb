@@ -18,7 +18,9 @@ module Ziperu
 
     # Opens the indicated zip file. If a file with that name already exists
     # it will be overwritten. With `stream: true`, `file_name` is an IO
-    # object that receives the archive bytes on `close_buffer`.
+    # object that receives the archive from its start, entry by entry if it
+    # is seekable (a StringIO, File or Tempfile) and all at once on
+    # `close_buffer` if it is not (a pipe).
     def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false, **opts)
       super(**opts)
       @file_name = file_name
@@ -26,7 +28,13 @@ module Ziperu
       if stream
         @io = file_name
         @io.binmode if @io.respond_to?(:binmode)
-        @writer = Native::Writer.open_memory
+        @writer =
+          if IOExtras.seekable?(@io)
+            @io.rewind if @io.respond_to?(:rewind)
+            Native::Writer.open_io(@io)
+          else
+            Native::Writer.open_memory
+          end
       else
         @writer = Native::Writer.open_path(file_name.to_s)
       end
@@ -64,27 +72,23 @@ module Ziperu
     end
 
     # Closes the stream and writes the central directory. A stream over an
-    # IO (`stream: true`) writes the archive to it and closes it, as
-    # rubyzip does; `close_buffer` is the variant that leaves it open.
+    # IO (`stream: true`) closes it too, as rubyzip does; `close_buffer` is
+    # the variant that leaves it open.
     def close
       return if @closed
 
-      bytes = finish_archive
-      if @io
-        write_archive_to_io(bytes)
-        @io.close if @io.respond_to?(:close)
-      end
+      finish_archive
+      @io.close if @io && @io.respond_to?(:close)
       @closed = true
       nil
     end
 
-    # Closes the stream and writes the archive to the IO given to
+    # Closes the stream and completes the archive in the IO given to
     # `write_buffer`; returns that IO.
     def close_buffer
       return @io if @closed
 
-      bytes = finish_archive
-      write_archive_to_io(bytes) if @io
+      finish_archive
       @closed = true
       @io
     end
@@ -153,12 +157,9 @@ module Ziperu
       stats.each_with_index do |(offset, size, compressed_size, crc), i|
         @written[i].written_as(offset, size, compressed_size, crc)
       end
-      bytes
-    end
+      # A seekable IO already holds the archive; a pipe gets it now.
+      return unless bytes && @io
 
-    # Like rubyzip, the archive is written from the start of the IO.
-    def write_archive_to_io(bytes)
-      @io.rewind if @io.respond_to?(:rewind)
       @io.write(bytes)
       @io.flush if @io.respond_to?(:flush)
     end

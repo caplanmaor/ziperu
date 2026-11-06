@@ -154,7 +154,7 @@ module Ziperu
         return Native::Archive.open_bytes(context.string) if context.kind_of?(::StringIO)
 
         context.binmode if context.respond_to?(:binmode)
-        if seekable?(context)
+        if IOExtras.seekable?(context)
           # Driven lazily through seek/read; nothing is copied up front.
           Native::Archive.open_io(context)
         else
@@ -167,15 +167,6 @@ module Ziperu
         end
       end
 
-      def seekable?(io)
-        return false unless io.respond_to?(:seek) && io.respond_to?(:tell)
-
-        io.seek(0, ::IO::SEEK_CUR)
-        true
-      rescue SystemCallError, IOError
-        false
-      end
-
       # The first part of a multi-part archive starts with a split-file
       # signature.
       #
@@ -184,7 +175,7 @@ module Ziperu
         head =
           if context.respond_to?(:read)
             # A pipe cannot be peeked at; `open_archive` checks what it reads.
-            return false unless seekable?(context)
+            return false unless IOExtras.seekable?(context)
 
             context.seek(0, ::IO::SEEK_SET)
             context.read(4)

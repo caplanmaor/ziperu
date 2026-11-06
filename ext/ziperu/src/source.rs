@@ -203,12 +203,12 @@ impl RubyIo {
 }
 
 /// A Ruby exception (or non-local jump: `throw`, `Timeout`) raised inside
-/// the IO's `read` or `seek`, carried through the Rust layers as an
+/// the IO's `read`, `write`, `seek` or `flush`, carried through the Rust layers as an
 /// `io::Error` so that `errors::io_error` can re-raise the original.
 pub struct RubyError(pub Error);
 
 // SAFETY: created and consumed only under the GVL (a Ruby-backed source
-// never runs with it released), so the `Value` inside is never touched
+// or sink never runs with it released), so the `Value` inside is never touched
 // from another thread; the bounds are only there to fit in `io::Error`.
 unsafe impl Send for RubyError {}
 unsafe impl Sync for RubyError {}
@@ -227,7 +227,7 @@ impl fmt::Display for RubyError {
 
 impl std::error::Error for RubyError {}
 
-fn ruby_io_error(err: Error) -> io::Error {
+pub(crate) fn ruby_io_error(err: Error) -> io::Error {
     io::Error::other(RubyError(err))
 }
 

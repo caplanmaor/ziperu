@@ -326,6 +326,88 @@ class ZipOutputStreamTest < Minitest::Test
     assert_equal ["None", COMMENT, ENTRIES.size.to_s], out.lines.map(&:chomp)
   end
 
+  # A seekable IO receives each entry as the next one starts, as rubyzip
+  # streams; nothing waits for close.
+  def test_write_buffer_streams_entry_by_entry_into_a_seekable_io
+    io = StringIO.new
+    positions = []
+    Ziperu::OutputStream.write_buffer(io) do |zos|
+      ENTRIES.each do |name|
+        zos.put_next_entry(name)
+        zos.write(File.binread(fixture("text/#{name}")))
+        positions << io.pos
+      end
+    end
+    assert_equal positions, positions.sort
+    assert_equal positions.size, positions.uniq.size
+    assert_operator positions.first, :>, 0
+    assert_operator io.pos, :>, positions.last, "the central directory follows the entries"
+    assert_equal io.pos, io.string.bytesize
+    assert_test_zip_contents(StringIO.new(io.string))
+  end
+
+  def test_write_buffer_round_trips_a_string_io_file_and_tempfile
+    string_io = StringIO.new
+    Ziperu::OutputStream.write_buffer(string_io) { |zos| write_test_zip(zos) }
+    Ziperu::File.open_buffer(string_io) { |zf| assert_equal ENTRIES, zf.entries.map(&:name) }
+
+    Tempfile.create(["ziperu", ".zip"]) do |tmp|
+      Ziperu::OutputStream.write_buffer(tmp) { |zos| write_test_zip(zos) }
+      Ziperu::File.open_buffer(tmp) do |zf|
+        assert_equal ENTRIES, zf.entries.map(&:name)
+        assert_equal File.binread(fixture("text/long.txt")), zf.read("long.txt")
+      end
+    end
+
+    File.open(@zip, "w+b") do |f|
+      Ziperu::OutputStream.write_buffer(f) { |zos| write_test_zip(zos) }
+      f.rewind
+      Ziperu::File.open_buffer(f) { |zf| assert_equal ENTRIES, zf.entries.map(&:name) }
+    end
+    assert_test_zip_contents(@zip)
+  end
+
+  def test_write_buffer_starts_at_the_beginning_of_the_io
+    io = StringIO.new(+"stale bytes that a previous archive left behind" * 100)
+    io.seek(0, IO::SEEK_END)
+    Ziperu::OutputStream.write_buffer(io) do |zos|
+      zos.put_next_entry("a.txt")
+      zos.write("a")
+    end
+    assert_equal "PK\x03\x04".b, io.string.byteslice(0, 4)
+    Ziperu::File.open_buffer(io) { |zf| assert_equal "a", zf.read("a.txt") }
+  end
+
+  class FailingWriteIO < StringIO
+    class Boom < StandardError; end
+
+    def write(*)
+      raise Boom, "disk full"
+    end
+  end
+
+  def test_an_exception_raised_by_the_io_write_propagates_unchanged
+    assert_raises(FailingWriteIO::Boom) do
+      Ziperu::OutputStream.write_buffer(FailingWriteIO.new) do |zos|
+        zos.put_next_entry("a.txt")
+        zos.write("a" * 100_000)
+        zos.put_next_entry("b.txt")
+      end
+    end
+  end
+
+  def test_write_buffer_with_a_pipe_hands_over_the_archive_on_close
+    rd, wr = IO.pipe
+    reader = Thread.new { rd.binmode; rd.read }
+    Ziperu::OutputStream.write_buffer(wr) { |zos| write_test_zip(zos) }
+    wr.close
+    bytes = reader.value
+    assert_test_zip_contents(StringIO.new(bytes))
+  ensure
+    rd&.close
+    wr&.close unless wr&.closed?
+  end
+
   private
 
   def assert_io_error_in_closed_stream

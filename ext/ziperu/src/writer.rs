@@ -2,25 +2,36 @@
 //!
 //! The Ruby side (`Ziperu::OutputStream`) owns entry objects, defaults and the
 //! IO-like methods; this is the thin layer over `zip::ZipWriter`. The sink
-//! is either a file on disk or an in-memory buffer whose bytes `finish`
-//! returns, which is how `write_buffer(io)` feeds an arbitrary Ruby IO.
+//! is a file on disk, a seekable Ruby IO driven through method calls (how
+//! `write_buffer(io)` streams entry by entry into a StringIO, File or
+//! Tempfile), or an in-memory buffer whose bytes `finish` returns, for an
+//! IO that cannot seek.
 
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby};
+use magnus::{
+    gc::Marker, prelude::*, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash,
+    RString, Ruby, TypedData, Value,
+};
 use zip::result::{ZipError, ZipResult};
 use zip::write::FullFileOptions;
 use zip::{AesMode, CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
 use crate::archive::Archive;
 use crate::errors::{busy_error, io_error, zip_error, ERROR};
-use crate::gvl::{maybe_without_gvl, without_gvl};
+use crate::gvl::maybe_without_gvl;
+use crate::source::ruby_io_error;
+
+const BUF_SIZE: usize = 64 * 1024;
 
 pub enum Sink {
     File(BufWriter<fs::File>),
     Memory(Cursor<Vec<u8>>),
+    Ruby(BufWriter<RubyOut>),
 }
 
 impl Sink {
@@ -45,6 +56,10 @@ impl Read for Sink {
                 f.get_mut().read(buf)
             }
             Sink::Memory(c) => c.read(buf),
+            Sink::Ruby(w) => {
+                w.flush()?;
+                w.get_mut().read(buf)
+            }
         }
     }
 }
@@ -54,6 +69,7 @@ impl Write for Sink {
         match self {
             Sink::File(f) => f.write(buf),
             Sink::Memory(c) => c.write(buf),
+            Sink::Ruby(w) => w.write(buf),
         }
     }
 
@@ -61,6 +77,7 @@ impl Write for Sink {
         match self {
             Sink::File(f) => f.flush(),
             Sink::Memory(c) => c.flush(),
+            Sink::Ruby(w) => w.flush(),
         }
     }
 }
@@ -70,15 +87,209 @@ impl Seek for Sink {
         match self {
             Sink::File(f) => f.seek(pos),
             Sink::Memory(c) => c.seek(pos),
+            Sink::Ruby(w) => w.seek(pos),
         }
     }
 }
 
-#[magnus::wrap(class = "Ziperu::Native::Writer", free_immediately)]
+/// A seekable Ruby IO-like object (`write`, `seek`, `tell`, `read` and
+/// optionally `flush`) written through method calls under the GVL. The
+/// writer owns the object while open, so unlike `source::RubyIo` it trusts
+/// the object's own position and only seeks when the two have drifted
+/// apart (every entry ends with a seek back to patch its local header).
+///
+/// The object is kept alive by the `Writer`'s `mark`; nothing here holds a
+/// GC root. `ZipWriter`'s own `Drop` finalizes an archive that was never
+/// finished, which would call into Ruby from the GC's free (where no
+/// object may be allocated): the `Writer` clears `attached` first, after
+/// which the sink swallows everything and touches no Ruby object.
+pub struct RubyOut {
+    io: Opaque<Value>,
+    attached: Arc<AtomicBool>,
+    /// Where the next write or read goes.
+    pos: u64,
+    /// Where the object's own position is believed to be.
+    io_pos: u64,
+    /// One past the furthest byte written: the archive's end.
+    end: u64,
+    flushable: bool,
+}
+
+const SEEK_SET: i64 = 0;
+const SEEK_END: i64 = 2;
+
+impl RubyOut {
+    fn new(io: Value, attached: Arc<AtomicBool>) -> Result<Self, Error> {
+        let io_pos: u64 = io.funcall("tell", ())?;
+        Ok(Self {
+            flushable: io.respond_to("flush", false)?,
+            io: Opaque::from(io),
+            attached,
+            pos: 0,
+            io_pos,
+            end: 0,
+        })
+    }
+
+    /// The IO, usable only on a Ruby thread holding the GVL, which every
+    /// operation on a Ruby-backed sink is; `None` once detached.
+    fn value(&self) -> io::Result<Option<Value>> {
+        if !self.attached.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(Some(ruby.get_inner(self.io)))
+    }
+
+    /// Moves the object to `pos` if it is not there already.
+    fn sync(&mut self) -> io::Result<Option<Value>> {
+        let Some(io) = self.value()? else {
+            return Ok(None);
+        };
+        if self.io_pos != self.pos {
+            io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
+                .map_err(ruby_io_error)?;
+            self.io_pos = self.pos;
+        }
+        Ok(Some(io))
+    }
+
+    /// Leaves the object positioned at the end of the archive, where
+    /// rubyzip leaves it.
+    fn seek_to_end(&mut self) -> io::Result<()> {
+        self.pos = self.end;
+        self.sync().map(drop)
+    }
+}
+
+impl Write for RubyOut {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = match self.sync()? {
+            Some(io) => {
+                let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
+                let chunk = ruby.str_from_slice(buf);
+                let written: Value = io.funcall("write", (chunk,)).map_err(ruby_io_error)?;
+                // `IO#write` returns the byte count; an IO-like object may
+                // return anything else, in which case the whole buffer
+                // counts as written.
+                u64::try_convert(written)
+                    .ok()
+                    .map_or(buf.len(), |n| usize::try_from(n).unwrap_or(usize::MAX))
+                    .min(buf.len())
+            }
+            None => buf.len(),
+        };
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "the IO's write accepted no bytes",
+            ));
+        }
+        self.pos += n as u64;
+        self.io_pos = self.pos;
+        self.end = self.end.max(self.pos);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let (true, Some(io)) = (self.flushable, self.value()?) {
+            io.funcall::<_, _, Value>("flush", ())
+                .map_err(ruby_io_error)?;
+        }
+        Ok(())
+    }
+}
+
+impl Read for RubyOut {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(io) = self.sync()? else {
+            return Ok(0);
+        };
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(ruby_io_error)?;
+        let Some(chunk) = chunk else {
+            return Ok(0);
+        };
+        // SAFETY: the slice is copied out before any other Ruby call.
+        let bytes = unsafe { chunk.as_slice() };
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        self.pos += n as u64;
+        self.io_pos = self.pos;
+        Ok(n)
+    }
+}
+
+impl Seek for RubyOut {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.pos = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(o) => offset(self.pos, o)?,
+            SeekFrom::End(o) => {
+                let len = match self.value()? {
+                    Some(io) => {
+                        io.funcall::<_, _, Value>("seek", (0i64, SEEK_END))
+                            .map_err(ruby_io_error)?;
+                        let len: u64 = io.funcall("tell", ()).map_err(ruby_io_error)?;
+                        self.io_pos = len;
+                        len
+                    }
+                    None => self.end,
+                };
+                offset(len, o)?
+            }
+        };
+        Ok(self.pos)
+    }
+}
+
+fn offset(base: u64, delta: i64) -> io::Result<u64> {
+    (base as i64)
+        .checked_add(delta)
+        .filter(|t| *t >= 0)
+        .map(|t| t as u64)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid seek to a negative or overflowing position",
+            )
+        })
+}
+
+#[derive(TypedData)]
+#[magnus(class = "Ziperu::Native::Writer", free_immediately, mark)]
 pub struct Writer {
     // A write releases the GVL while borrowed, so a failed borrow means
     // another thread is writing through this object.
     inner: RefCell<State>,
+    /// The Ruby IO behind a `Sink::Ruby`, kept alive by `mark`.
+    io: Option<Opaque<Value>>,
+    /// Cleared when this object is freed, before the `ZipWriter` inside
+    /// drops, so that its finalizer cannot reach the IO (see `RubyOut`).
+    attached: Option<Arc<AtomicBool>>,
+    /// True for a Ruby IO sink, whose every operation must hold the GVL.
+    needs_gvl: bool,
+}
+
+impl DataTypeFunctions for Writer {
+    fn mark(&self, marker: &Marker) {
+        if let Some(io) = self.io {
+            marker.mark(io);
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(attached) = &self.attached {
+            attached.store(false, Ordering::Release);
+        }
+    }
 }
 
 struct State {
@@ -233,20 +444,35 @@ impl Writer {
             .truncate(true)
             .open(&path)
             .map_err(|e| io_error(ruby, e))?;
-        Ok(Self::new(Sink::File(BufWriter::new(file))))
+        Ok(Self::new(Sink::File(BufWriter::new(file)), None, None))
     }
 
     pub fn open_memory() -> Self {
-        Self::new(Sink::Memory(Cursor::new(Vec::new())))
+        Self::new(Sink::Memory(Cursor::new(Vec::new())), None, None)
     }
 
-    fn new(sink: Sink) -> Self {
+    /// Any seekable IO-like Ruby object; the archive is written from its
+    /// start, entry by entry, as the stream takes shape.
+    pub fn open_io(io: Value) -> Result<Self, Error> {
+        let attached = Arc::new(AtomicBool::new(true));
+        let out = RubyOut::new(io, Arc::clone(&attached))?;
+        Ok(Self::new(
+            Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out)),
+            Some(Opaque::from(io)),
+            Some(attached),
+        ))
+    }
+
+    fn new(sink: Sink, io: Option<Opaque<Value>>, attached: Option<Arc<AtomicBool>>) -> Self {
         Self {
             inner: RefCell::new(State {
                 writer: Some(ZipWriter::new(sink)),
                 count: 0,
                 zipcrypto: Vec::new(),
             }),
+            io,
+            attached,
+            needs_gvl: io.is_some(),
         }
     }
 
@@ -261,10 +487,13 @@ impl Writer {
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
         // Starting an entry flushes the previous one's compressor, which is
-        // real work for a large entry; nothing Ruby-owned is touched.
+        // real work for a large entry; nothing Ruby-owned is touched unless
+        // the sink is a Ruby IO.
         rb_self.with_state(ruby, |state, w| {
-            without_gvl(|| w.start_file_with_options(file_options.name(&name)))
-                .map_err(|e| entry_error(ruby, &name, e))?;
+            maybe_without_gvl(rb_self.needs_gvl, || {
+                w.start_file_with_options(file_options.name(&name))
+            })
+            .map_err(|e| entry_error(ruby, &name, e))?;
             state.count += 1;
             Ok(())
         })
@@ -281,7 +510,7 @@ impl Writer {
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
         rb_self.with_state(ruby, |state, w| {
-            without_gvl(|| w.add_directory(&name, file_options))
+            maybe_without_gvl(rb_self.needs_gvl, || w.add_directory(&name, file_options))
                 .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
             state.count += 1;
             Ok(())
@@ -293,7 +522,8 @@ impl Writer {
         // GVL (the string could be moved by compaction meanwhile).
         let bytes = unsafe { data.as_slice() }.to_vec();
         rb_self.with_writer(ruby, |w| {
-            without_gvl(|| w.write_all(&bytes)).map_err(|e| io_error(ruby, e))?;
+            maybe_without_gvl(rb_self.needs_gvl, || w.write_all(&bytes))
+                .map_err(|e| io_error(ruby, e))?;
             Ok(bytes.len())
         })
     }
@@ -310,7 +540,7 @@ impl Writer {
         new_name: Option<RString>,
         touch: Option<RHash>,
     ) -> Result<(), Error> {
-        let needs_gvl = archive.needs_gvl();
+        let needs_gvl = archive.needs_gvl() || rb_self.needs_gvl;
         let new_name = new_name.map(|n| utf8_name(ruby, n)).transpose()?;
         // A clone, so the archive's borrow is released before the GVL is.
         let mut source = archive.archive(ruby)?.clone();
@@ -346,7 +576,7 @@ impl Writer {
     }
 
     /// Writes the central directory. Returns `[bytes, stats]`: the archive
-    /// bytes for a memory sink (nil for a file), and one
+    /// bytes for a memory sink (nil for a file or Ruby IO), and one
     /// `[header_offset, size, compressed_size, crc]` per entry in the order
     /// written, which is how Ruby learns what a streamed entry came to.
     pub fn finish(ruby: &Ruby, rb_self: &Self) -> Result<(Option<RString>, RArray), Error> {
@@ -362,7 +592,8 @@ impl Writer {
         drop(state);
         // Finishes the last entry and writes the central directory, then
         // reads that directory back for the stats and the flag repairs.
-        let (sink, stats) = without_gvl(|| -> ZipResult<(Sink, EntryStats)> {
+        let needs_gvl = rb_self.needs_gvl;
+        let (sink, stats) = maybe_without_gvl(needs_gvl, || -> ZipResult<(Sink, EntryStats)> {
             let archive = writer.finish_into_readable()?;
             let meta = archive.metadata();
             let stats = (0..meta.len())
@@ -396,11 +627,14 @@ impl Writer {
                 }
             }
             sink.flush()?;
+            if let Sink::Ruby(w) = &mut sink {
+                w.get_mut().seek_to_end()?;
+            }
             Ok((sink, stats))
         })
         .map_err(|e| zip_error(ruby, e))?;
         let bytes = match sink {
-            Sink::File(_) => None,
+            Sink::File(_) | Sink::Ruby(_) => None,
             Sink::Memory(c) => Some(ruby.str_from_slice(&c.into_inner())),
         };
         let out = ruby.ary_new_capa(stats.len());

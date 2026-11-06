@@ -43,6 +43,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let writer = native.define_class("Writer", ruby.class_object())?;
     writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;
     writer.define_singleton_method("open_memory", function!(writer::Writer::open_memory, 0))?;
+    writer.define_singleton_method("open_io", function!(writer::Writer::open_io, 1))?;
     writer.define_method("start_entry", method!(writer::Writer::start_entry, 2))?;
     writer.define_method("add_directory", method!(writer::Writer::add_directory, 2))?;
     writer.define_method("write", method!(writer::Writer::write, 1))?;

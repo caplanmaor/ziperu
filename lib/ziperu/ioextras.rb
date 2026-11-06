@@ -14,6 +14,17 @@ module Ziperu
     CHUNK_SIZE = 32_768
 
     class << self
+      # Whether `io` can be positioned: it answers `seek` and `tell` and a
+      # no-op seek succeeds (a pipe or socket raises).
+      def seekable?(io)
+        return false unless io.respond_to?(:seek) && io.respond_to?(:tell)
+
+        io.seek(0, ::IO::SEEK_CUR)
+        true
+      rescue SystemCallError, IOError
+        false
+      end
+
       def copy_stream(ostream, istream)
         ostream.write(istream.read(CHUNK_SIZE, +'')) until istream.eof?
       end

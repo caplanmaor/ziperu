@@ -88,10 +88,6 @@ until it goes. Exception classes follow the namespace, so rescue
   copied as is: its name and permissions can change, and any other edit
   raises `Ziperu::Error` at commit rather than vanishing, which is what
   rubyzip does for compression methods it cannot write.
-- `Ziperu::OutputStream` and `Ziperu::OutputStream.write_buffer` build the
-  archive in memory (or straight into the named file) and hand it to the IO
-  on `close`; rubyzip streams into the IO as entries are written, so
-  `io.pos` only moves at the end here.
 - Several entries with the same name in one archive: `Ziperu::File` lists
   them all and reads the last; `Ziperu::InputStream` yields only the last,
   where rubyzip walks every local header.
