@@ -16,6 +16,12 @@ module Ziperu
     # Constant used to specify that the entry is deflated (i.e., compressed).
     DEFLATED = ::Ziperu::COMPRESSION_METHOD_DEFLATE
 
+    # Two more methods the native writer can produce. rubyzip cannot read
+    # either, nor can Windows Explorer or Java; 7-Zip, Info-ZIP and
+    # libarchive can.
+    BZIP2 = ::Ziperu::COMPRESSION_METHOD_BZIP2
+    ZSTD = ::Ziperu::COMPRESSION_METHOD_ZSTD
+
     # Language encoding flag (EFS) bit
     EFS = 0b100000000000 # :nodoc:
 
@@ -242,8 +248,31 @@ module Ziperu
 
     alias header_offset local_header_offset
 
-    # Offset of the entry's compressed bytes within the archive.
-    attr_reader :data_offset # :nodoc:
+    # What the entry came to once written: the stream's `close` fills these
+    # in so that a manifest built from the entries just written is right.
+    def written_as(header_offset, size, compressed_size, crc) # :nodoc:
+      @local_header_offset = header_offset
+      @size = size
+      @compressed_size = compressed_size
+      @crc = crc
+    end
+
+    # Entries serialize without their archive handle; a loaded one can be
+    # inspected but not read.
+    def marshal_dump # :nodoc:
+      instance_variables.each_with_object({}) do |ivar, h|
+        next if ivar == :@archive
+        next if ivar == :@zipfile && @zipfile.kind_of?(::Ziperu::File)
+
+        h[ivar] = instance_variable_get(ivar)
+      end
+    end
+
+    def marshal_load(ivars) # :nodoc:
+      ivars.each { |ivar, value| instance_variable_set(ivar, value) }
+      @archive = nil
+      @zipfile = nil unless instance_variable_defined?(:@zipfile)
+    end
 
     def to_s # :nodoc:
       @name
@@ -353,7 +382,7 @@ module Ziperu
     def write_to_zip_output_stream(zip_output_stream) # :nodoc:
       if ftype == :directory
         zip_output_stream.put_next_entry(self)
-      elsif @filepath || (dirty? && !raw_copy_carries_changes? && restreamable?)
+      elsif @filepath || needs_restream?
         zip_output_stream.put_next_entry(self)
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
@@ -367,12 +396,37 @@ module Ziperu
     # What `FileSystem#chmod` sets, and what a touch on the raw copy writes.
     PERMISSION_FIELDS = %i[unix_perms= external_file_attributes= fstype=].freeze # :nodoc:
 
+    # Extra fields the native raw copy does not carry over intact: it
+    # re-emits the central directory's form of each field in both headers,
+    # which drops the extended timestamp and NTFS fields and leaves the
+    # Info-ZIP unix fields without their uid/gid.
+    RAW_COPY_LOSES = %i[universaltime ntfs oldunix iunix].freeze # :nodoc:
+
     def raw_copy_carries_changes? # :nodoc:
       dirty_fields == [:name=] || (dirty_fields - PERMISSION_FIELDS).empty?
     end
 
+    # Whether the entry has to be decompressed and written afresh rather
+    # than copied byte for byte. An encrypted entry cannot be: edits to it
+    # beyond a rename or chmod raise rather than vanish on commit, and the
+    # extra fields the raw copy loses are lost.
+    def needs_restream? # :nodoc:
+      if dirty? && !raw_copy_carries_changes?
+        unless restreamable?
+          changed = dirty_fields.map { |f| f.to_s.chomp('=') }.join(', ')
+          kind = encrypted? ? 'an encrypted' : "a #{COMPRESSION_METHODS[compression_method]}"
+          raise Error, "cannot change #{changed} of entry '#{@name}': #{kind} entry " \
+                       'can only be copied as is (a rename or chmod is fine)'
+        end
+
+        return true
+      end
+
+      restreamable? && (extra.keys & RAW_COPY_LOSES).any?
+    end
+
     def restreamable? # :nodoc:
-      !encrypted? && [STORED, DEFLATED].include?(compression_method)
+      !encrypted? && ::Ziperu::WRITABLE_COMPRESSION_METHODS.include?(compression_method)
     end
 
     def parent_as_string # :nodoc:
@@ -414,6 +468,17 @@ module Ziperu
       raise EntrySizeError, self
     end
 
+    # The whole entry as a binary String, the way `Ziperu::File#read` reads
+    # one: in a single native call when the entry is in an archive and its
+    # declared size is to be trusted, through a stream otherwise.
+    def read_all # :nodoc:
+      if @filepath.nil? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
+        get_raw_input_string
+      else
+        get_input_stream(&:read)
+      end
+    end
+
     def inspect
       "#<#{self.class.name}:#{name} size=#{size} crc=#{format('%08x', crc)}>"
     end
@@ -423,7 +488,7 @@ module Ziperu
     # Like get_input_stream, with `enforce_size: false` reading past a
     # declared size that is too small (what rubyzip does when
     # Ziperu.validate_entry_sizes is off) instead of stopping at it.
-    def open_input_stream(decrypter: nil, enforce_size: true)
+    def open_input_stream(decrypter: nil, enforce_size: ::Ziperu.validate_entry_sizes)
       if ftype == :directory
         return yield(::Ziperu::NullInputStream) if block_given?
 
@@ -509,7 +574,6 @@ module Ziperu
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
-      @data_offset              = nil
       @internal_file_attributes = 1
       @external_file_attributes = 0
 
@@ -567,7 +631,6 @@ module Ziperu
       @extra = ExtraField.new(meta[:extra])
       @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
-      @data_offset = meta[:data_offset]
       set_ftype_from_c_dir_entry
     end
 

@@ -25,7 +25,7 @@ module Ziperu
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, enforce_size: true, **opts)
+    def initialize(context, offset: 0, decrypter: nil, enforce_size: ::Ziperu.validate_entry_sizes, **opts)
       super(**opts)
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       # An archive handed in (by Entry#get_input_stream) stays open for its
@@ -37,11 +37,19 @@ module Ziperu
         if !@owns_archive
           context
         elsif !@split
-          self.class.open_archive(context)
+          begin
+            self.class.open_archive(context)
+          rescue Error => e
+            # Not an archive: rubyzip finds no entries rather than raising,
+            # and `while (entry = zis.get_next_entry)` over untrusted input
+            # relies on that.
+            @not_an_archive = e
+            nil
+          end
         end
       @decrypter = decrypter
       @enforce_size = enforce_size
-      @next_index = offset.zero? ? 0 : index_at_offset(offset)
+      @next_index = offset.zero? || @archive.nil? ? 0 : index_at_offset(offset)
       @reader = nil
       @current_entry = nil
     end
@@ -52,13 +60,15 @@ module Ziperu
       @reader = nil
       @archive&.close if @owns_archive
       @archive = nil
+      @not_an_archive = nil
     end
 
     # Returns an Entry object and positions the stream at the beginning of
     # the entry data. Returns nil when there are no more entries.
     def get_next_entry
       raise SplitArchiveError if @split
-      raise IOError, 'closed stream' if @archive.nil?
+      raise IOError, 'closed stream' if closed?
+      return @current_entry = nil if @archive.nil? || @next_index.nil?
       if @next_index >= @archive.entry_count
         # Past the last entry there is nothing to read, not the previous
         # entry again.
@@ -79,7 +89,7 @@ module Ziperu
     #
     # @api private
     def get_next_stream_entry(entry)
-      raise IOError, 'closed stream' if @archive.nil?
+      raise IOError, 'closed stream' if closed?
 
       @current_entry = entry
       @next_index = entry.index + 1
@@ -89,7 +99,7 @@ module Ziperu
 
     # Rewinds the stream to the beginning of the current entry.
     def rewind
-      raise IOError, 'closed stream' if @archive.nil?
+      raise IOError, 'closed stream' if closed?
       return if @current_entry.nil?
 
       @lineno = 0
@@ -207,7 +217,7 @@ module Ziperu
     end
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
-      raise IOError, 'closed stream' if @archive.nil?
+      raise IOError, 'closed stream' if closed?
       raise ArgumentError, "negative length #{maxlen} given" if maxlen&.negative?
       return nil if @reader.nil?
 
@@ -216,18 +226,22 @@ module Ziperu
 
     def input_finished? # :nodoc:
       # A closed stream is not "at EOF": reading it raises, as with an IO.
-      return false if @archive.nil?
+      return false if closed?
 
       @reader.nil? || @reader.eof?
     end
 
     private
 
+    # Nil when no entry starts there, which reads as "no more entries".
     def index_at_offset(offset)
       found = @archive.entries.find { |meta| meta[:header_offset] == offset }
-      raise Error, "no local header at offset #{offset}" if found.nil?
+      found && found[:index]
+    end
 
-      found[:index]
+    # Closed by `close`, as opposed to never opened on an archive at all.
+    def closed?
+      @archive.nil? && @not_an_archive.nil?
     end
 
     # Re-raise the native core's errors as the rubyzip-shaped ones.

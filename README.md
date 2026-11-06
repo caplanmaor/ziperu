@@ -53,8 +53,12 @@ until it goes. Exception classes follow the namespace, so rescue
 - Writing ZipCrypto ("traditional") encryption is not supported: the Rust
   crate deliberately keeps that broken cipher read-only. `AESEncrypter`
   works; `TraditionalEncrypter` raises `Ziperu::Error` on the first entry.
-- Archives compressed with bzip2, Deflate64 or zstd read normally; rubyzip
-  raises `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
+- Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
+  PKZIP 1.x methods (Shrink, Reduce, Implode) read normally; rubyzip raises
+  `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
+  Entries can also be *written* with bzip2 or zstd
+  (`put_next_entry(name, "", ExtraField.new, Ziperu::Entry::ZSTD, 3)`), which
+  rubyzip, Windows Explorer and Java cannot read, so those are opt-in.
 - AES entries of 20 bytes or more are written as AE-1 (with a real CRC in the
   header) rather than rubyzip's always-AE-2 with a zero CRC; both are read
   by every AES-aware tool, and AE-1 adds an integrity check.
@@ -78,7 +82,28 @@ until it goes. Exception classes follow the namespace, so rescue
   holding the link target.
 - Editing an existing entry's comment, time or extra fields and committing
   rewrites that entry's data under a fresh header; a rename or a chmod on
-  its own keeps the byte-for-byte copy.
+  its own keeps the byte-for-byte copy. So does an untouched entry, unless
+  it carries an extended-timestamp, NTFS or Info-ZIP unix extra field, which
+  the native copy would not carry over intact. An encrypted entry is always
+  copied as is: its name and permissions can change, and any other edit
+  raises `Ziperu::Error` at commit rather than vanishing, which is what
+  rubyzip does for compression methods it cannot write.
+- `Ziperu::OutputStream` and `Ziperu::OutputStream.write_buffer` build the
+  archive in memory (or straight into the named file) and hand it to the IO
+  on `close`; rubyzip streams into the IO as entries are written, so
+  `io.pos` only moves at the end here.
+- Several entries with the same name in one archive: `Ziperu::File` lists
+  them all and reads the last; `Ziperu::InputStream` yields only the last,
+  where rubyzip walks every local header.
+- `Ziperu::InputStream` over something that is not a zip archive at all
+  returns `nil` from the first `get_next_entry`, as rubyzip does; a corrupt
+  archive raises `Ziperu::Error` from `Ziperu::File.open` in both.
+- `Zip::VERSION` is ziperu's own version, not rubyzip's. Code that gates on
+  it (`Gem::Version.new(Zip::VERSION) >= "3"`) should check
+  `Ziperu::RUBYZIP_COMPAT_VERSION` instead.
+- An open `Ziperu::File` holds its file open until `close`. On Windows that
+  blocks a commit by *another* `Ziperu::File` on the same path with
+  `Errno::EACCES`; rubyzip closes the file between operations.
 - Using one `InputStream`, `OutputStream` or `Zip::File` from two threads
   at the same time raises `ThreadError` ("in use by another thread")
   rather than corrupting state; rubyzip's objects are not thread-safe
@@ -163,14 +188,14 @@ loaded side by side. On one Windows machine (Ruby 3.4, median of 5):
 
 | scenario | rubyzip 3.7.0 | ziperu 0.1.0 | speedup |
 |---|---:|---:|---:|
-| open and list 10000 entries | 300 ms | 206 ms | 1.5x |
-| read 1000 x 8 KB deflated entries | 207 ms | 51 ms | 4.1x |
-| InputStream over 1000 entries | 106 ms | 66 ms | 1.6x |
-| inflate one 64 MB entry | 106 ms | 40 ms | 2.6x |
-| extract_all 1000 entries | 992 ms | 859 ms | 1.2x |
-| write 1000 x 8 KB entries (OutputStream) | 89 ms | 34 ms | 2.6x |
-| deflate one 64 MB entry (OutputStream) | 269 ms | 58 ms | 4.6x |
-| open_buffer(String) and read 1000 entries | 62 ms | 20 ms | 3.0x |
+| open and list 10000 entries | 298 ms | 130 ms | 2.3x |
+| read 1000 x 8 KB deflated entries | 196 ms | 23 ms | 8.4x |
+| InputStream over 1000 entries | 111 ms | 64 ms | 1.7x |
+| inflate one 64 MB entry | 106 ms | 54 ms | 2.0x |
+| extract_all 1000 entries | 974 ms | 807 ms | 1.2x |
+| write 1000 x 8 KB entries (OutputStream) | 89 ms | 39 ms | 2.3x |
+| deflate one 64 MB entry (OutputStream) | 245 ms | 58 ms | 4.3x |
+| open_buffer(String) and read 1000 entries | 69 ms | 15 ms | 4.5x |
 | Zip::File add 100 files and commit | 40 ms | 33 ms | 1.2x |
 
 Inflating and deflating are where the Rust core pays off. Listing a large

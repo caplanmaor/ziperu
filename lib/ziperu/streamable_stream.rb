@@ -24,6 +24,10 @@ module Ziperu
       end
     end
 
+    def read_all # :nodoc:
+      get_input_stream(&:read)
+    end
+
     def get_input_stream
       unless @temp_file.closed?
         raise StandardError, "cannot open entry for reading while its open for writing - #{name}"

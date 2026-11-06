@@ -9,13 +9,14 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 
 use magnus::{
-    gc::Marker, prelude::*, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash,
-    RString, Ruby, TypedData, Value,
+    gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
+    Symbol, TypedData, Value,
 };
-use zip::read::ZipFile;
+use zip::read::ZipFileEntry;
+use zip::result::ZipResult;
 use zip::ZipArchive;
 
-use crate::errors::{busy_error, io_error, zip_error};
+use crate::errors::{busy_error, io_error, read_error, zip_error};
 use crate::gvl::maybe_without_gvl;
 use crate::reader::EntryReader;
 use crate::source::Source;
@@ -113,41 +114,57 @@ impl Archive {
     }
 
     /// One Hash per entry, in central-directory order.
+    ///
+    /// The parsed central directory already holds nearly everything; the
+    /// few fields read raw come from one sequential pass over the records,
+    /// done without the GVL when the source allows it.
     pub fn entries(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let mut archive = rb_self.archive(ruby)?;
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
         let mut raw = archive.clone().into_inner();
-        let out = ruby.ary_new_capa(archive.len());
-        for i in 0..archive.len() {
-            let entry = archive.by_index_raw(i).map_err(|e| zip_error(ruby, e))?;
-            let fields = raw_central_fields(&mut raw, entry.central_header_start())
-                .map_err(|e| io_error(ruby, e))?;
-            out.push(entry_hash(ruby, i, &entry, &fields)?)?;
+        drop(archive);
+        let fields = maybe_without_gvl(rb_self.needs_gvl, || {
+            (0..meta.len())
+                .map(|i| {
+                    let entry = meta.entry(i)?;
+                    Ok(raw_central_fields(&mut raw, entry.central_header_start())?)
+                })
+                .collect::<ZipResult<Vec<_>>>()
+        })
+        .map_err(|e| zip_error(ruby, e))?;
+        let keys = MetaKeys::new(ruby);
+        let out = ruby.ary_new_capa(meta.len());
+        for (i, fields) in fields.iter().enumerate() {
+            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+            out.push(entry_hash(ruby, &keys, i, &entry, fields)?)?;
         }
         Ok(out)
     }
 
     /// The Hash for a single entry.
     pub fn entry_meta(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RHash, Error> {
-        let mut archive = rb_self.archive(ruby)?;
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
         let mut raw = archive.clone().into_inner();
-        let entry = archive
-            .by_index_raw(index)
-            .map_err(|e| zip_error(ruby, e))?;
+        drop(archive);
+        let entry = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
         let fields = raw_central_fields(&mut raw, entry.central_header_start())
             .map_err(|e| io_error(ruby, e))?;
-        entry_hash(ruby, index, &entry, &fields)
+        entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &fields)
     }
 
     /// The raw extra field bytes of entry `index`'s local header. Some
     /// fields (Info-ZIP unix uid/gid, extended timestamp atime/ctime) only
     /// carry their data there; Ruby merges them lazily.
     pub fn local_extra(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RString, Error> {
-        let mut archive = rb_self.archive(ruby)?;
+        let archive = rb_self.archive(ruby)?;
         let header_start = archive
-            .by_index_raw(index)
+            .metadata()
+            .entry(index)
             .map_err(|e| zip_error(ruby, e))?
             .header_start();
         let mut raw = archive.clone().into_inner();
+        drop(archive);
         let extra = raw_local_extra(&mut raw, header_start).map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
     }
@@ -184,7 +201,7 @@ impl Archive {
         // A hint only: the declared size is untrusted and may be a lie.
         let mut buf = Vec::with_capacity(entry.size().min(CAPACITY_HINT_MAX) as usize);
         maybe_without_gvl(rb_self.needs_gvl, || entry.read_to_end(&mut buf))
-            .map_err(|e| io_error(ruby, e))?;
+            .map_err(|e| read_error(ruby, e))?;
         Ok(ruby.str_from_slice(&buf))
     }
 }
@@ -207,7 +224,7 @@ fn raw_central_fields(source: &mut Source, central_offset: u64) -> io::Result<Ra
     const SIGNATURE: u32 = 0x0201_4b50;
     const HEADER_LEN: usize = 46;
 
-    source.seek(SeekFrom::Start(central_offset))?;
+    source.seek_to(central_offset)?;
     let mut header = [0u8; HEADER_LEN];
     source.read_exact(&mut header)?;
     if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
@@ -252,50 +269,79 @@ fn raw_local_extra(source: &mut Source, header_offset: u64) -> io::Result<Vec<u8
     Ok(extra)
 }
 
+/// The Hash keys, interned once per listing rather than once per entry.
+struct MetaKeys {
+    index: Symbol,
+    name: Symbol,
+    size: Symbol,
+    compressed_size: Symbol,
+    crc: Symbol,
+    compression_method: Symbol,
+    flags: Symbol,
+    external_attributes: Symbol,
+    fstype: Symbol,
+    version_made_by: Symbol,
+    dos_date: Symbol,
+    dos_time: Symbol,
+    comment: Symbol,
+    extra: Symbol,
+    header_offset: Symbol,
+}
+
+impl MetaKeys {
+    fn new(ruby: &Ruby) -> Self {
+        Self {
+            index: ruby.to_symbol("index"),
+            name: ruby.to_symbol("name"),
+            size: ruby.to_symbol("size"),
+            compressed_size: ruby.to_symbol("compressed_size"),
+            crc: ruby.to_symbol("crc"),
+            compression_method: ruby.to_symbol("compression_method"),
+            flags: ruby.to_symbol("flags"),
+            external_attributes: ruby.to_symbol("external_attributes"),
+            fstype: ruby.to_symbol("fstype"),
+            version_made_by: ruby.to_symbol("version_made_by"),
+            dos_date: ruby.to_symbol("dos_date"),
+            dos_time: ruby.to_symbol("dos_time"),
+            comment: ruby.to_symbol("comment"),
+            extra: ruby.to_symbol("extra"),
+            header_offset: ruby.to_symbol("header_offset"),
+        }
+    }
+}
+
 fn entry_hash(
     ruby: &Ruby,
+    keys: &MetaKeys,
     index: usize,
-    entry: &ZipFile<'_, Source>,
+    entry: &ZipFileEntry<'_>,
     raw: &RawCentralFields,
 ) -> Result<RHash, Error> {
-    let h = ruby.hash_new();
-    let set = |key: &str, value: magnus::Value| -> Result<(), Error> {
-        h.aset(ruby.to_symbol(key), value)
-    };
-    set("index", ruby.into_value(index))?;
-    set("name", ruby.str_from_slice(entry.name_raw()).as_value())?;
-    set("size", ruby.into_value(entry.size()))?;
-    set("compressed_size", ruby.into_value(entry.compressed_size()))?;
-    set("crc", ruby.into_value(entry.crc32()))?;
-    set(
-        "compression_method",
-        ruby.into_value(compression_code(entry.compression())),
+    let h = ruby.hash_new_capa(15);
+    h.aset(keys.index, index)?;
+    h.aset(keys.name, ruby.str_from_slice(entry.name_raw()))?;
+    h.aset(keys.size, entry.size())?;
+    h.aset(keys.compressed_size, entry.compressed_size())?;
+    h.aset(keys.crc, entry.crc32())?;
+    h.aset(
+        keys.compression_method,
+        compression_code(entry.compression()),
     )?;
-    set("directory", ruby.into_value(entry.is_dir()))?;
-    set("encrypted", ruby.into_value(entry.encrypted()))?;
-    set("flags", ruby.into_value(entry.flags().as_u16()))?;
-    set(
-        "external_attributes",
-        ruby.into_value(entry.external_attributes()),
-    )?;
+    h.aset(keys.flags, entry.flags().as_u16())?;
+    h.aset(keys.external_attributes, entry.external_attributes())?;
     // "Version made by": high byte is the host system, low byte the spec
     // version; rubyzip keeps them as fstype / version.
-    set("fstype", ruby.into_value(u8::from(entry.system())))?;
+    h.aset(keys.fstype, u8::from(entry.system()))?;
     let (major, minor) = entry.version_made_by();
-    set("version_made_by", ruby.into_value(major * 10 + minor))?;
-    set("dos_date", ruby.into_value(raw.dos_date))?;
-    set("dos_time", ruby.into_value(raw.dos_time))?;
-    set(
-        "comment",
-        ruby.str_from_slice(entry.comment().as_bytes()).as_value(),
+    h.aset(keys.version_made_by, major * 10 + minor)?;
+    h.aset(keys.dos_date, raw.dos_date)?;
+    h.aset(keys.dos_time, raw.dos_time)?;
+    h.aset(
+        keys.comment,
+        ruby.str_from_slice(entry.comment().as_bytes()),
     )?;
-    set("extra", ruby.str_from_slice(&raw.extra).as_value())?;
-    set("header_offset", ruby.into_value(entry.header_start()))?;
-    set("data_offset", ruby.into_value(entry.data_start()))?;
-    set(
-        "central_offset",
-        ruby.into_value(entry.central_header_start()),
-    )?;
+    h.aset(keys.extra, ruby.str_from_slice(&raw.extra))?;
+    h.aset(keys.header_offset, entry.header_start())?;
     Ok(h)
 }
 

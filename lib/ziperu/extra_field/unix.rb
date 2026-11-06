@@ -32,8 +32,10 @@ module Ziperu
       @uid == other.uid && @gid == other.gid
     end
 
+    # Nil when only the central directory's (empty) form was seen; packed
+    # as zero rather than failing.
     def pack_for_local
-      [@uid, @gid].pack('vv')
+      [@uid, @gid].map(&:to_i).pack('vv')
     end
 
     def pack_for_c_dir

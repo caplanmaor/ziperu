@@ -7,12 +7,12 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::{self, BufWriter, Cursor, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 
-use magnus::{prelude::*, Error, RHash, RString, Ruby};
-use zip::result::ZipError;
+use magnus::{prelude::*, Error, RArray, RHash, RString, Ruby};
+use zip::result::{ZipError, ZipResult};
 use zip::write::FullFileOptions;
-use zip::{AesMode, CompressionMethod, DateTime, System, ZipWriter};
+use zip::{AesMode, CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
 use crate::archive::Archive;
 use crate::errors::{busy_error, io_error, zip_error, ERROR};
@@ -21,6 +21,32 @@ use crate::gvl::{maybe_without_gvl, without_gvl};
 pub enum Sink {
     File(BufWriter<fs::File>),
     Memory(Cursor<Vec<u8>>),
+}
+
+impl Sink {
+    /// Sets bit `bit` of the little-endian u16 at `pos`.
+    fn set_u16_bit(&mut self, pos: u64, bit: u16) -> io::Result<()> {
+        let mut field = [0u8; 2];
+        self.seek(SeekFrom::Start(pos))?;
+        self.read_exact(&mut field)?;
+        let value = u16::from_le_bytes(field) | bit;
+        self.seek(SeekFrom::Start(pos))?;
+        self.write_all(&value.to_le_bytes())
+    }
+}
+
+// Reading back what was written (`finish` does, to collect per-entry
+// facts and patch headers) goes through the file after a flush.
+impl Read for Sink {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Sink::File(f) => {
+                f.flush()?;
+                f.get_mut().read(buf)
+            }
+            Sink::Memory(c) => c.read(buf),
+        }
+    }
 }
 
 impl Write for Sink {
@@ -50,10 +76,28 @@ impl Seek for Sink {
 
 #[magnus::wrap(class = "Ziperu::Native::Writer", free_immediately)]
 pub struct Writer {
-    // `None` once finished. A write releases the GVL while borrowed, so a
-    // failed borrow means another thread is writing through this object.
-    inner: RefCell<Option<ZipWriter<Sink>>>,
+    // A write releases the GVL while borrowed, so a failed borrow means
+    // another thread is writing through this object.
+    inner: RefCell<State>,
 }
+
+struct State {
+    /// `None` once finished.
+    writer: Option<ZipWriter<Sink>>,
+    /// Entries started so far; the next one gets this index.
+    count: usize,
+    /// Indices of raw-copied ZipCrypto entries. The crate cannot write that
+    /// cipher, so its raw copy clears the encryption flag and the
+    /// ciphertext would read as corrupt data; `finish` sets the flag back.
+    zipcrypto: Vec<usize>,
+}
+
+/// What `finish` reports about each written entry, in order: local header
+/// offset, size, compressed size, CRC-32.
+type EntryStats = Vec<[u64; 4]>;
+
+/// General purpose flag bit 0: the entry is encrypted.
+const ENCRYPTED_FLAG: u16 = 1;
 
 /// Per-entry settings, read from the Hash Ruby passes to `start_entry`.
 struct EntryOptions {
@@ -69,6 +113,9 @@ struct EntryOptions {
     comment: Option<String>,
     /// Concatenated local-format extra fields: id, len, data.
     extra: Vec<u8>,
+    /// The central-directory forms; fields present only here are written
+    /// only there (rubyzip keeps unknown fields it was handed that way).
+    central_extra: Vec<u8>,
     password: Option<Vec<u8>>,
     aes_mode: Option<u8>,
 }
@@ -103,6 +150,11 @@ impl EntryOptions {
                 .map(|v| utf8_text(ruby, "entry comment", RString::try_convert(v)?))
                 .transpose()?,
             extra: opt("extra")?
+                .map(RString::try_convert)
+                .transpose()?
+                .map(|s| unsafe { s.as_slice() }.to_vec())
+                .unwrap_or_default(),
+            central_extra: opt("central_extra")?
                 .map(RString::try_convert)
                 .transpose()?
                 .map(|s| unsafe { s.as_slice() }.to_vec())
@@ -153,15 +205,19 @@ impl EntryOptions {
             };
             options = options.with_aes_encryption_bytes(mode, password);
         }
-        let mut i = 0;
-        while i + 4 <= self.extra.len() {
-            let id = u16::from_le_bytes([self.extra[i], self.extra[i + 1]]);
-            let len = u16::from_le_bytes([self.extra[i + 2], self.extra[i + 3]]) as usize;
-            let data = self.extra.get(i + 4..i + 4 + len).unwrap_or(&[]);
+        let mut local_ids = Vec::new();
+        for (id, data) in extra_fields(&self.extra) {
+            local_ids.push(id);
             options
                 .add_extra_field(id, data, false)
                 .map_err(|e| zip_error(ruby, e))?;
-            i += 4 + len;
+        }
+        for (id, data) in extra_fields(&self.central_extra) {
+            if !local_ids.contains(&id) {
+                options
+                    .add_extra_field(id, data, true)
+                    .map_err(|e| zip_error(ruby, e))?;
+            }
         }
         Ok(options)
     }
@@ -169,7 +225,14 @@ impl EntryOptions {
 
 impl Writer {
     pub fn open_path(ruby: &Ruby, path: String) -> Result<Self, Error> {
-        let file = fs::File::create(&path).map_err(|e| io_error(ruby, e))?;
+        // Readable too: `finish` reads the central directory back.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| io_error(ruby, e))?;
         Ok(Self::new(Sink::File(BufWriter::new(file))))
     }
 
@@ -179,7 +242,11 @@ impl Writer {
 
     fn new(sink: Sink) -> Self {
         Self {
-            inner: RefCell::new(Some(ZipWriter::new(sink))),
+            inner: RefCell::new(State {
+                writer: Some(ZipWriter::new(sink)),
+                count: 0,
+                zipcrypto: Vec::new(),
+            }),
         }
     }
 
@@ -193,9 +260,13 @@ impl Writer {
         let name = unsafe { name.as_slice() }.to_vec();
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
-        rb_self.with_writer(ruby, |w| {
-            w.start_file_with_options(file_options.name(&name))
-                .map_err(|e| entry_error(ruby, &name, e))
+        // Starting an entry flushes the previous one's compressor, which is
+        // real work for a large entry; nothing Ruby-owned is touched.
+        rb_self.with_state(ruby, |state, w| {
+            without_gvl(|| w.start_file_with_options(file_options.name(&name)))
+                .map_err(|e| entry_error(ruby, &name, e))?;
+            state.count += 1;
+            Ok(())
         })
     }
 
@@ -209,9 +280,11 @@ impl Writer {
         let name = utf8_name(ruby, name)?;
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
-        rb_self.with_writer(ruby, |w| {
-            w.add_directory(&name, file_options)
-                .map_err(|e| entry_error(ruby, name.as_bytes(), e))
+        rb_self.with_state(ruby, |state, w| {
+            without_gvl(|| w.add_directory(&name, file_options))
+                .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
+            state.count += 1;
+            Ok(())
         })
     }
 
@@ -242,10 +315,11 @@ impl Writer {
         // A clone, so the archive's borrow is released before the GVL is.
         let mut source = archive.archive(ruby)?.clone();
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
+        let zipcrypto = file.encrypted() && file.compression() != CompressionMethod::Aes;
         let touch = touch
             .map(|h| EntryOptions::from_hash(ruby, h))
             .transpose()?;
-        rb_self.with_writer(ruby, |w| {
+        rb_self.with_state(ruby, |state, w| {
             maybe_without_gvl(needs_gvl, || match (new_name, touch) {
                 (Some(name), _) => w.raw_copy_file_rename(file, name),
                 (None, Some(t)) => {
@@ -255,7 +329,12 @@ impl Writer {
                 }
                 (None, None) => w.raw_copy_file(file),
             })
-            .map_err(|e| zip_error(ruby, e))
+            .map_err(|e| zip_error(ruby, e))?;
+            if zipcrypto {
+                state.zipcrypto.push(state.count);
+            }
+            state.count += 1;
+            Ok(())
         })
     }
 
@@ -266,27 +345,73 @@ impl Writer {
         })
     }
 
-    /// Writes the central directory. Returns the archive bytes for a memory
-    /// sink, nil for a file.
-    pub fn finish(ruby: &Ruby, rb_self: &Self) -> Result<Option<RString>, Error> {
-        let writer = rb_self
+    /// Writes the central directory. Returns `[bytes, stats]`: the archive
+    /// bytes for a memory sink (nil for a file), and one
+    /// `[header_offset, size, compressed_size, crc]` per entry in the order
+    /// written, which is how Ruby learns what a streamed entry came to.
+    pub fn finish(ruby: &Ruby, rb_self: &Self) -> Result<(Option<RString>, RArray), Error> {
+        let mut state = rb_self
             .inner
             .try_borrow_mut()
-            .map_err(|_| busy_error(ruby, "writer"))?
+            .map_err(|_| busy_error(ruby, "writer"))?;
+        let writer = state
+            .writer
             .take()
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
-        let sink = writer.finish().map_err(|e| zip_error(ruby, e))?;
-        match sink {
-            Sink::File(mut f) => {
-                f.flush().map_err(|e| io_error(ruby, e))?;
-                Ok(None)
+        let zipcrypto = std::mem::take(&mut state.zipcrypto);
+        drop(state);
+        // Finishes the last entry and writes the central directory, then
+        // reads that directory back for the stats and the flag repairs.
+        let (sink, stats) = without_gvl(|| -> ZipResult<(Sink, EntryStats)> {
+            let archive = writer.finish_into_readable()?;
+            let meta = archive.metadata();
+            let stats = (0..meta.len())
+                .map(|i| {
+                    let e = meta.entry(i)?;
+                    Ok([
+                        e.header_start(),
+                        e.size(),
+                        e.compressed_size(),
+                        u64::from(e.crc32()),
+                    ])
+                })
+                .collect::<ZipResult<EntryStats>>()?;
+            let mut sink = archive.into_inner();
+            if !zipcrypto.is_empty() {
+                // The writer's own view has no central record offsets (it
+                // never read them); parse what was just written to get them.
+                let reread = ZipArchive::new(sink)?;
+                let meta = reread.metadata();
+                let targets = zipcrypto
+                    .iter()
+                    .map(|&i| {
+                        let e = meta.entry(i)?;
+                        Ok((e.header_start(), e.central_header_start()))
+                    })
+                    .collect::<ZipResult<Vec<_>>>()?;
+                sink = reread.into_inner();
+                for (local, central) in targets {
+                    sink.set_u16_bit(local + 6, ENCRYPTED_FLAG)?;
+                    sink.set_u16_bit(central + 8, ENCRYPTED_FLAG)?;
+                }
             }
-            Sink::Memory(c) => Ok(Some(ruby.str_from_slice(&c.into_inner()))),
+            sink.flush()?;
+            Ok((sink, stats))
+        })
+        .map_err(|e| zip_error(ruby, e))?;
+        let bytes = match sink {
+            Sink::File(_) => None,
+            Sink::Memory(c) => Some(ruby.str_from_slice(&c.into_inner())),
+        };
+        let out = ruby.ary_new_capa(stats.len());
+        for entry in stats {
+            out.push(entry.to_vec())?;
         }
+        Ok((bytes, out))
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner.try_borrow().is_ok_and(|w| w.is_none())
+        self.inner.try_borrow().is_ok_and(|s| s.writer.is_none())
     }
 
     fn with_writer<T>(
@@ -294,15 +419,42 @@ impl Writer {
         ruby: &Ruby,
         f: impl FnOnce(&mut ZipWriter<Sink>) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.with_state(ruby, |_, w| f(w))
+    }
+
+    fn with_state<T>(
+        &self,
+        ruby: &Ruby,
+        f: impl FnOnce(&mut State, &mut ZipWriter<Sink>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let mut guard = self
             .inner
             .try_borrow_mut()
             .map_err(|_| busy_error(ruby, "writer"))?;
-        let writer = guard
-            .as_mut()
+        let state = &mut *guard;
+        let mut writer = state
+            .writer
+            .take()
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
-        f(writer)
+        let result = f(state, &mut writer);
+        state.writer = Some(writer);
+        result
     }
+}
+
+/// Walks concatenated extra fields (id, length, data) as `(id, data)`.
+fn extra_fields(bytes: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        if i + 4 > bytes.len() {
+            return None;
+        }
+        let id = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        let len = u16::from_le_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        let data = bytes.get(i + 4..i + 4 + len).unwrap_or(&[]);
+        i += 4 + len;
+        Some((id, data))
+    })
 }
 
 /// The crate takes directory names, rename targets and entry comments as

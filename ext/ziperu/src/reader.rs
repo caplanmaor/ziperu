@@ -19,11 +19,13 @@ use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
-use crate::errors::{busy_error, io_error, size_limit_error, zip_error};
+use crate::errors::{busy_error, read_error, size_limit_error, zip_error};
 use crate::gvl::maybe_without_gvl;
 use crate::source::Source;
 
 const CHUNK: usize = 64 * 1024;
+/// Reads shorter than this run under the GVL; see `read`.
+const INLINE_READ: u64 = 16 * 1024;
 
 /// What the entry was opened from. The crate's `by_index` readers always cap
 /// output at the central directory's size; lifting that means reading the
@@ -163,7 +165,7 @@ unsafe impl Send for EntryReader {}
 impl EntryReader {
     pub(crate) fn open(
         ruby: &Ruby,
-        mut archive: ZipArchive<Source>,
+        archive: ZipArchive<Source>,
         index: usize,
         password: Option<Vec<u8>>,
         enforce_size: bool,
@@ -171,9 +173,10 @@ impl EntryReader {
         io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
         let (declared, info) = {
-            let raw = archive
-                .by_index_raw(index)
-                .map_err(|e| zip_error(ruby, e))?;
+            // From the parsed central directory: no seek to the local
+            // header, which the reader is about to do anyway.
+            let meta = archive.metadata();
+            let raw = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
             (
                 raw.size(),
                 EntryInfo {
@@ -248,13 +251,15 @@ impl EntryReader {
         // This read reaches the declared size: one more byte would mean the
         // header lied, so probe for it.
         let probe = inner.size == Some(inner.consumed + want);
-        let needs_gvl = inner.needs_gvl;
+        // Releasing the GVL costs about as much as inflating a few KiB, so
+        // tiny reads (`getc`, `each_byte`) keep it.
+        let keep_gvl = inner.needs_gvl || want < INLINE_READ;
         let Some(file) = inner.entry.as_mut().and_then(|e| e.file.as_mut()) else {
             // Closed, or a rewind failed to reopen it.
             return Ok(None);
         };
-        let (buf, eof, oversize) = maybe_without_gvl(needs_gvl, || fill(file, want, probe))
-            .map_err(|e| io_error(ruby, e))?;
+        let (buf, eof, oversize) = maybe_without_gvl(keep_gvl, || fill(file, want, probe))
+            .map_err(|e| read_error(ruby, e))?;
 
         let filled = buf.len() as u64;
         inner.consumed += filled;

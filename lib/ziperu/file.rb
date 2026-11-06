@@ -194,7 +194,7 @@ module Ziperu
 
     # Returns a string containing the contents of the specified entry
     def read(entry)
-      get_input_stream(entry, &:read)
+      get_entry(entry).read_all
     end
 
     # Convenience method for adding the contents of a file to the archive

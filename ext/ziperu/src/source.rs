@@ -54,6 +54,30 @@ impl Source {
             _ => None,
         }
     }
+
+    /// Moves to `pos` without discarding the read-ahead buffer when `pos`
+    /// is inside it. Walking the central directory record by record this
+    /// way costs one buffer fill per 64 KiB instead of one per entry.
+    pub fn seek_to(&mut self, pos: u64) -> io::Result<()> {
+        fn within<R: Read + Seek>(r: &mut BufReader<R>, pos: u64) -> io::Result<()> {
+            let current = r.stream_position()?;
+            match i64::try_from(pos)
+                .ok()
+                .and_then(|p| p.checked_sub(i64::try_from(current).ok()?))
+            {
+                Some(delta) => r.seek_relative(delta),
+                None => r.seek(SeekFrom::Start(pos)).map(drop),
+            }
+        }
+        match self {
+            Source::File(r) => within(r, pos),
+            Source::Ruby(r) => within(r, pos),
+            Source::Memory(c) => {
+                c.set_position(pos);
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Clone for Source {

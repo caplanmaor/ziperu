@@ -2,7 +2,7 @@
 
 rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-06).
 
-**401 of 476 tests pass (84.2%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
+**408 of 476 tests pass (85.7%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -15,8 +15,8 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/crypto/aes_encryption_test.rb | 0 | 13 | 0 | 13 | 0 |
 | test/crypto/null_encryption_test.rb | 0 | 5 | 1 | 4 | 0 |
 | test/crypto/traditional_encryption_test.rb | 0 | 9 | 0 | 9 | 0 |
-| test/decompressor_test.rb | 0 | 1 | 0 | 1 | 0 |
-| test/deflater_test.rb | 0 | 4 | 1 | 3 | 0 |
+| test/decompressor_test.rb | 1 | 1 | 0 | 0 | 0 |
+| test/deflater_test.rb | 2 | 4 | 0 | 2 | 0 |
 | test/dos_time_test.rb | 12 | 12 | 0 | 0 | 0 |
 | test/encryption_test.rb | 10 | 12 | 1 | 1 | 0 |
 | test/entry_set_test.rb | 15 | 15 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/filesystem/file_mutating_test.rb | 5 | 5 | 0 | 0 | 0 |
 | test/filesystem/file_nonmutating_test.rb | 47 | 48 | 1 | 0 | 0 |
 | test/filesystem/file_stat_test.rb | 12 | 12 | 0 | 0 | 0 |
-| test/inflater_test.rb | 0 | 2 | 0 | 2 | 0 |
+| test/inflater_test.rb | 2 | 2 | 0 | 0 | 0 |
 | test/input_stream_test.rb | 28 | 30 | 2 | 0 | 0 |
 | test/ioextras/abstract_input_stream_test.rb | 31 | 31 | 0 | 0 | 0 |
 | test/ioextras/abstract_output_stream_test.rb | 5 | 5 | 0 | 0 | 0 |
@@ -45,7 +45,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 | test/local_entry_test.rb | 0 | 12 | 1 | 11 | 0 |
 | test/output_stream_test.rb | 28 | 28 | 0 | 0 | 0 |
 | test/pass_thru_compressor_test.rb | 0 | 2 | 0 | 2 | 0 |
-| test/pass_thru_decompressor_test.rb | 0 | 2 | 0 | 2 | 0 |
+| test/pass_thru_decompressor_test.rb | 2 | 2 | 0 | 0 | 0 |
 | test/path_traversal_test.rb | 15 | 15 | 0 | 0 | 0 |
 | test/require_test.rb | 3 | 3 | 0 | 0 | 0 |
 | test/samples/example_recursive_test.rb | 1 | 1 | 0 | 0 | 0 |
@@ -112,13 +112,8 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 - `TraditionalEncrypterTest#test_header_bytesize:`
 - `TraditionalEncrypterTest#test_reset!:`
 
-**test/decompressor_test.rb**
-- `DecompressorTest#test_decompressor_registration:`
-
 **test/deflater_test.rb**
-- `DeflaterTest#test_data_error`
 - `DeflaterTest#test_default_compression:`
-- `DeflaterTest#test_deflate_strategy:`
 - `DeflaterTest#test_output_operator:`
 
 **test/encryption_test.rb**
@@ -130,10 +125,6 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 
 **test/filesystem/file_nonmutating_test.rb**
 - `FileNonmutatingTest#test_glob`
-
-**test/inflater_test.rb**
-- `InflaterTest#test_read_everything:`
-- `InflaterTest#test_read_in_chunks:`
 
 **test/input_stream_test.rb**
 - `ZipInputStreamTest#test_open_file_with_gp3bit_set`
@@ -156,8 +147,4 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.0 (`rake compat`, 2026-11-
 **test/pass_thru_compressor_test.rb**
 - `PassThruCompressorTest#test_crc:`
 - `PassThruCompressorTest#test_size:`
-
-**test/pass_thru_decompressor_test.rb**
-- `PassThruDecompressorTest#test_read_everything:`
-- `PassThruDecompressorTest#test_read_in_chunks:`
 

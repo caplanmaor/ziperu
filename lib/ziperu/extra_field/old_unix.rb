@@ -39,12 +39,14 @@ module Ziperu
         @mtime == other.mtime
     end
 
+    # Fields are nil when only the central directory's (empty) form was
+    # seen; they pack as zero rather than failing.
     def pack_for_local
-      [@atime, @mtime, @uid, @gid].pack('VVvv')
+      [@atime, @mtime, @uid, @gid].map(&:to_i).pack('VVvv')
     end
 
     def pack_for_c_dir
-      [@atime, @mtime].pack('VV')
+      [@atime, @mtime].map(&:to_i).pack('VV')
     end
   end
 end

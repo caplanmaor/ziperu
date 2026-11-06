@@ -100,6 +100,22 @@ pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
     }
 }
 
+/// `io_error` for a failure while reading an entry's data, where the
+/// decoders report corrupt input as `InvalidInput` and a stream that ends
+/// early as `UnexpectedEof`: both are rubyzip's `DecompressionError`, which
+/// is what callers rescue around a read.
+pub fn read_error(ruby: &Ruby, err: io::Error) -> Error {
+    let foreign = err
+        .get_ref()
+        .is_some_and(|e| e.is::<RubyError>() || e.is::<ZipError>());
+    match err.kind() {
+        io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof if !foreign => {
+            decompression_error(ruby, &err.to_string())
+        }
+        _ => io_error(ruby, err),
+    }
+}
+
 pub fn size_limit_error(ruby: &Ruby) -> Error {
     Error::new(
         ruby.get_inner(&NATIVE_SIZE_LIMIT_ERROR),

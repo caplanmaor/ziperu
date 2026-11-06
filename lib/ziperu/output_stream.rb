@@ -35,6 +35,7 @@ module Ziperu
       @comment = ''
       @closed = false
       @current_entry = nil
+      @written = []
     end
 
     class << self
@@ -107,6 +108,7 @@ module Ziperu
         end
 
       init_next_entry(new_entry)
+      @written << new_entry
       @current_entry = new_entry
     end
 
@@ -122,11 +124,12 @@ module Ziperu
 
       touch_opts =
         if touch && new_name.nil?
-          time = entry.time
+          time = DOSTime.from_time(entry.time)
           { dos_date: time.to_binary_dos_date, dos_time: time.to_binary_dos_time,
             unix_perms: entry.unix_perms }
         end
       @writer.raw_copy(entry.archive, entry.index, new_name, touch_opts)
+      @written << entry
       @current_entry = nil
     end
 
@@ -146,7 +149,11 @@ module Ziperu
 
       @writer.comment = comment
       @current_entry = nil
-      @writer.finish
+      bytes, stats = @writer.finish
+      stats.each_with_index do |(offset, size, compressed_size, crc), i|
+        @written[i].written_as(offset, size, compressed_size, crc)
+      end
+      bytes
     end
 
     # Like rubyzip, the archive is written from the start of the IO.
@@ -157,7 +164,7 @@ module Ziperu
     end
 
     def init_next_entry(entry)
-      unless [Entry::STORED, Entry::DEFLATED].include?(entry.compression_method)
+      unless WRITABLE_COMPRESSION_METHODS.include?(entry.compression_method)
         raise ::Ziperu::CompressionMethodError, entry.compression_method
       end
 
@@ -179,10 +186,11 @@ module Ziperu
       extra.delete(:zip64) # the native writer emits its own
 
       level = entry.compression_level
-      time = entry.time
+      # An extra field may hand back a plain Time.
+      time = DOSTime.from_time(entry.time)
       {
         method: entry.compression_method,
-        level: (level if entry.compression_method == Entry::DEFLATED && level &&
+        level: (level if entry.compression_method != Entry::STORED && level &&
                          level != Zlib::DEFAULT_COMPRESSION),
         dos_date: time.to_binary_dos_date,
         dos_time: time.to_binary_dos_time,
@@ -190,7 +198,8 @@ module Ziperu
         fstype: entry.fstype,
         large_file: zip64_needed?(entry, zip64_suppressed),
         comment: entry.comment.to_s.b,
-        extra: extra.to_local_bin.b
+        extra: extra.to_local_bin.b,
+        central_extra: extra.to_c_dir_bin.b
       }
     end
 

@@ -38,6 +38,14 @@ require_relative "ziperu/output_stream"
 require_relative "ziperu/entry"
 require_relative "ziperu/entry_set"
 require_relative "ziperu/streamable_stream"
+require_relative "ziperu/compressor"
+require_relative "ziperu/decompressor"
+require_relative "ziperu/null_compressor"
+require_relative "ziperu/null_decompressor"
+require_relative "ziperu/pass_thru_compressor"
+require_relative "ziperu/pass_thru_decompressor"
+require_relative "ziperu/inflater"
+require_relative "ziperu/deflater"
 require_relative "ziperu/streamable_directory"
 require_relative "ziperu/file_split"
 require_relative "ziperu/file"
@@ -52,6 +60,9 @@ require_relative "ziperu/file"
 #     c.unicode_names = true
 #   end
 module Ziperu
+  # Used by the ported Deflater only; kept because rubyzip exposes it.
+  ZLIB_FLUSHING_STRATEGY = defined?(JRUBY_VERSION) ? Zlib::SYNC_FLUSH : Zlib::NO_FLUSH
+
   extend self
 
   attr_accessor :unicode_names,

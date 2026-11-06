@@ -368,12 +368,14 @@ class ZipInputStreamTest < Minitest::Test
     Ziperu::File.open(fixture(TEXT_ZIP)) do |zf|
       e = zf.get_entry("long.txt")
       # Clobber the middle of the deflate stream.
-      pos = e.data_offset + (e.compressed_size / 2)
+      name_len, extra_len = bytes[e.local_header_offset + 26, 4].unpack("vv")
+      pos = e.local_header_offset + 30 + name_len + extra_len + (e.compressed_size / 2)
       bytes[pos, 32] = "\xFF".b * 32
     end
     Ziperu::InputStream.open(StringIO.new(bytes)) do |zis|
       zis.get_next_entry
-      assert_raises(Ziperu::DecompressionError, Ziperu::Error) { zis.read }
+      error = assert_raises(Ziperu::DecompressionError) { zis.read }
+      assert_match(/while inflating/, error.message)
     end
   end
 end
