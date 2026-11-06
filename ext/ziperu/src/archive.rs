@@ -12,8 +12,8 @@ use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
     Symbol, TypedData, Value,
 };
-use zip::read::ZipFileEntry;
-use zip::result::ZipResult;
+use zip::read::{ZipFileEntry, ZipReadOptions};
+use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
 use crate::errors::{busy_error, io_error, read_error, zip_error};
@@ -111,6 +111,39 @@ impl Archive {
 
     pub fn comment(ruby: &Ruby, rb_self: &Self) -> Result<RString, Error> {
         Ok(ruby.str_from_slice(rb_self.archive(ruby)?.comment()))
+    }
+
+    /// Sum of the declared uncompressed sizes, for `Ziperu.max_total_size`.
+    pub fn total_size(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
+        let mut total: u64 = 0;
+        for i in 0..meta.len() {
+            total = total.saturating_add(meta.entry(i).map_err(|e| zip_error(ruby, e))?.size());
+        }
+        Ok(total)
+    }
+
+    /// Inflates entry `index` to nowhere so the crate checks its CRC (and
+    /// its declared size), with the GVL released when the source allows.
+    pub fn verify_entry(
+        ruby: &Ruby,
+        rb_self: &Self,
+        index: usize,
+        password: Option<RString>,
+    ) -> Result<(), Error> {
+        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let mut archive = rb_self.archive(ruby)?.clone();
+        maybe_without_gvl(rb_self.needs_gvl, || {
+            let options = ZipReadOptions::new().password(password.as_deref());
+            let mut entry = archive.by_index_with_options(index, options)?;
+            io::copy(&mut entry, &mut io::sink())?;
+            Ok::<_, ZipError>(())
+        })
+        .map_err(|e| match e {
+            ZipError::Io(io) => read_error(ruby, io),
+            other => zip_error(ruby, other),
+        })
     }
 
     /// One Hash per entry, in central-directory order.

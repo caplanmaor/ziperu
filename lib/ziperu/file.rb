@@ -227,14 +227,19 @@ module Ziperu
     # Recursively adds the contents of `src_dir` to the archive, nested
     # under `prefix` if given. Symlinks are skipped with a warning;
     # `max_depth` limits how many directory levels are walked.
-    def add_recursive(src_dir, prefix: '', max_depth: 16, &continue_on_exists_proc)
+    #
+    # `progress:` is called with `(entry, done, nil)` after each file or
+    # directory is added; the total is not known up front.
+    def add_recursive(src_dir, prefix: '', max_depth: 16, progress: nil, &continue_on_exists_proc)
       raise Errno::ENOENT, src_dir unless ::File.directory?(src_dir)
       raise ArgumentError, 'max_depth must be at least 1' if max_depth < 1
 
       prefix = prefix.to_s
       prefix += '/' unless prefix.empty? || prefix.end_with?('/')
 
-      add_recursive_dir(prefix, src_dir, 1, max_depth, continue_on_exists_proc)
+      done = 0
+      report = ->(entry) { done += 1; progress&.call(entry, done, nil) }
+      add_recursive_dir(prefix, src_dir, 1, max_depth, continue_on_exists_proc, report)
       self
     end
 
@@ -267,42 +272,75 @@ module Ziperu
     # Extracts `entry` to a file at `entry_path`, with
     # `destination_directory` as the base. The block (or Ziperu.on_exists_proc)
     # decides whether an existing file is overwritten.
-    def extract(entry, entry_path = nil, destination_directory: '.', &block)
+    def extract(entry, entry_path = nil, destination_directory: '.', symlinks: :skip, &block)
       block ||= proc { ::Ziperu.on_exists_proc }
       found_entry = get_entry(entry)
       entry_path ||= found_entry.name
-      found_entry.extract(entry_path, destination_directory: destination_directory, &block)
+      found_entry.extract(entry_path, destination_directory: destination_directory,
+                                      symlinks: symlinks, &block)
     end
 
     # Extracts every entry in the archive into `destination_directory`,
     # preserving the archive's directory structure. Symlink entries are
     # skipped with a warning; see `Entry#extract` for the path-safety checks
     # applied to every other entry.
-    def extract_all(destination_directory = '.', &block)
-      # Directories first, so files have somewhere to go.
-      dirs, others = entries.partition(&:directory?)
-      ordered = dirs + others
+    #
+    # `symlinks:` is `:skip` (the default, with a warning per link, as in
+    # rubyzip 3) or `:create`, which creates links whose target stays inside
+    # `destination_directory`. `progress:` is called with
+    # `(entry, done, total)` after each entry.
+    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, &block)
+      # Directories first, so files have somewhere to go; links last, so
+      # nothing is written through one.
+      dirs, rest = entries.partition(&:directory?)
+      links, others = rest.partition(&:symlink?)
+      ordered = dirs + others + links
+      total = ordered.size
+      done = 0
+      report = ->(entry) { done += 1; progress&.call(entry, done, total) }
 
       # With no overwrite decision to make (no block, and Ziperu.on_exists_proc
       # left at its default of raising) the native core extracts every
       # qualifying entry in one call; the rest take the per-entry path.
       slow = if block.nil? && !::Ziperu.on_exists_proc && !@restore_ownership
-               extract_all_native(ordered, destination_directory)
+               extract_all_native(ordered, destination_directory, report)
              else
                ordered
              end
 
       slow.each do |entry|
-        if entry.symlink?
+        if entry.symlink? && symlinks != :create
           warn "WARNING: skipped symlink '#{entry.name}' during extract_all."
-          next
+        else
+          entry.extract(entry.name, destination_directory:     destination_directory,
+                                    create_parent_directories: true,
+                                    symlinks:                  symlinks, &block)
         end
-
-        entry.extract(entry.name, destination_directory:     destination_directory,
-                                  create_parent_directories: true, &block)
+        report.call(entry)
       end
 
       self
+    end
+
+    # Inflates every entry (without writing anything) so that the CRC of
+    # each is checked. Returns a Hash of the entries that failed to the
+    # exception raised for them; empty when the archive is sound. Encrypted
+    # entries are checked when a `decrypter` is given and skipped otherwise.
+    def verify(decrypter: nil)
+      native = native_archive
+      password = decrypter&.password&.b
+      failures = {}
+      entries.each do |entry|
+        next if entry.directory? || !entry.index || !entry.archive.equal?(native)
+        next if entry.encrypted? && password.nil?
+
+        begin
+          native.verify_entry(entry.index, password)
+        rescue Error, IOError => e
+          failures[entry] = e
+        end
+      end
+      failures
     end
 
     # Commits changes made since the previous commit to the zip archive: a
@@ -400,7 +438,7 @@ module Ziperu
     # Entries the native core cannot take are returned for the Ruby loop:
     # symlinks (skipped there with a warning), encrypted entries, entries
     # not read from this archive, and names it cannot represent.
-    def extract_all_native(ordered, destination_directory)
+    def extract_all_native(ordered, destination_directory, report)
       native = native_archive
       dest = ::File.absolute_path(destination_directory || '.')
       slow = []
@@ -427,6 +465,7 @@ module Ziperu
             warn "WARNING: #{EntrySizeError.new(entry).message}"
           end
         end
+        batch.each { |spec| report.call(spec[0]) }
       end
 
       slow
@@ -450,7 +489,7 @@ module Ziperu
       [entry, entry.index, entry.name, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
     end
 
-    def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc)
+    def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc, report)
       ::Dir.children(src_dir).sort.each do |child|
         src_path = ::File.join(src_dir, child)
 
@@ -458,15 +497,15 @@ module Ziperu
           warn "WARNING: skipped symlink '#{src_path}' while adding directory contents."
         elsif ::File.directory?(src_path)
           entry_name = "#{entry_prefix}#{child}/"
-          add(entry_name, src_path, &continue_on_exists_proc)
+          report.call(add(entry_name, src_path, &continue_on_exists_proc))
 
           if depth < max_depth
-            add_recursive_dir(entry_name, src_path, depth + 1, max_depth, continue_on_exists_proc)
+            add_recursive_dir(entry_name, src_path, depth + 1, max_depth, continue_on_exists_proc, report)
           else
             warn "WARNING: max_depth (#{max_depth}) reached, not descending into '#{src_path}'."
           end
         elsif ::File.file?(src_path)
-          add("#{entry_prefix}#{child}", src_path, &continue_on_exists_proc)
+          report.call(add("#{entry_prefix}#{child}", src_path, &continue_on_exists_proc))
         else
           warn "WARNING: skipped '#{src_path}' - not a regular file or directory."
         end

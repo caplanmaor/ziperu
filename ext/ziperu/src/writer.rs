@@ -517,6 +517,30 @@ impl Writer {
         })
     }
 
+    /// Finishes the previous entry and adds a symlink entry pointing at
+    /// `target` (stored as the entry's content, with `S_IFLNK` in the
+    /// external attributes).
+    pub fn add_symlink(
+        ruby: &Ruby,
+        rb_self: &Self,
+        name: RString,
+        target: RString,
+        opts: RHash,
+    ) -> Result<(), Error> {
+        let name = utf8_name(ruby, name)?;
+        let target = utf8_text(ruby, "symlink target", target)?;
+        let options = EntryOptions::from_hash(ruby, opts)?;
+        let file_options = options.to_file_options(ruby)?;
+        rb_self.with_state(ruby, |state, w| {
+            maybe_without_gvl(rb_self.needs_gvl, || {
+                w.add_symlink(&name, &target, file_options)
+            })
+            .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
+            state.count += 1;
+            Ok(())
+        })
+    }
+
     pub fn write(ruby: &Ruby, rb_self: &Self, data: RString) -> Result<usize, Error> {
         // Copied out of the Ruby heap so compression can run without the
         // GVL (the string could be moved by compaction meanwhile).

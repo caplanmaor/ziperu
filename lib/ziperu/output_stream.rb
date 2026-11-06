@@ -172,6 +172,8 @@ module Ziperu
       opts = native_entry_options(entry)
       if entry.directory?
         @writer.add_directory(entry.name, opts)
+      elsif entry.symlink?
+        @writer.add_symlink(entry.name, entry.symlink_target, opts)
       else
         opts.merge!(@encrypter.native_options)
         @writer.start_entry(entry.name.b, opts)

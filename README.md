@@ -108,9 +108,40 @@ until it goes. Exception classes follow the namespace, so rescue
   `Zip::Entry.name` is `"Ziperu::Entry"`, and so are `inspect` output and
   exception messages. Comparisons against the string `"Zip::Entry"` need
   updating; comparisons against the constant do not.
-- Extraction never creates symlinks (same as rubyzip 3.x) and refuses paths
-  that resolve outside the destination directory, checking the resolved
-  absolute path with a trailing separator, the fix for CVE-2026-85396.
+- Extraction never creates symlinks unless asked to (see below; rubyzip 3.x
+  never does) and refuses paths that resolve outside the destination
+  directory, checking the resolved absolute path with a trailing separator,
+  the fix for CVE-2026-85396.
+
+### Beyond rubyzip
+
+Everything here is additive: code that does not use it behaves as above.
+
+- **Archive limits.** `Ziperu.max_entries` and `Ziperu.max_total_size`
+  (declared uncompressed bytes) make `Ziperu::File.open` and
+  `Ziperu::InputStream.open` raise `Ziperu::LimitError` before any entry is
+  read. With `validate_entry_sizes` on (the default) no entry inflates past
+  its declared size, so the total is a real bound on what an extraction can
+  write.
+- **Integrity check.** `Ziperu::File#verify` inflates every entry to nowhere
+  so the CRC of each is checked, releasing the GVL meanwhile, and returns a
+  Hash of failing entries to the exception each raised (empty when sound).
+  Encrypted entries are checked when a `decrypter:` is given.
+- **Symlink entries.** `add` of a symlink stores a link entry (target as
+  content, `S_IFLNK` in the attributes) instead of a copy of the target.
+  `extract_all(dir, symlinks: :create)` and `extract(..., symlinks: :create)`
+  create such links, after the links' targets have been checked to resolve
+  inside the destination; links are created after everything else so no
+  file is written through one. The default stays `:skip`, with rubyzip's
+  warning. `add_recursive` still skips links on disk.
+- **Progress.** `extract_all(dir, progress: ->(entry, done, total) {})` and
+  `add_recursive(dir, progress: ->(entry, done, nil) {})` report after each
+  entry; `extract_all` keeps its native fast path and reports per batch.
+- **More compression methods.** bzip2 and zstd on write; LZMA, XZ, PPMd,
+  Deflate64 and the PKZIP 1.x methods on read (see above).
+- **Streaming reads and writes through any IO.** `open_buffer(io)` reads an
+  IO lazily and `write_buffer(io)` writes entry by entry, so neither holds
+  the archive in memory.
 
 ## Why
 

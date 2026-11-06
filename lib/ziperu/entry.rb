@@ -302,8 +302,12 @@ module Ziperu
     # entry (e.g. a symlink) was deliberately skipped as unsafe, and letting
     # a later entry silently succeed by re-creating that path as a plain
     # directory would mask that. `File#extract_all` opts into it.
+    #
+    # A symlink entry is skipped with a warning unless `symlinks: :create`,
+    # which creates it only when its target resolves to a path inside
+    # `destination_directory`.
     def extract(entry_path = @name, destination_directory: '.',
-                create_parent_directories: false, &block)
+                create_parent_directories: false, symlinks: :skip, &block)
       dest_dir = ::File.absolute_path(destination_directory || '.')
       extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
 
@@ -316,10 +320,22 @@ module Ziperu
 
       raise "unknown file type #{inspect}" unless directory? || file? || symlink?
 
-      ::FileUtils.mkdir_p(::File.dirname(extract_path)) if create_parent_directories && file?
+      ::FileUtils.mkdir_p(::File.dirname(extract_path)) if create_parent_directories && !directory?
 
-      __send__(:"create_#{ftype}", extract_path, &block)
+      if symlink?
+        create_symlink(extract_path, dest_dir, symlinks, &block)
+      else
+        __send__(:"create_#{ftype}", extract_path, &block)
+      end
       self
+    end
+
+    # Where a symlink entry points: the link on disk for one being added,
+    # the stored content for one read from an archive.
+    def symlink_target # :nodoc:
+      return ::File.readlink(@filepath) if @filepath
+
+      get_raw_input_string
     end
 
     # Returns an IO like object for the given ZipEntry.
@@ -380,7 +396,8 @@ module Ziperu
     # lacks) fall back to the raw copy, so only the rename or the
     # permissions persist for them.
     def write_to_zip_output_stream(zip_output_stream) # :nodoc:
-      if ftype == :directory
+      if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
+        # No data to stream: a symlink's target goes into the header call.
         zip_output_stream.put_next_entry(self)
       elsif @filepath || needs_restream?
         zip_output_stream.put_next_entry(self)
@@ -546,8 +563,27 @@ module Ziperu
 
     # Symlinks are never created on extraction: a link pointing outside the
     # destination would let a later entry write through it.
-    def create_symlink(dest_path)
-      warn "WARNING: skipped symlink '#{dest_path}'."
+    def create_symlink(dest_path, dest_dir, mode)
+      unless mode == :create
+        warn "WARNING: skipped symlink '#{dest_path}'."
+        return
+      end
+
+      target = symlink_target
+      resolved = ::File.expand_path(target, ::File.dirname(dest_path))
+      unless resolved.start_with?(dest_dir + ::File::SEPARATOR) || resolved == dest_dir
+        warn "WARNING: skipped symlink '#{@name}' to '#{target}' as it points outside the destination."
+        return
+      end
+
+      if ::File.symlink?(dest_path) || ::File.exist?(dest_path)
+        raise DestinationExistsError, dest_path unless yield(self, dest_path)
+
+        ::File.unlink(dest_path)
+      end
+      ::File.symlink(target, dest_path)
+    rescue NotImplementedError, Errno::EACCES, Errno::EPERM => e
+      warn "WARNING: could not create symlink '#{dest_path}': #{e.message}"
     end
 
     def set_unix_attributes_on_path(dest_path) # :nodoc:

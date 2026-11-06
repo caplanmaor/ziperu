@@ -75,7 +75,9 @@ module Ziperu
                 :case_insensitive_match,
                 :force_entry_names_encoding,
                 :validate_entry_sizes,
-                :validate_declared_number_of_entries
+                :validate_declared_number_of_entries,
+                :max_entries,
+                :max_total_size
 
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
@@ -96,6 +98,12 @@ module Ziperu
     @force_entry_names_encoding = nil
     @validate_entry_sizes = true
     @validate_declared_number_of_entries = false
+    # Opening an archive with more entries, or more declared uncompressed
+    # bytes, than these raises Ziperu::LimitError. Nil means no limit. With
+    # `validate_entry_sizes` on, no entry inflates past its declared size,
+    # so the total is a real bound on what can be extracted.
+    @max_entries = nil
+    @max_total_size = nil
   end
 
   # Set options in one block. The block runs only the first time.

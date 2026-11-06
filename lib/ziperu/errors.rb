@@ -134,6 +134,14 @@ module Ziperu
   class GPFBit3Error < Error; end
   class InternalError < Error; end
 
+  # Raised when an archive exceeds `Ziperu.max_entries` or
+  # `Ziperu.max_total_size` on open.
+  class LimitError < Error
+    def initialize(what, actual, limit)
+      super("archive has #{what} of #{actual}, over the limit of #{limit}")
+    end
+  end
+
   PASSWORD_REQUIRED_MESSAGE = 'A password is required to decode this zip file.'
 
   # Raised by the Rust core where it lacks the domain object a rubyzip

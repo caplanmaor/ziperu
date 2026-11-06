@@ -39,6 +39,8 @@ module Ziperu
         elsif !@split
           begin
             self.class.open_archive(context)
+          rescue LimitError
+            raise
           rescue Error => e
             # Not an archive: rubyzip finds no entries rather than raising,
             # and `while (entry = zis.get_next_entry)` over untrusted input
@@ -147,6 +149,26 @@ module Ziperu
 
       # @api private
       def open_archive(context)
+        check_limits(open_native(context))
+      end
+
+      # Ziperu.max_entries / max_total_size, checked before any entry is
+      # read. An archive that fails is closed again.
+      def check_limits(native)
+        if (limit = ::Ziperu.max_entries) && native.entry_count > limit
+          raise LimitError.new('an entry count', native.entry_count, limit)
+        end
+        if (limit = ::Ziperu.max_total_size) && (total = native.total_size) > limit
+          raise LimitError.new('a declared total size', total, limit)
+        end
+
+        native
+      rescue LimitError
+        native.close
+        raise
+      end
+
+      def open_native(context)
         return Native::Archive.open_path(context.to_s) unless context.respond_to?(:read)
 
         # A StringIO's bytes are already in memory: snapshot them once rather
