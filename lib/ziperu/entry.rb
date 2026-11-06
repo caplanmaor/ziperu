@@ -544,31 +544,43 @@ module Ziperu
       @zipfile = zipfile
       @archive = archive
       @index = meta[:index]
-      # Names and comments are the stored bytes, as in rubyzip: binary
-      # unless `Ziperu.force_entry_names_encoding` says otherwise. (A UTF-8
-      # literal still finds a binary name with the same bytes.) The raw
-      # name, before separators are normalised, is what the archive knows
-      # the entry by.
+      # Names and comments are the stored bytes. They become UTF-8 when the
+      # entry's language-encoding flag says so (rubyzip leaves them binary),
+      # or whatever `Ziperu.force_entry_names_encoding` names; otherwise
+      # they stay binary. A lookup finds a name in any encoding with the
+      # same bytes. The raw name, before separators are normalised, is what
+      # the archive knows the entry by.
+      @gp_flags = meta[:flags]
       @original_name = meta[:name].dup
-      @name = @original_name.dup
-      @name.force_encoding(::Ziperu.force_entry_names_encoding) if ::Ziperu.force_entry_names_encoding
+      @name = decode_stored_text(@original_name.dup)
       @name.tr!('\\', '/')
       @size = meta[:size]
       @compressed_size = meta[:compressed_size]
       @crc = meta[:crc]
       @compression_method = meta[:compression_method]
       @compression_level = ::Ziperu.default_compression
-      @gp_flags = meta[:flags]
       @fstype = meta[:fstype]
       @version = meta[:version_made_by]
       @external_file_attributes = meta[:external_attributes]
       set_time(meta[:dos_date], meta[:dos_time])
-      @comment = meta[:comment].dup
+      @comment = decode_stored_text(meta[:comment].dup)
       @extra = ExtraField.new(meta[:extra])
       @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
       @data_offset = meta[:data_offset]
       set_ftype_from_c_dir_entry
+    end
+
+    # Stored bytes as a String in the encoding the entry declares.
+    def decode_stored_text(text) # :nodoc:
+      forced = ::Ziperu.force_entry_names_encoding
+      if forced
+        text.force_encoding(forced)
+      elsif (@gp_flags & EFS).nonzero?
+        text.force_encoding(::Encoding::UTF_8)
+        text.force_encoding(::Encoding::BINARY) unless text.valid_encoding?
+      end
+      text
     end
 
     # Like rubyzip, an unparseable DOS timestamp is reported (when

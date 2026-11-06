@@ -58,11 +58,14 @@ until it goes. Exception classes follow the namespace, so rescue
 - AES entries of 20 bytes or more are written as AE-1 (with a real CRC in the
   header) rather than rubyzip's always-AE-2 with a zero CRC; both are read
   by every AES-aware tool, and AE-1 adds an integrity check.
-- Entry names and comments are the stored bytes (binary strings), as in
-  rubyzip, unless `Ziperu.force_entry_names_encoding` names an encoding.
-  Unlike rubyzip, a lookup (`find_entry`, `get_entry`, `read`) accepts the
-  name in any encoding with the same bytes, so `zf.read("日本.txt")` works
-  without `.b`. Non-ASCII names are written with the UTF-8 flag set.
+- Entry names and comments come back as UTF-8 strings when the entry's
+  language-encoding flag is set (which is how most tools, and ziperu
+  itself, write non-ASCII names); rubyzip returns the raw bytes as binary
+  strings. Entries without the flag, or whose flagged name is not valid
+  UTF-8, stay binary as in rubyzip, and `Ziperu.force_entry_names_encoding`
+  overrides both. A lookup (`find_entry`, `get_entry`, `read`) accepts the
+  name in any encoding with the same bytes, so neither `.b` nor
+  `force_encoding` is needed to find an entry.
 - Writing two entries with the same name to one `OutputStream` raises
   `Ziperu::Error`; rubyzip writes both and the last one wins.
 - A CRC mismatch while reading raises `Ziperu::DecompressionError`;

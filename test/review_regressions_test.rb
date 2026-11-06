@@ -104,22 +104,44 @@ class ReviewRegressionsTest < Minitest::Test
     end
   end
 
-  def test_names_are_binary_but_lookups_take_any_encoding
+  def test_names_follow_the_utf8_flag_and_lookups_take_any_encoding
     archive = Ziperu::OutputStream.write_buffer do |zos|
-      zos.put_next_entry("日本/ファイル.txt")
+      entry = Ziperu::Entry.new("", "日本/ファイル.txt")
+      entry.comment = "コメント"
+      zos.put_next_entry(entry)
       zos.write("x")
     end.string
     Ziperu::File.open_buffer(archive) do |zf|
-      name = zf.entries.first.name
-      assert_equal Encoding::BINARY, name.encoding
-      assert_equal "日本/ファイル.txt".b, name
+      entry = zf.entries.first
+      assert_equal Encoding::UTF_8, entry.name.encoding
+      assert_equal "日本/ファイル.txt", entry.name
+      assert_equal "コメント", entry.comment
       assert_equal "x", zf.read("日本/ファイル.txt")
       assert_equal "x", zf.read("日本/ファイル.txt".b)
     end
-    Ziperu.force_entry_names_encoding = "UTF-8"
+    Ziperu.force_entry_names_encoding = "Shift_JIS"
     Ziperu::File.open_buffer(archive) do |zf|
-      assert_equal "日本/ファイル.txt", zf.entries.first.name
-      assert_equal Encoding::UTF_8, zf.entries.first.name.encoding
+      assert_equal Encoding::Shift_JIS, zf.entries.first.name.encoding
+    end
+    Ziperu.force_entry_names_encoding = nil
+
+    # Without the flag the bytes stay binary, as in rubyzip; with the flag
+    # but invalid UTF-8 they stay binary too rather than becoming a broken
+    # UTF-8 string.
+    flagged = archive.dup
+    flagged[archive.index("PK\x01\x02".b) + 8, 2] = [0].pack("v")
+    Ziperu::File.open_buffer(flagged) do |zf|
+      assert_equal Encoding::BINARY, zf.entries.first.name.encoding
+      assert_equal "x", zf.read("日本/ファイル.txt")
+    end
+    bad = Ziperu::OutputStream.write_buffer do |zos|
+      zos.put_next_entry("bad\xFF\xFE.txt".b)
+      zos.write("x")
+    end.string
+    bad[bad.index("PK\x01\x02".b) + 8, 2] = [Ziperu::Entry::EFS].pack("v")
+    Ziperu::File.open_buffer(bad) do |zf|
+      assert_equal Encoding::BINARY, zf.entries.first.name.encoding
+      assert_equal "x", zf.read("bad\xFF\xFE.txt".b)
     end
   ensure
     Ziperu.force_entry_names_encoding = nil
