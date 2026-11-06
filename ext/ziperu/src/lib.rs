@@ -6,6 +6,7 @@
 
 mod archive;
 mod errors;
+mod extract;
 mod gvl;
 mod reader;
 mod source;
@@ -29,6 +30,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("open_entry", method!(archive::Archive::open_entry, 3))?;
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
+    archive.define_method(
+        "extract_entries",
+        method!(archive::Archive::extract_entries, 3),
+    )?;
     archive.define_method("close", method!(archive::Archive::close, 0))?;
     archive.define_method("closed?", method!(archive::Archive::is_closed, 0))?;
 

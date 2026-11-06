@@ -204,6 +204,18 @@ impl Archive {
             .map_err(|e| read_error(ruby, e))?;
         Ok(ruby.str_from_slice(&buf))
     }
+
+    /// Extracts entries to `dest` in one call; see `extract::extract_entries`.
+    pub fn extract_entries(
+        ruby: &Ruby,
+        rb_self: &Self,
+        dest: String,
+        specs: RArray,
+        enforce_size: bool,
+    ) -> Result<RArray, Error> {
+        let archive = rb_self.archive(ruby)?.clone();
+        crate::extract::extract_entries(ruby, archive, rb_self.needs_gvl, dest, specs, enforce_size)
+    }
 }
 
 /// Fields of a central directory record read straight from the bytes,
