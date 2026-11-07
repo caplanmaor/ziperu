@@ -28,10 +28,23 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("entries", method!(archive::Archive::entries, 0))?;
     archive.define_method("entry_meta", method!(archive::Archive::entry_meta, 1))?;
     archive.define_method("local_extra", method!(archive::Archive::local_extra, 1))?;
+    archive.define_method(
+        "local_extra_at",
+        method!(archive::Archive::local_extra_at, 1),
+    )?;
+    archive.define_method(
+        "duplicate_names?",
+        method!(archive::Archive::has_duplicate_names, 0),
+    )?;
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("total_size", method!(archive::Archive::total_size, 0))?;
     archive.define_method("verify_entry", method!(archive::Archive::verify_entry, 2))?;
+    archive.define_method(
+        "verify_entry_at",
+        method!(archive::Archive::verify_entry_at, 5),
+    )?;
     archive.define_method("open_entry", method!(archive::Archive::open_entry, 3))?;
+    archive.define_method("open_entry_at", method!(archive::Archive::open_entry_at, 6))?;
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
     archive.define_method(
         "extract_entries",

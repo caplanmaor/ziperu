@@ -50,11 +50,14 @@ struct OwnedEntry {
 }
 
 /// Central-directory facts needed to (re)open an entry.
-struct EntryInfo {
-    index: usize,
-    header_start: u64,
-    compressed_size: u64,
-    crc32: u32,
+pub(crate) struct EntryInfo {
+    /// The crate's index, or `None` for a record it cannot address (one of
+    /// several under the same name), which is read from its local header.
+    pub(crate) index: Option<usize>,
+    pub(crate) header_start: u64,
+    pub(crate) size: u64,
+    pub(crate) compressed_size: u64,
+    pub(crate) crc32: u32,
 }
 
 impl OwnedEntry {
@@ -64,7 +67,7 @@ impl OwnedEntry {
         password: Option<Vec<u8>>,
         info: &EntryInfo,
     ) -> ZipResult<Self> {
-        let owner = if enforce_size {
+        let owner = if enforce_size && info.index.is_some() {
             Owner::Archive(Box::into_raw(Box::new(archive)))
         } else {
             Owner::Source(Box::into_raw(Box::new(archive.into_inner())))
@@ -92,7 +95,8 @@ impl OwnedEntry {
         let file = match self.owner {
             Owner::Archive(archive) => {
                 let archive: &'static mut ZipArchive<Source> = unsafe { &mut *archive };
-                archive.by_index_with_options(info.index, options)?
+                let index = info.index.ok_or(ZipError::FileNotFound)?;
+                archive.by_index_with_options(index, options)?
             }
             Owner::Source(source) => {
                 let source: &'static mut Source = unsafe { &mut *source };
@@ -172,24 +176,36 @@ impl EntryReader {
         needs_gvl: bool,
         io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
-        let (declared, info) = {
+        let info = {
             // From the parsed central directory: no seek to the local
             // header, which the reader is about to do anyway.
             let meta = archive.metadata();
             let raw = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
-            (
-                raw.size(),
-                EntryInfo {
-                    index,
-                    header_start: raw.header_start(),
-                    compressed_size: raw.compressed_size(),
-                    crc32: raw.crc32(),
-                },
-            )
+            EntryInfo {
+                index: Some(index),
+                header_start: raw.header_start(),
+                size: raw.size(),
+                compressed_size: raw.compressed_size(),
+                crc32: raw.crc32(),
+            }
         };
+        Self::open_at(ruby, archive, info, password, enforce_size, needs_gvl, io)
+    }
+
+    /// A reader over the entry `info` describes, which need not be one the
+    /// crate can address by index.
+    pub(crate) fn open_at(
+        ruby: &Ruby,
+        archive: ZipArchive<Source>,
+        info: EntryInfo,
+        password: Option<Vec<u8>>,
+        enforce_size: bool,
+        needs_gvl: bool,
+        io: Option<Opaque<Value>>,
+    ) -> Result<Self, Error> {
         let entry = OwnedEntry::open(archive, enforce_size, password, &info)
             .map_err(|e| zip_error(ruby, e))?;
-        let size = enforce_size.then_some(declared);
+        let size = enforce_size.then_some(info.size);
         Ok(Self {
             inner: RefCell::new(Inner {
                 entry: Some(entry),

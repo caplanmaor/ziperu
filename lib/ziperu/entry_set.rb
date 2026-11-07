@@ -11,7 +11,12 @@ module Ziperu
 
     def initialize(an_enumerable = [])
       super()
+      # Keyed by name for lookup, as in rubyzip; `@all` keeps every entry
+      # in order, which only differs when an archive holds several records
+      # under one name (see `push_record`).
       @entry_set = {}
+      @all = []
+      @shadowed = 0
       an_enumerable.each { |o| push(o) }
     end
 
@@ -24,19 +29,61 @@ module Ziperu
     end
 
     def <<(entry)
-      @entry_set[to_key(entry)] = entry if entry
+      return unless entry
+
+      key = to_key(entry)
+      old = @entry_set[key]
+      return if old.equal?(entry)
+
+      remove_from_all(old) if old
+      @entry_set[key] = entry
+      @all << entry
     end
 
     alias push <<
 
+    # Adds a record read from an archive. Unlike `<<`, an earlier record
+    # of the very same name stays listed (and readable); the lookup by name
+    # finds the later one, as rubyzip's does. Names that only share a key
+    # (`Ziperu.case_insensitive_match`, or a trailing slash) collapse to
+    # the later one, as in rubyzip.
+    def push_record(entry)
+      key = to_key(entry)
+      old = @entry_set[key]
+      return self << entry if old.nil? || old.name.b != entry.name.b
+
+      @shadowed += 1
+      @entry_set[key] = entry
+      @all << entry
+    end
+
+    # True for a record that a later one of the same name hides from the
+    # lookup by name: it is listed and readable, but not written back.
+    def shadowed?(entry)
+      return false if @shadowed.zero?
+
+      current = @entry_set[to_key(entry)]
+      !current.nil? && !current.equal?(entry)
+    end
+
     def size
-      @entry_set.size
+      @all.size
     end
 
     alias length size
 
     def delete(entry)
-      entry if @entry_set.delete(to_key(entry))
+      key = to_key(entry)
+      removed = @entry_set.delete(key)
+      return if removed.nil?
+
+      remove_from_all(removed)
+      # A record this one shadowed takes over its name.
+      if @shadowed.positive? && (shadowed = @all.reverse_each.find { |e| to_key(e) == key })
+        @shadowed -= 1
+        @entry_set[key] = shadowed
+      end
+      entry
     end
 
     def each(&block)
@@ -44,18 +91,20 @@ module Ziperu
     end
 
     def entries
-      sorted_entries.values
+      sorted_entries
     end
 
     # deep clone
     def dup
-      EntrySet.new(@entry_set.values.map(&:dup))
+      copy = EntrySet.new
+      @all.each { |e| copy.push_record(e.dup) }
+      copy
     end
 
     def ==(other)
       return false unless other.kind_of?(EntrySet)
 
-      @entry_set.values == other.entry_set.values
+      entries == other.entries
     end
 
     def parent(entry)
@@ -73,11 +122,18 @@ module Ziperu
 
     protected
 
+    # A copy: callers rename or remove entries while iterating.
     def sorted_entries
-      ::Ziperu.sort_entries ? @entry_set.sort.to_h : @entry_set
+      ::Ziperu.sort_entries ? @all.sort_by { |e| to_key(e) } : @all.dup
     end
 
     private
+
+    # Removes `entry` itself (not another of the same name) from `@all`.
+    def remove_from_all(entry)
+      i = @all.index { |e| e.equal?(entry) }
+      @all.delete_at(i) if i
+    end
 
     # Keyed by name bytes: entry names are binary strings (as in rubyzip),
     # and a lookup with the same bytes in another encoding should find

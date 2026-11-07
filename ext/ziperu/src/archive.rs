@@ -5,6 +5,7 @@
 //! to the archive by index.
 
 use std::cell::{RefCell, RefMut};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -12,13 +13,13 @@ use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
     Symbol, TypedData, Value,
 };
-use zip::read::{ZipFileEntry, ZipReadOptions};
+use zip::read::{read_zipfile_from_stream_with_options, ZipFileEntry, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
 use crate::errors::{busy_error, io_error, read_error, zip_error};
 use crate::gvl::maybe_without_gvl;
-use crate::reader::EntryReader;
+use crate::reader::{EntryInfo, EntryReader};
 use crate::source::Source;
 
 /// Never pre-allocate more than this on the strength of a header field.
@@ -113,6 +114,13 @@ impl Archive {
         Ok(ruby.str_from_slice(rb_self.archive(ruby)?.comment()))
     }
 
+    /// True when the central directory holds several records under one
+    /// name. The crate keys its parsed view by name and so keeps only the
+    /// last of them; `entries` then walks the raw records instead.
+    pub fn has_duplicate_names(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
+        Ok(rb_self.archive(ruby)?.has_duplicate_names())
+    }
+
     /// Sum of the declared uncompressed sizes, for `Ziperu.max_total_size`.
     pub fn total_size(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
         let archive = rb_self.archive(ruby)?;
@@ -146,30 +154,89 @@ impl Archive {
         })
     }
 
+    /// `verify_entry` for a record the crate cannot address by index (one
+    /// of several under the same name): the entry is read from its local
+    /// header with the central record's sizes and CRC, as `open_entry_at`
+    /// reads it.
+    pub fn verify_entry_at(
+        ruby: &Ruby,
+        rb_self: &Self,
+        header_offset: u64,
+        size: u64,
+        compressed_size: u64,
+        crc: u32,
+        password: Option<RString>,
+    ) -> Result<(), Error> {
+        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let mut source = rb_self.archive(ruby)?.clone().into_inner();
+        maybe_without_gvl(rb_self.needs_gvl, || {
+            source.seek(SeekFrom::Start(header_offset))?;
+            let options = ZipReadOptions::new()
+                .password(password.as_deref())
+                .override_compressed_size(compressed_size)
+                .override_uncompressed_size(size)
+                .override_crc(crc);
+            let mut entry = read_zipfile_from_stream_with_options(&mut source, options)?.ok_or(
+                ZipError::InvalidArchive("expected a local file header".into()),
+            )?;
+            io::copy(&mut entry, &mut io::sink())?;
+            Ok::<_, ZipError>(())
+        })
+        .map_err(|e| match e {
+            ZipError::Io(io) => read_error(ruby, io),
+            other => zip_error(ruby, other),
+        })
+    }
+
     /// One Hash per entry, in central-directory order.
     ///
     /// The parsed central directory already holds nearly everything; the
     /// few fields read raw come from one sequential pass over the records,
-    /// done without the GVL when the source allows it.
+    /// done without the GVL when the source allows it. An archive with
+    /// several records under one name is listed from the raw records
+    /// alone, since the crate's view keeps only the last of each name: a
+    /// record the crate still addresses carries its index, the others nil.
     pub fn entries(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let archive = rb_self.archive(ruby)?;
         let meta = archive.metadata();
+        let duplicates = archive.has_duplicate_names();
+        let dir_start = archive.central_directory_start();
+        let archive_offset = archive.offset();
         let mut raw = archive.clone().into_inner();
         drop(archive);
-        let fields = maybe_without_gvl(rb_self.needs_gvl, || {
+        let keys = MetaKeys::new(ruby);
+
+        if duplicates {
+            let records = maybe_without_gvl(rb_self.needs_gvl, || {
+                walk_central_directory(&mut raw, dir_start)
+            })
+            .map_err(|e| io_error(ruby, e))?;
+            let mut by_offset = HashMap::with_capacity(meta.len());
+            for i in 0..meta.len() {
+                let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+                by_offset.insert(entry.central_header_start(), i);
+            }
+            let out = ruby.ary_new_capa(records.len());
+            for record in &records {
+                let index = by_offset.get(&record.central_offset).copied();
+                out.push(record_hash(ruby, &keys, index, record, archive_offset)?)?;
+            }
+            return Ok(out);
+        }
+
+        let records = maybe_without_gvl(rb_self.needs_gvl, || {
             (0..meta.len())
                 .map(|i| {
                     let entry = meta.entry(i)?;
-                    Ok(raw_central_fields(&mut raw, entry.central_header_start())?)
+                    Ok(raw_central_record(&mut raw, entry.central_header_start())?)
                 })
                 .collect::<ZipResult<Vec<_>>>()
         })
         .map_err(|e| zip_error(ruby, e))?;
-        let keys = MetaKeys::new(ruby);
         let out = ruby.ary_new_capa(meta.len());
-        for (i, fields) in fields.iter().enumerate() {
+        for (i, record) in records.iter().enumerate() {
             let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
-            out.push(entry_hash(ruby, &keys, i, &entry, fields)?)?;
+            out.push(entry_hash(ruby, &keys, i, &entry, record)?)?;
         }
         Ok(out)
     }
@@ -181,9 +248,9 @@ impl Archive {
         let mut raw = archive.clone().into_inner();
         drop(archive);
         let entry = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
-        let fields = raw_central_fields(&mut raw, entry.central_header_start())
+        let record = raw_central_record(&mut raw, entry.central_header_start())
             .map_err(|e| io_error(ruby, e))?;
-        entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &fields)
+        entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &record)
     }
 
     /// The raw extra field bytes of entry `index`'s local header. Some
@@ -199,6 +266,17 @@ impl Archive {
         let mut raw = archive.clone().into_inner();
         drop(archive);
         let extra = raw_local_extra(&mut raw, header_start).map_err(|e| io_error(ruby, e))?;
+        Ok(ruby.str_from_slice(&extra))
+    }
+
+    /// `local_extra` for a record addressed by its local header offset.
+    pub fn local_extra_at(
+        ruby: &Ruby,
+        rb_self: &Self,
+        header_offset: u64,
+    ) -> Result<RString, Error> {
+        let mut raw = rb_self.archive(ruby)?.clone().into_inner();
+        let extra = raw_local_extra(&mut raw, header_offset).map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
     }
 
@@ -218,6 +296,40 @@ impl Archive {
             ruby,
             archive,
             index,
+            password,
+            enforce_size,
+            rb_self.needs_gvl,
+            rb_self.io,
+        )
+    }
+
+    /// `open_entry` for a record the crate cannot address by index: the
+    /// entry is read from its local header, with the sizes and CRC of its
+    /// central record standing in for whatever the local header lacks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_entry_at(
+        ruby: &Ruby,
+        rb_self: &Self,
+        header_offset: u64,
+        size: u64,
+        compressed_size: u64,
+        crc: u32,
+        password: Option<RString>,
+        enforce_size: bool,
+    ) -> Result<EntryReader, Error> {
+        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let archive = rb_self.archive(ruby)?.clone();
+        let info = EntryInfo {
+            index: None,
+            header_start: header_offset,
+            size,
+            compressed_size,
+            crc32: crc,
+        };
+        EntryReader::open_at(
+            ruby,
+            archive,
+            info,
             password,
             enforce_size,
             rb_self.needs_gvl,
@@ -251,45 +363,157 @@ impl Archive {
     }
 }
 
-/// Fields of a central directory record read straight from the bytes,
-/// where the crate's parsed view is not what rubyzip exposes.
-struct RawCentralFields {
-    /// The extra field exactly as stored. The crate re-serializes the
-    /// fields it parsed, which drops some (an extended timestamp without
-    /// the local-only parts, for one); rubyzip hands out the raw bytes.
-    extra: Vec<u8>,
-    /// The DOS time and date as stored. The crate's `DateTime` rejects
-    /// values a calendar would roll over (February 30th), which rubyzip
-    /// reads as the next day.
+/// A central directory record read straight from the bytes.
+///
+/// Two fields are read this way for every entry, where the crate's parsed
+/// view is not what rubyzip exposes: the extra field exactly as stored
+/// (the crate re-serializes the fields it parsed, which drops some, an
+/// extended timestamp without the local-only parts for one), and the DOS
+/// time and date as stored (the crate's `DateTime` rejects values a
+/// calendar would roll over, February 30th, which rubyzip reads as the
+/// next day). The rest only matters for a record the crate does not keep.
+struct RawCentralRecord {
+    /// Where the record starts, which is how it is matched to the crate's
+    /// `central_header_start`.
+    central_offset: u64,
+    version_made_by: u16,
+    flags: u16,
+    method: u16,
     dos_time: u16,
     dos_date: u16,
+    crc32: u32,
+    compressed_size: u64,
+    size: u64,
+    external_attributes: u32,
+    /// As stored: relative to the start of the archive proper, before any
+    /// prepended data.
+    header_offset: u64,
+    name: Vec<u8>,
+    extra: Vec<u8>,
+    comment: Vec<u8>,
 }
 
-fn raw_central_fields(source: &mut Source, central_offset: u64) -> io::Result<RawCentralFields> {
-    const SIGNATURE: u32 = 0x0201_4b50;
-    const HEADER_LEN: usize = 46;
+const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
+const CENTRAL_HEADER_LEN: usize = 46;
+const ZIP64_EXTRA_ID: u16 = 0x0001;
 
+/// The record at `central_offset`.
+fn raw_central_record(source: &mut Source, central_offset: u64) -> io::Result<RawCentralRecord> {
     source.seek_to(central_offset)?;
-    let mut header = [0u8; HEADER_LEN];
-    source.read_exact(&mut header)?;
-    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
-        return Err(io::Error::new(
+    read_central_record(source, central_offset)?.ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             "central directory signature not found",
-        ));
+        )
+    })
+}
+
+/// Every record from `dir_start` to the end of the central directory.
+fn walk_central_directory(
+    source: &mut Source,
+    dir_start: u64,
+) -> io::Result<Vec<RawCentralRecord>> {
+    source.seek(SeekFrom::Start(dir_start))?;
+    let mut records = Vec::new();
+    let mut offset = dir_start;
+    while let Some(record) = read_central_record(source, offset)? {
+        offset = record.next_offset();
+        records.push(record);
     }
-    let dos_time = u16::from_le_bytes([header[12], header[13]]);
-    let dos_date = u16::from_le_bytes([header[14], header[15]]);
-    let name_len = u16::from_le_bytes([header[28], header[29]]) as i64;
-    let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
-    source.seek(SeekFrom::Current(name_len))?;
+    Ok(records)
+}
+
+/// The record at the source's position, or `None` where the central
+/// directory has ended (an end-of-central-directory signature instead).
+fn read_central_record(
+    source: &mut Source,
+    central_offset: u64,
+) -> io::Result<Option<RawCentralRecord>> {
+    // The signature first: what follows the last record (the end of
+    // central directory) is shorter than a record header.
+    let mut header = [0u8; CENTRAL_HEADER_LEN];
+    source.read_exact(&mut header[..4])?;
+    if le_u32(&header[0..4]) != CENTRAL_SIGNATURE {
+        return Ok(None);
+    }
+    source.read_exact(&mut header[4..])?;
+    let name_len = le_u16(&header[28..30]) as usize;
+    let extra_len = le_u16(&header[30..32]) as usize;
+    let comment_len = le_u16(&header[32..34]) as usize;
+    let mut name = vec![0u8; name_len];
+    source.read_exact(&mut name)?;
     let mut extra = vec![0u8; extra_len];
     source.read_exact(&mut extra)?;
-    Ok(RawCentralFields {
+    let mut comment = vec![0u8; comment_len];
+    source.read_exact(&mut comment)?;
+
+    let mut record = RawCentralRecord {
+        central_offset,
+        version_made_by: le_u16(&header[4..6]),
+        flags: le_u16(&header[8..10]),
+        method: le_u16(&header[10..12]),
+        dos_time: le_u16(&header[12..14]),
+        dos_date: le_u16(&header[14..16]),
+        crc32: le_u32(&header[16..20]),
+        compressed_size: u64::from(le_u32(&header[20..24])),
+        size: u64::from(le_u32(&header[24..28])),
+        external_attributes: le_u32(&header[38..42]),
+        header_offset: u64::from(le_u32(&header[42..46])),
+        name,
         extra,
-        dos_time,
-        dos_date,
-    })
+        comment,
+    };
+    record.apply_zip64();
+    Ok(Some(record))
+}
+
+impl RawCentralRecord {
+    fn next_offset(&self) -> u64 {
+        self.central_offset
+            + (CENTRAL_HEADER_LEN + self.name.len() + self.extra.len() + self.comment.len()) as u64
+    }
+
+    /// A zip64 extra field carries the 64-bit value of each size or
+    /// offset the record stores as 0xFFFFFFFF, in header order.
+    fn apply_zip64(&mut self) {
+        let mut rest = self.extra.as_slice();
+        while rest.len() >= 4 {
+            let id = le_u16(&rest[0..2]);
+            let len = le_u16(&rest[2..4]) as usize;
+            rest = &rest[4..];
+            if rest.len() < len {
+                return;
+            }
+            let (mut data, tail) = rest.split_at(len);
+            rest = tail;
+            if id != ZIP64_EXTRA_ID {
+                continue;
+            }
+            for field in [
+                &mut self.size,
+                &mut self.compressed_size,
+                &mut self.header_offset,
+            ] {
+                if *field != u64::from(u32::MAX) {
+                    continue;
+                }
+                let Some((value, more)) = data.split_first_chunk::<8>() else {
+                    return;
+                };
+                *field = u64::from_le_bytes(*value);
+                data = more;
+            }
+            return;
+        }
+    }
+}
+
+fn le_u16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+
+fn le_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 /// The extra field bytes of a local file header, exactly as stored.
@@ -360,7 +584,7 @@ fn entry_hash(
     keys: &MetaKeys,
     index: usize,
     entry: &ZipFileEntry<'_>,
-    raw: &RawCentralFields,
+    raw: &RawCentralRecord,
 ) -> Result<RHash, Error> {
     let h = ruby.hash_new_capa(15);
     h.aset(keys.index, index)?;
@@ -390,6 +614,37 @@ fn entry_hash(
     Ok(h)
 }
 
+/// `entry_hash` from the raw record alone, for an archive the crate's
+/// parsed view does not cover; `index` is nil for a record it dropped.
+fn record_hash(
+    ruby: &Ruby,
+    keys: &MetaKeys,
+    index: Option<usize>,
+    record: &RawCentralRecord,
+    archive_offset: u64,
+) -> Result<RHash, Error> {
+    let h = ruby.hash_new_capa(15);
+    h.aset(keys.index, index)?;
+    h.aset(keys.name, ruby.str_from_slice(&record.name))?;
+    h.aset(keys.size, record.size)?;
+    h.aset(keys.compressed_size, record.compressed_size)?;
+    h.aset(keys.crc, record.crc32)?;
+    h.aset(keys.compression_method, record.method)?;
+    h.aset(keys.flags, record.flags)?;
+    h.aset(keys.external_attributes, record.external_attributes)?;
+    h.aset(keys.fstype, (record.version_made_by >> 8) as u8)?;
+    h.aset(keys.version_made_by, record.version_made_by & 0xFF)?;
+    h.aset(keys.dos_date, record.dos_date)?;
+    h.aset(keys.dos_time, record.dos_time)?;
+    h.aset(keys.comment, ruby.str_from_slice(&record.comment))?;
+    h.aset(keys.extra, ruby.str_from_slice(&record.extra))?;
+    h.aset(
+        keys.header_offset,
+        record.header_offset.saturating_add(archive_offset),
+    )?;
+    Ok(h)
+}
+
 /// The on-disk compression method code, as rubyzip exposes it.
 ///
 /// `to_u16` is deprecated in favour of matching on constants, but it is the
@@ -397,4 +652,62 @@ fn entry_hash(
 #[allow(deprecated)]
 fn compression_code(method: zip::CompressionMethod) -> u16 {
     method.to_u16()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(
+        size: u64,
+        compressed_size: u64,
+        header_offset: u64,
+        extra: Vec<u8>,
+    ) -> RawCentralRecord {
+        RawCentralRecord {
+            central_offset: 0,
+            version_made_by: 0,
+            flags: 0,
+            method: 0,
+            dos_time: 0,
+            dos_date: 0,
+            crc32: 0,
+            compressed_size,
+            size,
+            external_attributes: 0,
+            header_offset,
+            name: Vec::new(),
+            extra,
+            comment: Vec::new(),
+        }
+    }
+
+    fn zip64(values: &[u64]) -> Vec<u8> {
+        let mut extra = vec![0x01, 0x00, (values.len() * 8) as u8, 0x00];
+        for v in values {
+            extra.extend_from_slice(&v.to_le_bytes());
+        }
+        extra
+    }
+
+    #[test]
+    fn zip64_fills_only_the_saturated_fields_in_order() {
+        let max = u64::from(u32::MAX);
+        let mut r = record(max, 7, max, zip64(&[1 << 33, 1 << 40]));
+        r.apply_zip64();
+        assert_eq!(
+            (r.size, r.compressed_size, r.header_offset),
+            (1 << 33, 7, 1 << 40)
+        );
+    }
+
+    #[test]
+    fn zip64_is_found_after_other_fields_and_tolerates_short_data() {
+        let max = u64::from(u32::MAX);
+        let mut extra = vec![0x55, 0x54, 0x01, 0x00, 0x03]; // an extended timestamp first
+        extra.extend(zip64(&[42]));
+        let mut r = record(max, max, 5, extra);
+        r.apply_zip64();
+        assert_eq!((r.size, r.compressed_size, r.header_offset), (42, max, 5));
+    }
 }
