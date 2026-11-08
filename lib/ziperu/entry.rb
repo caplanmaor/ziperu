@@ -46,7 +46,8 @@ module Ziperu
     def extra
       if @archive && !@local_extra_merged
         @local_extra_merged = true
-        @extra.merge(archive.local_extra(@index), local: true)
+        local = @index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)
+        @extra.merge(local, local: true)
       end
       @extra
     end
@@ -56,8 +57,9 @@ module Ziperu
     def archive # :nodoc:
       if @archive&.closed? && @zipfile.kind_of?(::Ziperu::File)
         reopened = @zipfile.native_archive
-        if reopened.entry_meta(@index)[:name] != @original_name.b
-          raise Error, "entry '#{@original_name}' is no longer at index #{@index} of #{@zipfile.name}"
+        unless still_at_place?(reopened)
+          where = @index ? "at index #{@index} of" : 'in'
+          raise Error, "entry '#{@original_name}' is no longer #{where} #{@zipfile.name}"
         end
 
         @archive = reopened
@@ -68,7 +70,9 @@ module Ziperu
     attr_writer :size # :nodoc:
 
     # Index of the entry in the archive's central directory, or nil for an
-    # entry that is not (yet) in an archive.
+    # entry that is not (yet) in an archive, or that the native core cannot
+    # address by index: one of several records under the same name, which
+    # is read from its local header offset instead.
     attr_reader :index # :nodoc:
 
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
@@ -399,7 +403,7 @@ module Ziperu
       if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
         # No data to stream: a symlink's target goes into the header call.
         zip_output_stream.put_next_entry(self)
-      elsif @filepath || needs_restream?
+      elsif @filepath || needs_restream? || no_raw_copy?
         zip_output_stream.put_next_entry(self)
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
@@ -446,6 +450,28 @@ module Ziperu
       !encrypted? && ::Ziperu::WRITABLE_COMPRESSION_METHODS.include?(compression_method)
     end
 
+    # A record the native core cannot address by index (one of several
+    # under the same name) has no raw copy: it is written afresh, which
+    # needs a method the writer has and no encryption.
+    def no_raw_copy? # :nodoc:
+      return false unless @index.nil?
+      return true if restreamable?
+
+      kind = encrypted? ? 'an encrypted' : "a #{COMPRESSION_METHODS[compression_method]}"
+      raise Error, "cannot write entry '#{@name}': #{kind} entry that shares its name with " \
+                   'another record can only be read'
+    end
+
+    # Whether the reopened archive still holds this entry where it was.
+    def still_at_place?(reopened) # :nodoc:
+      name = @original_name.b
+      return reopened.entry_meta(@index)[:name] == name if @index
+
+      reopened.entries.any? do |meta|
+        meta[:index].nil? && meta[:header_offset] == @local_header_offset && meta[:name] == name
+      end
+    end
+
     def parent_as_string # :nodoc:
       entry_name  = name.chomp('/')
       slash_index = entry_name.rindex('/')
@@ -479,6 +505,8 @@ module Ziperu
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
       raise Error, "entry '#{@name}' is not in an archive" if archive.nil?
+      # A record without an index is read through the stream.
+      return open_input_stream(enforce_size: true, &:read) if @index.nil?
 
       archive.read_entry(@index)
     rescue Native::SizeLimitError

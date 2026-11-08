@@ -125,6 +125,9 @@ module Ziperu
       raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
       raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
+      if entry.index.nil?
+        raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
+      end
 
       touch_opts =
         if touch && new_name.nil?

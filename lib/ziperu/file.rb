@@ -291,8 +291,9 @@ module Ziperu
     # `(entry, done, total)` after each entry.
     def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, &block)
       # Directories first, so files have somewhere to go; links last, so
-      # nothing is written through one.
-      dirs, rest = entries.partition(&:directory?)
+      # nothing is written through one. Of several records under one name
+      # only the last is extracted, which is the one rubyzip would know.
+      dirs, rest = entries.reject { |e| @cdir.shadowed?(e) }.partition(&:directory?)
       links, others = rest.partition(&:symlink?)
       ordered = dirs + others + links
       total = ordered.size
@@ -331,11 +332,16 @@ module Ziperu
       password = decrypter&.password&.b
       failures = {}
       entries.each do |entry|
-        next if entry.directory? || !entry.index || !entry.archive.equal?(native)
+        next if entry.directory? || !entry.archive.equal?(native)
         next if entry.encrypted? && password.nil?
 
         begin
-          native.verify_entry(entry.index, password)
+          if entry.index
+            native.verify_entry(entry.index, password)
+          else
+            native.verify_entry_at(entry.local_header_offset, entry.size, entry.compressed_size,
+                                   entry.crc, password)
+          end
         rescue Error, IOError => e
           failures[entry] = e
         end
@@ -351,7 +357,7 @@ module Ziperu
       on_success_replace do |tmp_file|
         ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
           @cdir.each do |e|
-            e.write_to_zip_output_stream(zos)
+            e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e)
             e.clean_up
           end
           zos.comment = comment
@@ -366,7 +372,7 @@ module Ziperu
       return io unless commit_required?
 
       ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields) do |zos|
-        @cdir.each { |e| e.write_to_zip_output_stream(zos) }
+        @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
         zos.comment = comment
       end
     end
@@ -543,7 +549,7 @@ module Ziperu
       path_or_io.binmode if path_or_io.respond_to?(:binmode)
       @native = InputStream.open_archive(path_or_io)
       @comment = @native.comment # the stored bytes, as rubyzip reads them
-      @native.entries.each { |meta| @cdir << Entry.from_meta(@native, meta, self) }
+      @native.entries.each { |meta| @cdir.push_record(Entry.from_meta(@native, meta, self)) }
     end
 
     def release_native

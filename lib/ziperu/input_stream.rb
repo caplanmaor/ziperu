@@ -51,6 +51,11 @@ module Ziperu
         end
       @decrypter = decrypter
       @enforce_size = enforce_size
+      # An archive with several records under one name is walked from its
+      # listing, since the native core addresses only the last of each name
+      # by index; every record is yielded, as rubyzip's walk of the local
+      # headers would.
+      @records = @archive.entries if @archive&.duplicate_names?
       @next_index = offset.zero? || @archive.nil? ? 0 : index_at_offset(offset)
       @reader = nil
       @current_entry = nil
@@ -71,7 +76,7 @@ module Ziperu
       raise SplitArchiveError if @split
       raise IOError, 'closed stream' if closed?
       return @current_entry = nil if @archive.nil? || @next_index.nil?
-      if @next_index >= @archive.entry_count
+      if @next_index >= (@records ? @records.size : @archive.entry_count)
         # Past the last entry there is nothing to read, not the previous
         # entry again.
         @reader&.close
@@ -80,7 +85,8 @@ module Ziperu
         return @current_entry = nil
       end
 
-      @current_entry = Entry.from_meta(@archive, @archive.entry_meta(@next_index))
+      meta = @records ? @records[@next_index] : @archive.entry_meta(@next_index)
+      @current_entry = Entry.from_meta(@archive, meta)
       @next_index += 1
       open_entry
       @current_entry
@@ -94,7 +100,13 @@ module Ziperu
       raise IOError, 'closed stream' if closed?
 
       @current_entry = entry
-      @next_index = entry.index + 1
+      @next_index =
+        if @records
+          at = @records.index { |meta| meta[:header_offset] == entry.local_header_offset }
+          at && at + 1
+        else
+          entry.index + 1
+        end
       open_entry
       @current_entry
     end
@@ -225,7 +237,14 @@ module Ziperu
       end
 
       password = @decrypter&.password&.b
-      @reader = wrap_errors { @archive.open_entry(entry.index, password, @enforce_size) }
+      @reader = wrap_errors do
+        if entry.index
+          @archive.open_entry(entry.index, password, @enforce_size)
+        else
+          @archive.open_entry_at(entry.local_header_offset, entry.size, entry.compressed_size,
+                                 entry.crc, password, @enforce_size)
+        end
+      end
       flush
     end
 
@@ -248,6 +267,8 @@ module Ziperu
 
     # Nil when no entry starts there, which reads as "no more entries".
     def index_at_offset(offset)
+      return @records.index { |meta| meta[:header_offset] == offset } if @records
+
       found = @archive.entries.find { |meta| meta[:header_offset] == offset }
       found && found[:index]
     end

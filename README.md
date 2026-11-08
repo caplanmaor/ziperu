@@ -90,9 +90,13 @@ until it goes. Exception classes follow the namespace, so rescue
   copied as is: its name and permissions can change, and any other edit
   raises `Ziperu::Error` at commit rather than vanishing, which is what
   rubyzip does for compression methods it cannot write.
-- Several entries with the same name in one archive: `Ziperu::File` lists
-  them all and reads the last; `Ziperu::InputStream` yields only the last,
-  where rubyzip walks every local header.
+- Several records with the same name in one archive (Python's `zipfile`
+  writes such archives, with a warning): `Ziperu::File` lists every record
+  and each reads its own data, where rubyzip keeps only the last. A lookup
+  by name (`find_entry`, `read`, `extract_all`) finds the last, as in
+  rubyzip, and so does a commit, which writes one record per name; a
+  shadowed record given a new name before the commit is written afresh.
+  `Ziperu::InputStream` yields every record, as rubyzip's does.
 - `Ziperu::InputStream` over something that is not a zip archive at all
   returns `nil` from the first `get_next_entry`, as rubyzip does; a corrupt
   archive raises `Ziperu::Error` from `Ziperu::File.open` in both.
