@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
                      "Ziperu namespace, implemented on the Rust `zip` crate via Magnus. " \
                      "`require \"zip\"` aliases Zip = Ziperu so rubyzip code runs unchanged. " \
                      "Precompiled binaries, no C toolchain needed."
-  spec.homepage = "https://github.com/maorcaplan/ziperu"
+  spec.homepage = "https://github.com/caplanmaor/ziperu"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1"
 
