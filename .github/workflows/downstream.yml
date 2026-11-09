@@ -1,0 +1,44 @@
+# The test suites of gems that depend on rubyzip, run with ziperu standing
+# in for it (.github/scripts/downstream.sh). What "drop-in" means in
+# practice: these are real consumers, written against rubyzip, judged by
+# their own tests. Weekly, and on demand.
+
+name: Downstream
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  suite:
+    name: ${{ matrix.project.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - { name: roo, url: "https://github.com/roo-rb/roo.git", cmd: "bundle exec rake test" }
+          - { name: caxlsx, url: "https://github.com/caxlsx/caxlsx.git", cmd: "bundle exec rake test" }
+          - { name: rubyXL, url: "https://github.com/weshatheleopard/rubyXL.git", cmd: "bundle exec rspec" }
+          - { name: docx, url: "https://github.com/ruby-docx/docx.git", cmd: "bundle exec rspec" }
+          - { name: write_xlsx, url: "https://github.com/cxn03651/write_xlsx.git", cmd: "bundle exec rake test" }
+          - { name: sablon, url: "https://github.com/senny/sablon.git", cmd: "bundle exec rake test" }
+          # gepub's suite shells out to epubcheck (Java); those examples fail
+          # for want of Java, not of ziperu.
+          - { name: gepub, url: "https://github.com/skoji/gepub.git", cmd: "bundle exec rspec --exclude-pattern 'spec/{example_spec,gepub_spec}.rb'" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - name: Build and install ziperu from this tree
+        run: |
+          bundle exec rake compile
+          gem build ziperu.gemspec -q
+          gem install --local --no-document ziperu-*.gem
+      - name: Run ${{ matrix.project.name }}'s suite against ziperu
+        run: .github/scripts/downstream.sh "${{ matrix.project.url }}" . ${{ matrix.project.cmd }}
