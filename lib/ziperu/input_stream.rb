@@ -44,7 +44,10 @@ module Ziperu
           rescue Error => e
             # Not an archive: rubyzip finds no entries rather than raising,
             # and `while (entry = zis.get_next_entry)` over untrusted input
-            # relies on that.
+            # relies on that. Something that starts like an archive but
+            # cannot be opened (a truncated one, say) is an error.
+            raise if self.class.archive_like?(context)
+
             @not_an_archive = e
             nil
           end
@@ -57,6 +60,9 @@ module Ziperu
       # headers would.
       @records = @archive.entries if @archive&.duplicate_names?
       @next_index = offset.zero? || @archive.nil? ? 0 : index_at_offset(offset)
+      if @next_index.nil?
+        raise Error, "no entry starts at offset #{offset} (Zip local header magic not found)"
+      end
       @reader = nil
       @current_entry = nil
     end
@@ -180,8 +186,41 @@ module Ziperu
         raise
       end
 
+      # A path (String, Pathname or anything else with `to_path` that is
+      # not an IO), as opposed to an IO-like object.
+      #
+      # @api private
+      def path_like?(context)
+        context.kind_of?(::String) ||
+          (context.respond_to?(:to_path) && !context.respond_to?(:seek)) ||
+          !context.respond_to?(:read)
+      end
+
+      # Whether what `context` holds begins with a local file header, the
+      # one thing rubyzip's `InputStream` needs to yield entries.
+      #
+      # @api private
+      def archive_like?(context)
+        head =
+          if path_like?(context)
+            ::File.binread(path_of(context), 4)
+          elsif context.kind_of?(::StringIO)
+            context.string.byteslice(0, 4)
+          elsif IOExtras.seekable?(context)
+            context.seek(0, ::IO::SEEK_SET)
+            context.read(4)
+          end
+        head.to_s.b.start_with?([LOCAL_ENTRY_SIGNATURE].pack("V"))
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def path_of(context)
+        context.respond_to?(:to_path) ? context.to_path : context.to_s
+      end
+
       def open_native(context)
-        return Native::Archive.open_path(context.to_s) unless context.respond_to?(:read)
+        return Native::Archive.open_path(path_of(context)) if path_like?(context)
 
         # A StringIO's bytes are already in memory: snapshot them once rather
         # than paying a method call per chunk (12x faster per entry).
@@ -207,14 +246,15 @@ module Ziperu
       # @api private
       def split_archive?(context)
         head =
-          if context.respond_to?(:read)
+          if path_like?(context)
+            path = path_of(context)
+            ::File.binread(path, 4) if ::File.file?(path)
+          else
             # A pipe cannot be peeked at; `open_archive` checks what it reads.
             return false unless IOExtras.seekable?(context)
 
             context.seek(0, ::IO::SEEK_SET)
             context.read(4)
-          elsif ::File.file?(context.to_s)
-            ::File.binread(context.to_s, 4)
           end
         split_signature?(head)
       end
@@ -250,6 +290,9 @@ module Ziperu
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
       raise IOError, 'closed stream' if closed?
+      unless maxlen.nil? || maxlen.kind_of?(::Integer)
+        raise TypeError, "no implicit conversion of #{maxlen.class} into Integer"
+      end
       raise ArgumentError, "negative length #{maxlen} given" if maxlen&.negative?
       return nil if @reader.nil?
 

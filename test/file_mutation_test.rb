@@ -330,8 +330,8 @@ class FileMutationTest < Minitest::Test
       zf.remove("empty.txt")
       zf.comment = "hi"
     end
-    out = `python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.testzip()); print(z.comment.decode()); print(sorted(z.namelist()))" "#{@zip}"`
-    skip "python not available" unless $CHILD_STATUS.success?
+    skip "python not available" unless python
+    out = `#{python} -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.testzip()); print(z.comment.decode()); print(sorted(z.namelist()))" "#{@zip}"`
 
     assert_equal ["None", "hi", "['crlf.txt', 'dir/', 'dir/bin.dat', 'long.txt', 'renamed.txt', 'src.txt']"],
                  out.lines.map(&:chomp)

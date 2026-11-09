@@ -45,7 +45,13 @@ module Ziperu
                    suppress_extra_fields: false)
       super()
 
-      @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
+      @name    = if path_or_io.respond_to?(:to_path) && !path_or_io.respond_to?(:seek)
+                   path_or_io.to_path # a Pathname
+                 elsif path_or_io.respond_to?(:path)
+                   path_or_io.path
+                 else
+                   path_or_io
+                 end
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
@@ -253,6 +259,7 @@ module Ziperu
     # Renames the specified entry.
     def rename(entry, new_name, &continue_on_exists_proc)
       found_entry = get_entry(entry)
+      new_name = new_name.to_path if new_name.respond_to?(:to_path)
       check_entry_exists(new_name, continue_on_exists_proc, 'rename')
       @cdir.delete(found_entry)
       found_entry.name = new_name
@@ -332,7 +339,8 @@ module Ziperu
       password = decrypter&.password&.b
       failures = {}
       entries.each do |entry|
-        next if entry.directory? || !entry.archive.equal?(native)
+        # An entry replaced from disk has nothing in the archive to check.
+        next if entry.directory? || entry.filepath || !entry.archive.equal?(native)
         next if entry.encrypted? && password.nil?
 
         begin
@@ -356,20 +364,30 @@ module Ziperu
 
       on_success_replace do |tmp_file|
         ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
-          @cdir.each do |e|
-            e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e)
-            e.clean_up
-          end
+          @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
           zos.comment = comment
         end
         true
       end
+      # Only now are the changes on disk; until here the entries keep
+      # their dirty state so a failed commit can be retried.
+      @cdir.each(&:clean_up)
       initialize_cdir(@name)
     end
 
     # Writes the archive, with any changes, to `io` and returns it.
     def write_buffer(io = ::StringIO.new)
       return io unless commit_required?
+
+      # Rewriting the archive into the very IO it is read from would
+      # overwrite entries still to be copied; build it aside first.
+      if @buffer && io.equal?(@io) && !io.kind_of?(::StringIO)
+        built = write_buffer(::StringIO.new).string
+        io.rewind
+        io.write(built)
+        io.truncate(built.bytesize) if io.respond_to?(:truncate)
+        return io
+      end
 
       ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields) do |zos|
         @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
@@ -481,6 +499,8 @@ module Ziperu
 
     def native_extractable?(entry, native)
       return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.archive.equal?(native)
+      # Replaced from disk: the archive holds the old bytes.
+      return false if entry.filepath
       return false unless entry.file? || entry.directory?
 
       name = entry.name
@@ -523,6 +543,7 @@ module Ziperu
     def initialize_cdir(path_or_io, buffer: false)
       release_native
       @buffer = buffer
+      @io = (path_or_io if buffer)
       @cdir = ::Ziperu::EntrySet.new
       @comment = ''
       @dirty = false

@@ -73,6 +73,20 @@ jobs:
           name: fuzz-failures
           path: tmp/fuzz/failures/
 
+  # Archives exchanged with Info-ZIP, 7-Zip and Python's zipfile.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip unzip p7zip-full python3
+      - run: bundle exec rake compile
+      - run: bundle exec ruby -Ilib test/interop/run.rb
+
   clippy:
     runs-on: ubuntu-latest
     steps:

@@ -70,6 +70,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_method("add_symlink", method!(writer::Writer::add_symlink, 3))?;
     writer.define_method("write", method!(writer::Writer::write, 1))?;
     writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 4))?;
+    writer.define_method("copy_zipcrypto", method!(writer::Writer::copy_zipcrypto, 4))?;
     writer.define_method("comment=", method!(writer::Writer::set_comment, 1))?;
     writer.define_method("finish", method!(writer::Writer::finish, 0))?;
     writer.define_method("closed?", method!(writer::Writer::is_closed, 0))?;

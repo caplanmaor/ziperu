@@ -245,7 +245,7 @@ impl Archive {
     pub fn entry_meta(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RHash, Error> {
         let archive = rb_self.archive(ruby)?;
         let meta = archive.metadata();
-        let mut raw = archive.clone().into_inner();
+        let mut raw = archive.clone().into_inner().clone_small();
         drop(archive);
         let entry = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
         let record = raw_central_record(&mut raw, entry.central_header_start())
@@ -263,7 +263,7 @@ impl Archive {
             .entry(index)
             .map_err(|e| zip_error(ruby, e))?
             .header_start();
-        let mut raw = archive.clone().into_inner();
+        let mut raw = archive.clone().into_inner().clone_small();
         drop(archive);
         let extra = raw_local_extra(&mut raw, header_start).map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
@@ -275,7 +275,7 @@ impl Archive {
         rb_self: &Self,
         header_offset: u64,
     ) -> Result<RString, Error> {
-        let mut raw = rb_self.archive(ruby)?.clone().into_inner();
+        let mut raw = rb_self.archive(ruby)?.clone().into_inner().clone_small();
         let extra = raw_local_extra(&mut raw, header_offset).map_err(|e| io_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
     }

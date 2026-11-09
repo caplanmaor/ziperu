@@ -48,8 +48,24 @@ module Ziperu
         @local_extra_merged = true
         local = @index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)
         @extra.merge(local, local: true)
+        # Edits made through this object (`extra.merge`, `extra.delete`)
+        # leave no other trace; the bytes are compared at commit.
+        @extra_snapshot = extra_bytes
       end
       @extra
+    end
+
+    # Whether the extra fields differ from what the archive holds.
+    def extra_changed? # :nodoc:
+      !@extra_snapshot.nil? && @extra_snapshot != extra_bytes
+    end
+
+    def dirty? # :nodoc:
+      super || extra_changed?
+    end
+
+    def extra_bytes # :nodoc:
+      [@extra.to_local_bin.b, @extra.to_c_dir_bin.b]
     end
 
     # The native archive this entry was read from, reopened if the owning
@@ -131,6 +147,11 @@ module Ziperu
     # Is this entry encrypted?
     def encrypted?
       gp_flags & 1 == 1
+    end
+
+    # Encrypted with the traditional PKWARE cipher (anything but AES).
+    def zipcrypto? # :nodoc:
+      encrypted? && !aes?
     end
 
     # Was this entry written in streaming mode with sizes still unknown?
@@ -408,6 +429,8 @@ module Ziperu
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
         end
+      elsif zipcrypto?
+        zip_output_stream.copy_encrypted_entry(self)
       else
         renamed = @name.b != @original_name.b.tr('\\', '/')
         zip_output_stream.copy_raw_entry(self, (@name if renamed), touch: dirty? && !renamed)
@@ -432,9 +455,11 @@ module Ziperu
     # beyond a rename or chmod raise rather than vanish on commit, and the
     # extra fields the raw copy loses are lost.
     def needs_restream? # :nodoc:
-      if dirty? && !raw_copy_carries_changes?
+      if (dirty? && !raw_copy_carries_changes?) || extra_changed?
         unless restreamable?
-          changed = dirty_fields.map { |f| f.to_s.chomp('=') }.join(', ')
+          changed = dirty_fields.map { |f| f.to_s.chomp('=') }
+          changed << 'extra' if extra_changed?
+          changed = changed.uniq.join(', ')
           kind = encrypted? ? 'an encrypted' : "a #{COMPRESSION_METHODS[compression_method]}"
           raise Error, "cannot change #{changed} of entry '#{@name}': #{kind} entry " \
                        'can only be copied as is (a rename or chmod is fine)'
@@ -465,7 +490,7 @@ module Ziperu
     # Whether the reopened archive still holds this entry where it was.
     def still_at_place?(reopened) # :nodoc:
       name = @original_name.b
-      return reopened.entry_meta(@index)[:name] == name if @index
+      return @index < reopened.entry_count && reopened.entry_meta(@index)[:name] == name if @index
 
       reopened.entries.any? do |meta|
         meta[:index].nil? && meta[:header_offset] == @local_header_offset && meta[:name] == name
@@ -481,6 +506,7 @@ module Ziperu
     def clean_up # :nodoc:
       @dirty = false # Any changes are written at this point.
       @dirty_fields = []
+      @extra_snapshot = extra_bytes if @extra_snapshot
     end
 
     def file_stat(path) # :nodoc:
@@ -502,6 +528,19 @@ module Ziperu
     end
 
     # Decompressed contents as a binary String, in one native call.
+    # Yields (or returns) an IO over the whole archive this entry is in,
+    # as rubyzip does: a fresh File for an archive on disk, the buffer
+    # itself (rewound) for one in memory.
+    def get_raw_input_stream(&block)
+      raise Error, "entry '#{@name}' is not in an archive" if @zipfile.nil?
+
+      io = @zipfile.kind_of?(::Ziperu::File) ? @zipfile.name : @zipfile
+      return ::File.open(io, 'rb', &block) if io.kind_of?(::String)
+
+      io.rewind if io.respond_to?(:rewind)
+      block ? yield(io) : io
+    end
+
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
       raise Error, "entry '#{@name}' is not in an archive" if archive.nil?
@@ -561,15 +600,21 @@ module Ziperu
       end
 
       ::File.open(dest_path, 'wb') do |os|
-        open_input_stream(enforce_size: Ziperu.validate_entry_sizes) do |is|
-          bytes_written = 0
-          while (buf = is.sysread(IOExtras::CHUNK_SIZE))
-            os << buf
-            bytes_written += buf.bytesize
+        if @filepath
+          # Added or replaced from disk and not yet committed: the data is
+          # the file's, not the archive's.
+          ::File.open(@filepath, 'rb') { |is| ::IO.copy_stream(is, os) }
+        else
+          open_input_stream(enforce_size: Ziperu.validate_entry_sizes) do |is|
+            bytes_written = 0
+            while (buf = is.sysread(IOExtras::CHUNK_SIZE))
+              os << buf
+              bytes_written += buf.bytesize
+            end
+            # With enforcement on, the native reader has already raised
+            # EntrySizeError; without it, warn as rubyzip does.
+            warn "WARNING: #{EntrySizeError.new(self).message}" if bytes_written > size
           end
-          # With enforcement on, the native reader has already raised
-          # EntrySizeError; without it, warn as rubyzip does.
-          warn "WARNING: #{EntrySizeError.new(self).message}" if bytes_written > size
         end
       end
 

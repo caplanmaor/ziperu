@@ -123,7 +123,8 @@ pub fn extract_entries(
             .to_string()
             .map_err(|_| Error::new(ruby.exception_arg_error(), "entry name is not UTF-8"))?;
         let mtime = match spec.entry::<Option<i64>>(3)? {
-            Some(sec) => Some(system_time(sec, spec.entry(4)?)),
+            // A time the OS clock cannot represent is not restored.
+            Some(sec) => system_time(sec, spec.entry(4)?),
             None => None,
         };
         let mode: Option<u32> = spec.entry(5)?;
@@ -174,12 +175,13 @@ pub fn extract_entries(
     Ok(out)
 }
 
-fn system_time(sec: i64, nsec: u32) -> SystemTime {
+fn system_time(sec: i64, nsec: u32) -> Option<SystemTime> {
     let nanos = Duration::from_nanos(u64::from(nsec));
-    match u64::try_from(sec) {
-        Ok(s) => SystemTime::UNIX_EPOCH + Duration::from_secs(s) + nanos,
-        Err(_) => SystemTime::UNIX_EPOCH - Duration::from_secs(sec.unsigned_abs()) + nanos,
-    }
+    let base = match u64::try_from(sec) {
+        Ok(s) => SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)),
+        Err(_) => SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(sec.unsigned_abs())),
+    };
+    base?.checked_add(nanos)
 }
 
 fn raise(ruby: &Ruby, entry: Value, failure: Failure) -> Error {
@@ -292,11 +294,15 @@ impl Extractor<'_> {
             }
         };
         if self.enforce_size {
-            // An entry declared empty is never read, as `EntryReader` has
-            // it: the file is created and left empty.
-            if self.archive.metadata().entry(index)?.size() == 0 {
+            // An entry with no data at all is never read, as `EntryReader`
+            // has it: the file is created and left empty. One declared
+            // empty that has data goes through the crate's size check.
+            let metadata = self.archive.metadata();
+            let meta = metadata.entry(index)?;
+            if meta.size() == 0 && meta.compressed_size() == 0 {
                 return Ok(0);
             }
+            drop(metadata);
             let mut entry = self.archive.by_index(index)?;
             copy(&mut entry)?;
         } else {

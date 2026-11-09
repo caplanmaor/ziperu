@@ -61,10 +61,15 @@ jobs:
           # The stable set starts at the oldest Ruby still maintained; the
           # gemspec promises 3.1 and up, so build the two EOL minors too.
           ruby-versions: ${{ format('3.1,3.2,{0}', join(fromJSON(needs.ci-data.outputs.result).stable-ruby-versions, ',')) }}
+      # RubyGems treats a bare `x86_64-linux` platform as any libc and
+      # installs it on Alpine too, where it cannot load; name the libc.
+      - name: Name the libc in the glibc gem's platform
+        if: ${{ contains(matrix.platform, 'linux') && !contains(matrix.platform, 'musl') }}
+        run: ruby .github/scripts/replatform.rb "${{ steps.cross-gem.outputs.gem-path }}"
       - uses: actions/upload-artifact@v4
         with:
           name: cross-gem-${{ matrix.platform }}
-          path: ${{ steps.cross-gem.outputs.gem-path }}
+          path: pkg/*.gem
 
   # Every native gem must install and load on its own platform without a
   # Rust toolchain; the smoke test is the whole point of shipping binaries.
@@ -78,6 +83,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         ruby: ["3.1", "3.4"]
     steps:
+      - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
@@ -86,29 +92,32 @@ jobs:
           pattern: cross-gem-*
           merge-multiple: true
           path: gems
-      - name: Install the gem built for this platform
-        shell: bash
+      - name: Install the gem built for this platform and load it
+        run: ruby .github/scripts/smoke.rb gems
+
+  # Alpine, where the musl gem must be the one RubyGems picks.
+  smoke-musl:
+    name: install on alpine / ruby ${{ matrix.ruby }}
+    needs: cross-gem
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.1", "3.4"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cross-gem-*
+          merge-multiple: true
+          path: gems
+      - name: Install the gem built for this platform and load it
         run: |
-          ruby -e '
-            require "rubygems/package"
-            gem = Dir["gems/*.gem"].find { |f| Gem::Platform.match_spec?(Gem::Package.new(f).spec) }
-            abort "no gem matches #{Gem::Platform.local}" unless gem
-            puts "installing #{gem}"
-            exec "gem", "install", "--local", "--ignore-dependencies", gem
-          '
-      - name: Load it without a Rust toolchain
-        shell: bash
-        run: |
-          ruby -e '
-            require "zip"
-            out = Zip::OutputStream.write_buffer { |z| z.put_next_entry("a.txt"); z.write("ok") }
-            Zip::File.open_buffer(out.string) { |zf| abort "round trip failed" unless zf.read("a.txt") == "ok" }
-            puts "ziperu #{Ziperu::VERSION} loaded as Zip on #{RUBY_PLATFORM}"
-          '
+          docker run --rm -v "$PWD:/work" -w /work ruby:${{ matrix.ruby }}-alpine             ruby .github/scripts/smoke.rb gems
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [source-gem, cross-gem, smoke]
+    needs: [source-gem, cross-gem, smoke, smoke-musl]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -326,8 +326,8 @@ class ZipOutputStreamTest < Minitest::Test
       write_test_zip(zos)
     end
     # Python's zipfile as an independent reader.
-    out = `python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.testzip()); print(z.comment.decode()); print(len(z.namelist()))" "#{@zip}"`
-    skip "python not available" unless $CHILD_STATUS.success?
+    skip "python not available" unless python
+    out = `#{python} -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.testzip()); print(z.comment.decode()); print(len(z.namelist()))" "#{@zip}"`
 
     assert_equal ["None", COMMENT, ENTRIES.size.to_s], out.lines.map(&:chomp)
   end

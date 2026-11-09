@@ -15,8 +15,10 @@ use crate::source::RubyError;
 macro_rules! exception {
     ($vis:vis $name:ident, $path:literal) => {
         $vis static $name: Lazy<ExceptionClass> = Lazy::new(|ruby| {
+            // Defined in lib/ziperu/errors.rb; without it (the extension
+            // loaded on its own) errors are still raised, as StandardError.
             ruby.eval::<ExceptionClass>($path)
-                .expect(concat!($path, " must be defined in lib/ziperu/errors.rb"))
+                .unwrap_or_else(|_| ruby.exception_standard_error())
         });
     };
 }
@@ -26,6 +28,7 @@ exception!(DECOMPRESSION_ERROR, "Ziperu::DecompressionError");
 exception!(NATIVE_SIZE_LIMIT_ERROR, "Ziperu::Native::SizeLimitError");
 exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
 exception!(NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
+exception!(pub NATIVE_DUPLICATE_ENTRY_ERROR, "Ziperu::Native::DuplicateEntryError");
 exception!(ENOENT, "Errno::ENOENT");
 exception!(EACCES, "Errno::EACCES");
 exception!(EEXIST, "Errno::EEXIST");

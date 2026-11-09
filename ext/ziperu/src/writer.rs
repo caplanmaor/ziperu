@@ -22,7 +22,7 @@ use zip::write::FullFileOptions;
 use zip::{AesMode, CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
 use crate::archive::Archive;
-use crate::errors::{busy_error, io_error, zip_error, ERROR};
+use crate::errors::{busy_error, io_error, zip_error, ERROR, NATIVE_DUPLICATE_ENTRY_ERROR};
 use crate::gvl::maybe_without_gvl;
 use crate::source::ruby_io_error;
 use crate::zipcrypto;
@@ -56,13 +56,16 @@ impl Sink {
     fn apply(&mut self, patch: &Patch, local: u64, central: u64) -> io::Result<()> {
         self.set_u16_bit(local + 6, patch.flags)?;
         self.set_u16_bit(central + 8, patch.flags)?;
-        if let Some((method, crc, size)) = patch.fields {
+        if let Some((method, crc, size, csize)) = patch.fields {
             let size = u32::try_from(size).unwrap_or(u32::MAX);
+            let csize = u32::try_from(csize).unwrap_or(u32::MAX);
             self.write_at(local + 8, &method.to_le_bytes())?;
             self.write_at(local + 14, &crc.to_le_bytes())?;
+            self.write_at(local + 18, &csize.to_le_bytes())?;
             self.write_at(local + 22, &size.to_le_bytes())?;
             self.write_at(central + 10, &method.to_le_bytes())?;
             self.write_at(central + 16, &crc.to_le_bytes())?;
+            self.write_at(central + 20, &csize.to_le_bytes())?;
             self.write_at(central + 24, &size.to_le_bytes())?;
         }
         Ok(())
@@ -139,7 +142,6 @@ pub struct RubyOut {
 }
 
 const SEEK_SET: i64 = 0;
-const SEEK_END: i64 = 2;
 
 impl RubyOut {
     fn new(io: Value, attached: Arc<AtomicBool>) -> Result<Self, Error> {
@@ -164,17 +166,32 @@ impl RubyOut {
         Ok(Some(ruby.get_inner(self.io)))
     }
 
-    /// Moves the object to `pos` if it is not there already.
+    /// Moves the object to `pos`. Always a seek, even when the object
+    /// ought to be there already: a reader over the same IO (an archive
+    /// being rewritten into the file it is read from) moves it between
+    /// writes.
     fn sync(&mut self) -> io::Result<Option<Value>> {
         let Some(io) = self.value()? else {
             return Ok(None);
         };
-        if self.io_pos != self.pos {
-            io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
-                .map_err(ruby_io_error)?;
-            self.io_pos = self.pos;
-        }
+        io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
+            .map_err(ruby_io_error)?;
+        self.io_pos = self.pos;
         Ok(Some(io))
+    }
+
+    /// Cuts the object off at the end of the archive, so that rewriting a
+    /// shorter archive into an IO leaves no stale tail with a second end
+    /// of central directory record in it.
+    fn truncate_to_end(&mut self) -> io::Result<()> {
+        let Some(io) = self.value()? else {
+            return Ok(());
+        };
+        if io.respond_to("truncate", false).map_err(ruby_io_error)? {
+            io.funcall::<_, _, Value>("truncate", (self.end as i64,))
+                .map_err(ruby_io_error)?;
+        }
+        Ok(())
     }
 
     /// Leaves the object positioned at the end of the archive, where
@@ -253,19 +270,10 @@ impl Seek for RubyOut {
         self.pos = match pos {
             SeekFrom::Start(p) => p,
             SeekFrom::Current(o) => offset(self.pos, o)?,
-            SeekFrom::End(o) => {
-                let len = match self.value()? {
-                    Some(io) => {
-                        io.funcall::<_, _, Value>("seek", (0i64, SEEK_END))
-                            .map_err(ruby_io_error)?;
-                        let len: u64 = io.funcall("tell", ()).map_err(ruby_io_error)?;
-                        self.io_pos = len;
-                        len
-                    }
-                    None => self.end,
-                };
-                offset(len, o)?
-            }
+            // The end of the archive, not of the object: rewriting a
+            // shorter archive into an IO must not land its central
+            // directory after the stale tail of the old one.
+            SeekFrom::End(o) => offset(self.end, o)?,
         };
         Ok(self.pos)
     }
@@ -326,18 +334,18 @@ struct State {
     pending: Option<Pending>,
 }
 
-/// What the crate wrote for an entry is not quite right in two cases, and
-/// `finish` corrects it in both headers afterwards: a raw-copied ZipCrypto
-/// entry loses its encryption flag (the crate cannot write that cipher),
-/// and an entry this writer encrypts itself goes to the crate as a Stored
-/// entry of ciphertext, so its method, CRC and size describe the
-/// plaintext only after the patch.
+/// What the crate wrote for an entry is not quite right for ZipCrypto,
+/// which it cannot write, and `finish` corrects it in both headers
+/// afterwards: such an entry goes to the crate as a Stored entry whose
+/// content is the ciphertext (and, when bit 3 is set, the data
+/// descriptor), so its method, CRC, sizes and flags describe the real
+/// entry only after the patch.
 struct Patch {
     index: usize,
     /// General purpose flag bits to set.
     flags: u16,
-    /// Compression method, CRC-32 and uncompressed size to write.
-    fields: Option<(u16, u32, u64)>,
+    /// Compression method, CRC-32, uncompressed and compressed size.
+    fields: Option<(u16, u32, u64, u64)>,
 }
 
 /// A ZipCrypto entry in progress: the data is deflated here (if at all),
@@ -349,6 +357,8 @@ struct Pending {
     deflate: Option<flate2::write::DeflateEncoder<Vec<u8>>>,
     crc: crc32fast::Hasher,
     size: u64,
+    /// Encryption header and ciphertext written so far.
+    csize: u64,
 }
 
 impl Pending {
@@ -364,24 +374,50 @@ impl Pending {
             None => std::mem::take(&mut bytes),
         };
         self.keys.encrypt(&mut out);
+        self.csize += out.len() as u64;
         Ok(out)
     }
 
-    /// Flushes the compressor; returns the last ciphertext and the patch.
+    /// Flushes the compressor; returns the last ciphertext, followed by
+    /// the data descriptor, and the patch.
     fn seal(mut self) -> io::Result<(Vec<u8>, Patch)> {
         let mut out = match self.deflate.take() {
             Some(encoder) => encoder.finish()?,
             None => Vec::new(),
         };
         self.keys.encrypt(&mut out);
+        self.csize += out.len() as u64;
+        let crc = self.crc.finalize();
+        out.extend_from_slice(&data_descriptor(crc, self.csize, self.size)?);
         let patch = Patch {
             index: self.index,
             // Encrypted, and (bit 3) the check byte is the DOS time's.
             flags: ENCRYPTED_FLAG | DATA_DESCRIPTOR_FLAG,
-            fields: Some((self.method, self.crc.finalize(), self.size)),
+            fields: Some((self.method, crc, self.size, self.csize)),
         };
         Ok((out, patch))
     }
+}
+
+/// The data descriptor that follows an entry whose header has bit 3 set.
+/// The check byte of a ZipCrypto entry written in one pass has to come
+/// from the DOS time, which is what bit 3 declares, and readers that
+/// take the flag at its word (Info-ZIP's overlap check, for one) expect
+/// the descriptor after the data. ZipCrypto entries stay below 4 GiB,
+/// so the sizes are 32-bit.
+fn data_descriptor(crc: u32, csize: u64, size: u64) -> io::Result<[u8; 16]> {
+    let (Ok(csize), Ok(size)) = (u32::try_from(csize), u32::try_from(size)) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ZipCrypto entries of 4 GiB or more are not supported",
+        ));
+    };
+    let mut out = [0u8; 16];
+    out[..4].copy_from_slice(&DATA_DESCRIPTOR_SIGNATURE.to_le_bytes());
+    out[4..8].copy_from_slice(&crc.to_le_bytes());
+    out[8..12].copy_from_slice(&csize.to_le_bytes());
+    out[12..].copy_from_slice(&size.to_le_bytes());
+    Ok(out)
 }
 
 /// Finishes a ZipCrypto entry in progress, if any, before the writer
@@ -404,6 +440,10 @@ const ENCRYPTED_FLAG: u16 = 1;
 /// General purpose flag bit 3: sizes may follow the data, and (what
 /// matters here) a ZipCrypto check byte comes from the DOS time.
 const DATA_DESCRIPTOR_FLAG: u16 = 8;
+/// "PK\x07\x08", the optional signature that opens a data descriptor.
+const DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
+/// The ZipCrypto encryption header that precedes the ciphertext.
+const ZIPCRYPTO_HEADER_LEN: u64 = 12;
 
 /// Per-entry settings, read from the Hash Ruby passes to `start_entry`.
 struct EntryOptions {
@@ -424,6 +464,9 @@ struct EntryOptions {
     central_extra: Vec<u8>,
     password: Option<Vec<u8>>,
     aes_mode: Option<u8>,
+    /// For `copy_zipcrypto`: the source entry was written in one pass
+    /// (bit 3), so a data descriptor follows its data.
+    descriptor: bool,
     /// Encrypt with ZipCrypto (using `password`) rather than AES.
     zipcrypto: bool,
 }
@@ -476,7 +519,18 @@ impl EntryOptions {
                 .map(bool::try_convert)
                 .transpose()?
                 .unwrap_or(false),
+            descriptor: opt("descriptor")?
+                .map(bool::try_convert)
+                .transpose()?
+                .unwrap_or(false),
         })
+    }
+
+    /// The modification time the headers carry: the entry's DOS time, or
+    /// the crate's default when that pair is not a valid date.
+    fn last_modified(&self) -> DateTime {
+        DateTime::try_from_msdos(self.dos_date, self.dos_time)
+            .unwrap_or_else(|_| DateTime::default_for_write())
     }
 
     /// The deflate level for data this writer compresses itself.
@@ -488,33 +542,31 @@ impl EntryOptions {
     }
 
     fn to_file_options(&self, ruby: &Ruby) -> Result<FullFileOptions<'_, 'static>, Error> {
-        let method = match self.method {
-            0 => CompressionMethod::Stored,
-            8 => CompressionMethod::Deflated,
-            12 if !self.zipcrypto => CompressionMethod::Bzip2,
-            93 if !self.zipcrypto => CompressionMethod::Zstd,
-            other => {
-                return Err(Error::new(
-                    ruby.exception_arg_error(),
-                    format!("unsupported compression method for writing: {other}"),
-                ))
-            }
-        };
         // A ZipCrypto entry reaches the crate as Stored ciphertext whose
-        // 32-bit header fields are patched later, so no zip64 fields.
+        // 32-bit header fields are patched later, so no zip64 fields; the
+        // real method is this writer's business (see `Pending`).
         let (method, large_file) = if self.zipcrypto {
             (CompressionMethod::Stored, false)
         } else {
+            let method = match self.method {
+                0 => CompressionMethod::Stored,
+                8 => CompressionMethod::Deflated,
+                12 => CompressionMethod::Bzip2,
+                93 => CompressionMethod::Zstd,
+                other => {
+                    return Err(Error::new(
+                        ruby.exception_arg_error(),
+                        format!("unsupported compression method for writing: {other}"),
+                    ))
+                }
+            };
             (method, self.large_file)
         };
         let mut options = FullFileOptions::default()
             .compression_method(method)
             .compression_level(self.level)
             .large_file(large_file)
-            .last_modified_time(
-                DateTime::try_from_msdos(self.dos_date, self.dos_time)
-                    .unwrap_or_else(|_| DateTime::default_for_write()),
-            );
+            .last_modified_time(self.last_modified());
         if let Some(perms) = self.unix_perms {
             options = options.unix_permissions(perms);
         }
@@ -602,6 +654,15 @@ impl Writer {
     ) -> Result<(), Error> {
         let name = unsafe { name.as_slice() }.to_vec();
         let options = EntryOptions::from_hash(ruby, opts)?;
+        if options.zipcrypto && !matches!(options.method, 0 | 8) {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!(
+                    "ZipCrypto entries can be Stored or Deflated, not method {}",
+                    options.method
+                ),
+            ));
+        }
         let file_options = options.to_file_options(ruby)?;
         // Starting an entry flushes the previous one's compressor, which is
         // real work for a large entry; nothing Ruby-owned is touched unless
@@ -610,28 +671,33 @@ impl Writer {
             maybe_without_gvl(rb_self.needs_gvl, || -> ZipResult<()> {
                 seal_pending(state, w)?;
                 w.start_file_with_options(file_options.name(&name))?;
+                // The crate has the entry from here on, whatever happens
+                // to the rest; later patches count on the index.
+                let index = state.count;
+                state.count += 1;
                 if options.zipcrypto {
                     let password = options.password.as_deref().unwrap_or_default();
                     let mut keys = zipcrypto::Keys::new(password);
-                    let header = keys.header((options.dos_time >> 8) as u8)?;
+                    // The check byte is the high byte of the DOS time the
+                    // header carries, which is what the crate wrote.
+                    let header = keys.header((options.last_modified().timepart() >> 8) as u8)?;
                     w.write_all(&header)?;
                     let deflate = (options.method == 8).then(|| {
                         flate2::write::DeflateEncoder::new(Vec::new(), options.flate_level())
                     });
                     state.pending = Some(Pending {
-                        index: state.count,
+                        index,
                         keys,
                         method: options.method,
                         deflate,
                         crc: crc32fast::Hasher::new(),
                         size: 0,
+                        csize: ZIPCRYPTO_HEADER_LEN,
                     });
                 }
                 Ok(())
             })
-            .map_err(|e| entry_error(ruby, &name, e))?;
-            state.count += 1;
-            Ok(())
+            .map_err(|e| entry_error(ruby, &name, e))
         })
     }
 
@@ -746,6 +812,59 @@ impl Writer {
         })
     }
 
+    /// Copies ZipCrypto entry `index` of `archive` byte for byte, under
+    /// the name and options Ruby passes (its extra fields, comment, time
+    /// and permissions, so a rename or chmod is carried too). The crate's
+    /// raw copy cannot write such an entry faithfully: it drops the
+    /// encryption flag and, for one written in a single pass (bit 3), the
+    /// data descriptor after the ciphertext, so the entry goes in as
+    /// Stored content and the headers are patched in `finish`, exactly as
+    /// for an entry this writer encrypts itself.
+    pub fn copy_zipcrypto(
+        ruby: &Ruby,
+        rb_self: &Self,
+        archive: &Archive,
+        index: usize,
+        name: RString,
+        opts: RHash,
+    ) -> Result<(), Error> {
+        let needs_gvl = archive.needs_gvl() || rb_self.needs_gvl;
+        let name = unsafe { name.as_slice() }.to_vec();
+        let options = EntryOptions::from_hash(ruby, opts)?;
+        let file_options = options.to_file_options(ruby)?;
+        // A clone, so the archive's borrow is released before the GVL is.
+        let mut source = archive.archive(ruby)?.clone();
+        rb_self.with_state(ruby, |state, w| {
+            maybe_without_gvl(needs_gvl, || -> ZipResult<()> {
+                seal_pending(state, w)?;
+                let mut file = source.by_index_raw(index)?;
+                let (crc, size, csize) = (file.crc32(), file.size(), file.compressed_size());
+                w.start_file_with_options(file_options.name(&name))?;
+                let index = state.count;
+                state.count += 1;
+                let copied = io::copy(&mut file, w)?;
+                if copied != csize {
+                    return Err(ZipError::InvalidArchive(
+                        format!("entry has {copied} bytes of data, not the {csize} declared")
+                            .into(),
+                    ));
+                }
+                let mut flags = ENCRYPTED_FLAG;
+                if options.descriptor {
+                    w.write_all(&data_descriptor(crc, csize, size)?)?;
+                    flags |= DATA_DESCRIPTOR_FLAG;
+                }
+                state.patches.push(Patch {
+                    index,
+                    flags,
+                    fields: Some((options.method, crc, size, csize)),
+                });
+                Ok(())
+            })
+            .map_err(|e| entry_error(ruby, &name, e))
+        })
+    }
+
     pub fn set_comment(ruby: &Ruby, rb_self: &Self, comment: RString) -> Result<(), Error> {
         let bytes = unsafe { comment.as_slice() }.to_vec().into_boxed_slice();
         rb_self.with_writer(ruby, |w| {
@@ -807,9 +926,10 @@ impl Writer {
                 sink = reread.into_inner();
                 for (patch, (local, central)) in patches.iter().zip(targets) {
                     sink.apply(patch, local, central)?;
-                    if let Some((_, crc, size)) = patch.fields {
+                    if let Some((_, crc, size, csize)) = patch.fields {
                         if let Some(stat) = stats.get_mut(patch.index) {
                             stat[1] = size;
+                            stat[2] = csize;
                             stat[3] = u64::from(crc);
                         }
                     }
@@ -817,6 +937,7 @@ impl Writer {
             }
             sink.flush()?;
             if let Sink::Ruby(w) = &mut sink {
+                w.get_mut().truncate_to_end()?;
                 w.get_mut().seek_to_end()?;
             }
             Ok((sink, stats))
@@ -905,7 +1026,7 @@ fn utf8_text(ruby: &Ruby, what: &str, text: RString) -> Result<String, Error> {
 fn entry_error(ruby: &Ruby, name: &[u8], err: ZipError) -> Error {
     match &err {
         ZipError::InvalidArchive(msg) if msg.starts_with("Duplicate filename") => Error::new(
-            ruby.get_inner(&ERROR),
+            ruby.get_inner(&NATIVE_DUPLICATE_ENTRY_ERROR),
             format!(
                 "entry {:?} was already written to this stream",
                 String::from_utf8_lossy(name)

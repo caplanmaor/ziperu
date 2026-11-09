@@ -57,16 +57,29 @@ module Ziperu
 
         zos = new(file_name, stream: false, encrypter: encrypter,
                              suppress_extra_fields: suppress_extra_fields, **opts)
-        yield zos
-      ensure
-        zos.close if zos
+        result =
+          begin
+            yield zos
+          rescue Exception # rubocop:disable Lint/RescueException
+            # The archive is abandoned: the entries written so far must
+            # not learn offsets and sizes from it.
+            zos.abort
+            raise
+          end
+        zos.close
+        result
       end
 
       # Same as #open but writes to an IO instead; returns the IO.
       def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false, **opts)
         zos = new(io, stream: true, encrypter: encrypter,
                       suppress_extra_fields: suppress_extra_fields, **opts)
-        yield zos
+        begin
+          yield zos
+        rescue Exception # rubocop:disable Lint/RescueException
+          zos.abort
+          raise
+        end
         zos.close_buffer
       end
     end
@@ -80,6 +93,17 @@ module Ziperu
       finish_archive
       @io.close if @io && @io.respond_to?(:close)
       @closed = true
+      nil
+    end
+
+    # Closes the stream after a failure: the native writer is released,
+    # but the entries written so far are left as they were, since the
+    # archive they were written to is not going to be used.
+    def abort # :nodoc:
+      @aborted = true
+      @io ? close_buffer : close
+    rescue StandardError
+      # Nothing to add to the exception already on its way.
       nil
     end
 
@@ -129,6 +153,8 @@ module Ziperu
         raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
       end
 
+      return copy_encrypted_entry(entry, new_name) if entry.zipcrypto?
+
       touch_opts =
         if touch && new_name.nil?
           time = DOSTime.from_time(entry.time)
@@ -140,9 +166,32 @@ module Ziperu
       @current_entry = nil
     end
 
+    # Copies a ZipCrypto entry byte for byte. The native raw copy cannot
+    # write one faithfully (it rebuilds the headers without the cipher's
+    # flags and descriptor), so the ciphertext goes in under the entry's
+    # own headers: name, time, permissions, extra fields and comment are
+    # all taken from the entry, so a rename or chmod is carried too.
+    def copy_encrypted_entry(entry, new_name = nil) # :nodoc:
+      raise Error, 'zip stream is closed' if @closed
+      raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
+      if entry.index.nil?
+        raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
+      end
+
+      opts = native_entry_options(entry).merge(
+        zipcrypto: true, descriptor: entry.gp_flags & 8 != 0 # bit 3: data descriptor follows
+      )
+      @writer.copy_zipcrypto(entry.archive, entry.index, (new_name || entry.name).b, opts)
+      @written << entry
+      @current_entry = nil
+    end
+
     # Modeled after IO.<<
     def <<(data)
       raise IOError, 'closed stream' if @closed || @current_entry.nil?
+      if @current_entry.directory?
+        raise Error, "cannot write data to directory entry '#{@current_entry.name}'"
+      end
 
       @writer.write(data.to_s.b)
       self
@@ -156,9 +205,18 @@ module Ziperu
 
       @writer.comment = comment
       @current_entry = nil
-      bytes, stats = @writer.finish
-      stats.each_with_index do |(offset, size, compressed_size, crc), i|
-        @written[i].written_as(offset, size, compressed_size, crc)
+      begin
+        bytes, stats = @writer.finish
+      rescue IOError => e
+        raise unless @io && e.message.include?('not opened for reading')
+
+        raise Error, 'finishing an archive with ZipCrypto entries reads its headers back, which ' \
+                     "the IO given does not allow (#{e.message}); open it for reading and writing"
+      end
+      unless @aborted
+        stats.each_with_index do |(offset, size, compressed_size, crc), i|
+          @written[i].written_as(offset, size, compressed_size, crc)
+        end
       end
       # A seekable IO already holds the archive; a pipe gets it now.
       return unless bytes && @io
@@ -181,6 +239,8 @@ module Ziperu
         opts.merge!(@encrypter.native_options)
         @writer.start_entry(entry.name.b, opts)
       end
+    rescue Native::DuplicateEntryError
+      raise EntryExistsError.new('put_next_entry', entry.name)
     end
 
     # Translate a Ziperu::Entry into the Hash the native writer takes.

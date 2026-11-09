@@ -14,4 +14,13 @@ module TestHelper
   def fixture(name)
     File.join(DATA_DIR, name)
   end
+
+  # The Python interpreter to cross-check archives with, or nil.
+  def python
+    return @python if defined?(@python)
+
+    @python = %w[python3 python].find do |cmd|
+      system(cmd, "-c", "import zipfile", out: File::NULL, err: File::NULL)
+    end
+  end
 end

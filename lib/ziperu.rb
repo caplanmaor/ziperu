@@ -21,8 +21,23 @@ require_relative "ziperu/errors"
 # fall back to the one rake-compiler builds for source installs.
 begin
   require "ziperu/#{RUBY_VERSION[/\d+\.\d+/]}/ziperu"
-rescue LoadError
-  require "ziperu/ziperu"
+rescue LoadError => e
+  begin
+    require "ziperu/ziperu"
+  rescue LoadError
+    # RubyGems hands the glibc Linux gem to musl systems (Alpine) and the
+    # bare error names a missing ld-linux; say what to do instead.
+    hint = if e.message.include?("ld-linux") || e.message.include?("musl")
+             " The installed ziperu gem was built for another libc; on Alpine (musl) use " \
+             "`gem install ziperu --platform #{RUBY_PLATFORM}` or " \
+             "`bundle lock --add-platform #{RUBY_PLATFORM}`, or install the source gem with " \
+             "`gem install ziperu --platform ruby` (needs a Rust toolchain)."
+           else
+             " The native extension for Ruby #{RUBY_VERSION} is missing from the installed gem; " \
+             "install the source gem with `gem install ziperu --platform ruby` (needs a Rust toolchain)."
+           end
+    raise LoadError, e.message + hint
+  end
 end
 
 require_relative "ziperu/constants"

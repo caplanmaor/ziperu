@@ -152,9 +152,8 @@ class MigrationTest < Minitest::Test
   def test_input_stream_over_a_non_archive_yields_nothing
     assert_nil Ziperu::InputStream.open(StringIO.new("")) { |zis| zis.get_next_entry }
     assert_nil Ziperu::InputStream.open(StringIO.new("just text")) { |zis| zis.get_next_entry }
-    Ziperu::InputStream.open(fixture("text.zip"), offset: 7) do |zis|
-      assert_nil zis.get_next_entry
-    end
+    # An offset that is not an entry's is an error, as in rubyzip.
+    assert_raises(Ziperu::Error) { Ziperu::InputStream.open(fixture("text.zip"), offset: 7) }
     # A missing file is still an error, as is a closed stream.
     assert_raises(Errno::ENOENT) { Ziperu::InputStream.open(File.join(@tmp, "missing.zip")) }
     zis = Ziperu::InputStream.new(StringIO.new("just text"))

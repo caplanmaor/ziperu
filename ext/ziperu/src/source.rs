@@ -80,15 +80,25 @@ impl Source {
     }
 }
 
-impl Clone for Source {
-    fn clone(&self) -> Self {
+/// Buffer for a clone that reads one header: a central record or a local
+/// header is a few hundred bytes, and a 64 KiB read-ahead per entry is
+/// what made listing a large archive slow.
+const SMALL_BUF_SIZE: usize = 4 * 1024;
+
+impl Source {
+    /// A clone with a small read buffer, for a single header read.
+    pub fn clone_small(&self) -> Self {
+        self.clone_with_capacity(SMALL_BUF_SIZE)
+    }
+
+    fn clone_with_capacity(&self, capacity: usize) -> Self {
         // Position the clone where the logical stream is, not where the
         // buffered reader has read ahead to.
         match self {
             Source::File(r) => {
                 let inner = r.get_ref();
                 Source::File(BufReader::with_capacity(
-                    BUF_SIZE,
+                    capacity,
                     SharedFile {
                         file: Arc::clone(&inner.file),
                         pos: inner.pos - r.buffer().len() as u64,
@@ -99,7 +109,7 @@ impl Clone for Source {
             Source::Ruby(r) => {
                 let inner = r.get_ref();
                 Source::Ruby(BufReader::with_capacity(
-                    BUF_SIZE,
+                    capacity,
                     RubyIo {
                         io: inner.io,
                         pos: inner.pos - r.buffer().len() as u64,
@@ -108,6 +118,12 @@ impl Clone for Source {
                 ))
             }
         }
+    }
+}
+
+impl Clone for Source {
+    fn clone(&self) -> Self {
+        self.clone_with_capacity(BUF_SIZE)
     }
 }
 

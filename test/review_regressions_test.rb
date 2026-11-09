@@ -57,14 +57,14 @@ class ReviewRegressionsTest < Minitest::Test
   end
 
   def test_duplicate_entry_names_are_refused_by_name
-    error = assert_raises(Ziperu::Error) do
+    error = assert_raises(Ziperu::EntryExistsError) do
       Ziperu::OutputStream.write_buffer do |zos|
         zos.put_next_entry("twice.txt")
         zos.write("1")
         zos.put_next_entry("twice.txt")
       end
     end
-    assert_includes error.message, '"twice.txt"'
+    assert_includes error.message, "twice.txt"
   end
 
   def test_an_output_stream_over_an_io_writes_the_archive_on_close

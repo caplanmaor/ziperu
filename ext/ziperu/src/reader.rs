@@ -206,13 +206,17 @@ impl EntryReader {
         let entry = OwnedEntry::open(archive, enforce_size, password, &info)
             .map_err(|e| zip_error(ruby, e))?;
         let size = enforce_size.then_some(info.size);
+        // Nothing to read only when there is no data either: an entry
+        // declared empty but holding data is a lie the crate's size check
+        // should catch.
+        let finished = size == Some(0) && info.compressed_size == 0;
         Ok(Self {
             inner: RefCell::new(Inner {
                 entry: Some(entry),
                 info,
                 size,
                 consumed: 0,
-                finished: size == Some(0),
+                finished,
                 needs_gvl,
             }),
             io,
@@ -316,7 +320,7 @@ impl EntryReader {
             return Err(zip_error(ruby, e));
         }
         *consumed = 0;
-        *finished = *size == Some(0);
+        *finished = *size == Some(0) && info.compressed_size == 0;
         Ok(())
     }
 }

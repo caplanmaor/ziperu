@@ -35,6 +35,11 @@ module Ziperu
     end
 
     def count_entries(io)
+      if io.kind_of?(::String) || (io.respond_to?(:to_path) && !io.respond_to?(:seek))
+        path = io.respond_to?(:to_path) ? io.to_path : io
+        return ::File.open(path, 'rb') { |f| count_entries(f) }
+      end
+
       read_eocds(io)
       @size
     end

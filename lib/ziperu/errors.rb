@@ -150,5 +150,8 @@ module Ziperu
     class SizeLimitError < Ziperu::Error; end
     class PasswordError < Ziperu::Error; end
     class UnsupportedError < Ziperu::Error; end
+    # A second entry under a name the stream already holds; the Ruby
+    # layer re-raises it as `EntryExistsError`.
+    class DuplicateEntryError < Ziperu::Error; end
   end
 end

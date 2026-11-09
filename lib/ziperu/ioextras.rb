@@ -21,7 +21,7 @@ module Ziperu
 
         io.seek(0, ::IO::SEEK_CUR)
         true
-      rescue SystemCallError, IOError
+      rescue SystemCallError, IOError, NotImplementedError
         false
       end
 

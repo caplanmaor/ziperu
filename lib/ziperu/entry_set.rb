@@ -35,9 +35,16 @@ module Ziperu
       old = @entry_set[key]
       return if old.equal?(entry)
 
-      remove_from_all(old) if old
       @entry_set[key] = entry
-      @all << entry
+      # A replacement keeps the old entry's place, as a Hash assignment
+      # does in rubyzip: formats such as EPUB depend on the order.
+      at = old && @all.index { |e| e.equal?(old) }
+      if at
+        @all[at] = entry
+      else
+        remove_from_all(old) if old
+        @all << entry
+      end
     end
 
     alias push <<

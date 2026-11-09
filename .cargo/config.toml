@@ -1,0 +1,11 @@
+# The musl builds link the GCC unwinder statically: Alpine images do not
+# all ship libgcc_s.so.1 (ruby:3.1-alpine does not), and an extension that
+# needs it fails to load there.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-static-libgcc"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-static-libgcc"]
+
+[target.arm-unknown-linux-musleabihf]
+rustflags = ["-C", "link-arg=-static-libgcc"]

@@ -39,6 +39,15 @@ to the Gemfile:
 gem "ziperu"   # instead of gem "rubyzip"
 ```
 
+Precompiled gems cover Linux (glibc as `x86_64-linux-gnu` /
+`aarch64-linux-gnu`, musl as `x86_64-linux-musl` / `aarch64-linux-musl` /
+`arm-linux-musl`), macOS (Intel and Apple silicon) and Windows (x64 and
+ARM64), each holding the extension for Ruby 3.1 through 4.0; Bundler and
+`gem install` pick the right one, and Alpine gets the musl gem. The glibc
+gems need RubyGems 3.3.22 or later (Ruby 3.1.4+ ships it; `gem update
+--system` otherwise). Anywhere else the source gem builds with a Rust
+toolchain (1.88+) on the machine.
+
 If rubyzip has to stay installed during the migration (another gem depends
 on it, say), the two cannot share the `Zip` name: `require "zip"` raises a
 `LoadError` naming the file that already defined `Zip`. Use `require "ziperu"`
@@ -58,11 +67,15 @@ until it goes. Exception classes follow the namespace, so rescue
   `Ziperu.validate_entry_sizes = false` restores rubyzip's behaviour of
   extracting the full data with a warning.
 - ZipCrypto ("traditional") encryption is written by ziperu itself (the
-  crate keeps that broken cipher read-only), with the same header layout
-  rubyzip produces: general purpose bits 0 and 3 set, the check byte from
-  the DOS time. Only Stored and Deflate entries can be encrypted this way,
-  and a committed `Ziperu::File` never encrypts. `AESEncrypter` is the
-  better choice wherever the consumer can open AES.
+  crate keeps that broken cipher read-only), with the header layout
+  rubyzip produces (general purpose bits 0 and 3 set, the check byte from
+  the DOS time) plus the data descriptor bit 3 announces, which rubyzip
+  omits and Info-ZIP's `unzip` insists on. Only Stored and Deflate entries
+  can be encrypted this way, and a committed `Ziperu::File` never
+  encrypts; existing ZipCrypto entries are copied byte for byte. Writing
+  such entries through `write_buffer` into an IO needs one opened for
+  reading and writing (the headers are patched at the end). `AESEncrypter`
+  is the better choice wherever the consumer can open AES.
 - Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
   PKZIP 1.x methods (Shrink, Reduce, Implode) read normally; rubyzip raises
   `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
@@ -81,7 +94,9 @@ until it goes. Exception classes follow the namespace, so rescue
   name in any encoding with the same bytes, so neither `.b` nor
   `force_encoding` is needed to find an entry.
 - Writing two entries with the same name to one `OutputStream` raises
-  `Ziperu::Error`; rubyzip writes both and the last one wins.
+  `Ziperu::EntryExistsError`; rubyzip writes both and the last one wins.
+  Writing data to a directory entry raises `Ziperu::Error`; rubyzip
+  stores it.
 - A CRC mismatch while reading raises `Ziperu::DecompressionError`;
   rubyzip hands back the bytes.
 - Every written file entry carries Unix permissions in its external
@@ -106,8 +121,10 @@ until it goes. Exception classes follow the namespace, so rescue
   shadowed record given a new name before the commit is written afresh.
   `Ziperu::InputStream` yields every record, as rubyzip's does.
 - `Ziperu::InputStream` over something that is not a zip archive at all
-  returns `nil` from the first `get_next_entry`, as rubyzip does; a corrupt
-  archive raises `Ziperu::Error` from `Ziperu::File.open` in both.
+  returns `nil` from the first `get_next_entry`, as rubyzip does. One over
+  an archive whose central directory is cut off or damaged raises
+  `Ziperu::Error`, where rubyzip walks the local headers and yields what
+  it can; `Ziperu::File.open` raises in both.
 - `Zip::VERSION` is ziperu's own version, not rubyzip's. Code that gates on
   it (`Gem::Version.new(Zip::VERSION) >= "3"`) should check
   `Ziperu::RUBYZIP_COMPAT_VERSION` instead.
