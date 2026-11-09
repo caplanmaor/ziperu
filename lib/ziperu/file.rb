@@ -47,8 +47,18 @@ module Ziperu
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Ziperu.default_compression,
-                   suppress_extra_fields: false, password: nil, decrypter: nil)
+                   suppress_extra_fields: false, password: nil, decrypter: nil,
+                   write: true)
       super()
+
+      # Where changes go on commit. `true`: back into the archive opened,
+      # as rubyzip does. `false`: nowhere; the archive is read-only and
+      # any change raises. A path: a new archive is written there with the
+      # changes, and the one opened is left as it was.
+      @write_to = write.kind_of?(::String) || write.respond_to?(:to_path) ? IOExtras.path_of(write) : nil
+      @read_only = write == false
+      raise ArgumentError, 'create: true and write: false contradict each other' if @read_only && create
+      raise ArgumentError, 'write: takes true, false or a path' unless write == true || @read_only || @write_to
 
       # One password for the archive: `read`, `get_input_stream`,
       # `extract`, `extract_all` and `verify` decrypt with it (AES or
@@ -84,6 +94,15 @@ module Ziperu
       @compression_level     = compression_level
       @suppress_extra_fields = suppress_extra_fields
     end
+
+    # Opened with `write: false`: nothing can be changed.
+    def read_only?
+      @read_only
+    end
+
+    # The path changes are written to on commit (`write: path`), or nil
+    # when they go back into the archive opened.
+    attr_reader :write_to
 
     class << self
       include FileSplit
@@ -121,6 +140,9 @@ module Ziperu
       # Like #open (same keywords), but reads zip archive contents from a
       # String or open IO stream, and outputs data to a buffer.
       def open_buffer(io = ::StringIO.new, **options)
+        if options[:write].kind_of?(::String) || options[:write].respond_to?(:to_path)
+          raise ArgumentError, 'open_buffer takes write: true or false, not a path'
+        end
         unless IO_METHODS.all? { |method| io.respond_to?(method) } || io.kind_of?(String)
           raise 'Ziperu::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
@@ -138,6 +160,7 @@ module Ziperu
         return zf unless block_given?
 
         yield zf
+        return io if zf.read_only?
 
         begin
           zf.write_buffer(io)
@@ -187,6 +210,7 @@ module Ziperu
     end
 
     def comment=(comment)
+      check_writable!
       @dirty = true
       @comment_changed = true
       @comment = comment
@@ -204,6 +228,7 @@ module Ziperu
     # to the block and closed afterwards.
     def get_output_stream(entry, *legacy, permissions: nil, compression_level: nil, **entry_opts,
                           &a_proc)
+      check_writable!
       # rubyzip 2.x's positional form, `(name, 0o644)` mostly.
       given = Compat.positional(
         legacy, %i[permissions comment extra compressed_size crc compression_method size time],
@@ -239,6 +264,7 @@ module Ziperu
 
     # Convenience method for adding the contents of a file to the archive
     def add(entry, src_path, &continue_on_exists_proc)
+      check_writable!
       continue_on_exists_proc ||= proc { ::Ziperu.continue_on_exists_proc }
       check_entry_exists(entry, continue_on_exists_proc, 'add')
       new_entry = if entry.kind_of?(::Ziperu::Entry)
@@ -290,6 +316,7 @@ module Ziperu
 
     # Removes the specified entry.
     def remove(entry)
+      check_writable!
       found_entry = get_entry(entry)
       @dirty = true
       @cdir.delete(found_entry)
@@ -297,6 +324,7 @@ module Ziperu
 
     # Renames the specified entry.
     def rename(entry, new_name, &continue_on_exists_proc)
+      check_writable!
       found_entry = get_entry(entry)
       new_name = new_name.to_path if new_name.respond_to?(:to_path)
       check_entry_exists(new_name, continue_on_exists_proc, 'rename')
@@ -310,6 +338,7 @@ module Ziperu
     # Replaces the specified entry with the contents of src_path (from
     # the file system).
     def replace(entry, src_path)
+      check_writable!
       check_file(src_path)
       remove(entry)
       add(entry, src_path)
@@ -401,7 +430,14 @@ module Ziperu
     def commit
       return if name.kind_of?(StringIO) || !commit_required?
 
-      if (appended = appended_entries)
+      if @write_to
+        # The changes go to a new archive; the one opened is not touched,
+        # and keeps being what this object reads.
+        ::Ziperu::OutputStream.open(@write_to, suppress_extra_fields: @suppress_extra_fields) do |zos|
+          @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
+          zos.comment = comment
+        end
+      elsif (appended = appended_entries)
         # Only additions: they go after the entries already there, which
         # are left untouched (see Ziperu.append_in_place). A failure puts
         # the archive back as it was.
@@ -495,6 +531,12 @@ module Ziperu
       @password
     end
 
+    # Raises when the archive was opened with `write: false`.
+    def check_writable!
+      raise Error, "#{name} was opened read-only (write: false)" if @read_only
+    end
+    private :check_writable!
+
     def commit_required?
       return true if @create || @dirty
 
@@ -528,6 +570,7 @@ module Ziperu
 
     # Creates a directory
     def mkdir(entry_name, permission = 0o755)
+      check_writable!
       raise Errno::EEXIST, "File exists - #{entry_name}" if find_entry(entry_name)
 
       entry_name = entry_name.dup.to_s

@@ -124,6 +124,11 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **Non-destructive open.** `Ziperu::File.open(path, write: false)` is
+  read-only: any change raises, and `close` never touches the file, where
+  rubyzip's `open` rewrites the archive on close (and has lost content
+  that way). `write: "other.zip"` writes the changes to a new archive and
+  leaves the one opened as it was.
 - **A password on the archive.** `Ziperu::File.open(path, password: "...")`
   (or `decrypter:`) makes `read`, `get_input_stream`, `extract`,
   `extract_all` and `verify` decrypt every entry, AES and ZipCrypto alike;

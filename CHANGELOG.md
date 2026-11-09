@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `Ziperu::File.open(path, write: false)` opens an archive read-only:
+  any change raises and `close` never writes, where rubyzip rewrites the
+  archive on close. `write: "other.zip"` writes the changes to a new
+  archive and leaves the one opened as it was.
 - `OutputStream.write_buffer(io)` and `Ziperu::File#write_buffer(io)`
   stream to an IO that cannot seek (a pipe, a socket, a response body, an
   upload): each entry goes out as it is written, with its sizes in a data

@@ -129,13 +129,17 @@ end
 ```
 
 Add files to an archive you already have (appended in place, the rest is
-not rewritten), or replace one:
+not rewritten), or replace one; or keep the original and write the
+changed archive elsewhere:
 
 ```ruby
 Ziperu::File.open("backup.zip") do |zf|
   zf.add("logs/today.log", "/var/log/app/today.log")
   zf.get_output_stream("manifest.json") { |io| io.write(manifest.to_json) }
 end
+
+Ziperu::File.open("backup.zip", write: "backup-2.zip") { |zf| zf.remove("old.log") }
+Ziperu::File.open("backup.zip", write: false) { |zf| zf.read("manifest.json") }  # read-only
 ```
 
 Pick one entry out of a large archive, or read it all as a stream:
