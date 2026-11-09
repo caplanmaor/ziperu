@@ -377,7 +377,9 @@ class HardeningTest < Minitest::Test
     Ziperu::File.open(file) do |zf|
       refute zf.commit_required?
       zf.get_entry("short.txt").extra.merge([0x7777, 2].pack("vv") + "AB")
-      assert zf.commit_required?
+      # Written with the next commit; alone it does not call for one.
+      refute zf.commit_required?
+      zf.mkdir("x")
     end
     Ziperu::File.open(file) do |zf|
       assert_includes zf.get_entry("short.txt").extra.keys, :unknown
@@ -423,6 +425,36 @@ class HardeningTest < Minitest::Test
         flunk "sysread never returns nil over a pipe" if reads > 3
       end
       assert_equal "after", (is.get_next_entry && is.read)
+    end
+  end
+
+  def test_bad_names_and_comments_fail_at_the_call_site
+    Ziperu::File.open(fixture("text.zip")) do |zf|
+      e = zf.get_entry("short.txt")
+      assert_raises(Ziperu::EntryNameError) { e.name = "/abs.txt" }
+      assert_raises(Ziperu::EntryNameError) { zf.rename("short.txt", "x" * 70_000) }
+      assert_raises(Ziperu::Error) { e.comment = "c" * 70_000 }
+      assert_equal "short.txt", e.name
+      refute zf.commit_required?
+    end
+  end
+
+  def test_open_buffer_refuses_a_pipe
+    r, w = IO.pipe
+    e = assert_raises(ArgumentError) { Ziperu::File.open_buffer(r) }
+    assert_match(/seekable/, e.message)
+    w.close
+    r.close
+  end
+
+  def test_native_extraction_errors_name_the_path
+    dest = path("dest")
+    FileUtils.mkdir_p(dest)
+    # "dir" must become a directory, but a file is in the way of its parent.
+    File.write(File.join(dest, "dir"), "not a directory")
+    Ziperu::File.open(fixture("text.zip")) do |zf|
+      err = assert_raises(SystemCallError, Ziperu::DestinationExistsError) { zf.extract_all(dest) }
+      assert_includes err.message, "dir"
     end
   end
 

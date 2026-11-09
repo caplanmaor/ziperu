@@ -30,9 +30,10 @@ module Ziperu
     COMPRESSION_LEVEL_FAST_GPFLAG = 0b100      # :nodoc:
     COMPRESSION_LEVEL_MAX_GPFLAG = 0b010       # :nodoc:
 
-    attr_accessor :comment, :compressed_size, :follow_symlinks, :name,
+    attr_accessor :compressed_size, :follow_symlinks,
                   :restore_ownership, :restore_permissions, :restore_times,
                   :unix_gid, :unix_perms, :unix_uid
+    attr_reader :comment, :name
 
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
                   :internal_file_attributes, :local_header_offset # :nodoc:
@@ -55,13 +56,13 @@ module Ziperu
       @extra
     end
 
-    # Whether the extra fields differ from what the archive holds.
+    # Whether the extra fields differ from what the archive holds. Such an
+    # edit is written whenever the archive is next committed, but does not
+    # call for a commit by itself, as in rubyzip: `FileSystem#chown` edits
+    # them in place and rubyzip's own tests count on `close` leaving the
+    # archive alone after it.
     def extra_changed? # :nodoc:
       !@extra_snapshot.nil? && @extra_snapshot != extra_bytes
-    end
-
-    def dirty? # :nodoc:
-      super || extra_changed?
     end
 
     def extra_bytes # :nodoc:
@@ -90,6 +91,23 @@ module Ziperu
     # address by index: one of several records under the same name, which
     # is read from its local header offset instead.
     attr_reader :index # :nodoc:
+
+    # Validated here rather than when the archive is written, so a bad
+    # value fails at the call site (rubyzip writes a corrupt header).
+    def name=(name)
+      name = name.to_s
+      check_name(name)
+      @name = name
+    end
+
+    def comment=(comment)
+      comment = comment.to_s
+      if comment.bytesize > 0xFFFF
+        raise Error, "entry comment is #{comment.bytesize} bytes; the limit is 65535"
+      end
+
+      @comment = comment
+    end
 
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,

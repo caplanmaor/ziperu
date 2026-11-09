@@ -23,6 +23,7 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 - **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, and unchanged entries are copied byte for byte on commit.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, AES and ZipCrypto.
 - **Safe by default**: no entry inflates past its declared size, extraction never escapes the destination, symlinks are opt-in, and archive limits can be set up front.
+- **Friendlier than rubyzip where it costs nothing**: a password on the archive (`File.open(path, password: ...)`), `add` from an IO, Pathname arguments, `File#verify`, progress callbacks, and errors that fail at the call site.
 - **Checked against the field**: rubyzip's own test suite, differential fuzzing against Python's `zipfile` and rubyzip, and interoperability runs with Info-ZIP, 7-Zip and Python on every push.
 
 ## Installation
@@ -67,6 +68,11 @@ end
 Ziperu::OutputStream.write_buffer do |zos|   # a StringIO, for a response body
   zos.put_next_entry("hello.txt")
   zos.write("hello")
+end
+
+Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
+  zf.extract_all("out/")
+  zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit
 end
 ```
 

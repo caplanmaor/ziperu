@@ -106,6 +106,18 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **A password on the archive.** `Ziperu::File.open(path, password: "...")`
+  (or `decrypter:`) makes `read`, `get_input_stream`, `extract`,
+  `extract_all` and `verify` decrypt every entry, AES and ZipCrypto alike;
+  `InputStream.open` takes `password:` too. rubyzip decrypts only through
+  `InputStream`, given a decrypter object.
+- **`add` from an IO.** `zf.add("name", io)` takes any object with `read`
+  (a File, StringIO, Tempfile or pipe) and streams it when the archive is
+  written; the entry reads and extracts from it before then.
+- **Errors at the call site.** `Entry#name=` and `#comment=` validate
+  (leading `/`, more than 65,535 bytes) when called, and
+  `File.open_buffer` refuses a pipe or socket with an `ArgumentError`,
+  where rubyzip blocks or writes a corrupt header.
 - **Archive limits.** `Ziperu.max_entries` and `Ziperu.max_total_size`
   (declared uncompressed bytes) make `Ziperu::File.open` and
   `Ziperu::InputStream.open` raise `Ziperu::LimitError` before any entry is

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- `Ziperu::File.open(path, password: "...")` (or `decrypter:`) decrypts
+  every entry for `read`, `get_input_stream`, `extract`, `extract_all` and
+  `verify`, AES and ZipCrypto alike; `InputStream.open` takes `password:`
+  too. rubyzip only decrypts through `InputStream` with a decrypter object.
+- `Ziperu::File#add(name, io)` takes any object with `read` (a File,
+  StringIO, Tempfile or pipe) as the source; it is streamed when the
+  archive is written, and the entry reads and extracts from it before then.
+- `InputStream` gains `getc`, `getbyte`, `readchar`, `readbyte`,
+  `ungetbyte`, `each_byte`, `each_char`, `readpartial`, `read_nonblock`,
+  `binmode` and the other IO bits; `ungetc` takes a String or a byte.
+- `Entry#name=` and `#comment=` validate at the call site (a leading `/`,
+  more than 65,535 bytes) instead of failing when the archive is written.
+- `Ziperu::File.open_buffer` refuses a pipe or socket with an
+  `ArgumentError` instead of blocking forever; `InputStream` reads those.
+- Errors from the native `extract_all` name the path, as `Errno::*`.
+- Walking a large archive with `InputStream` is about 2.5x faster (each
+  entry read an 8 KiB buffer instead of 64 KiB; large reads bypass it).
+- The committed COMPAT.md is now the baseline CI holds rubyzip's test
+  suite to.
+
 ## 0.1.2
 
 Fixes from a review-and-testing round against rubyzip 3.7, Info-ZIP, 7-Zip

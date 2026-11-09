@@ -82,7 +82,10 @@ module Ziperu
         while (sep_index = @output_buffer.index(sep, buffer_index)).nil?
           break if limit && @output_buffer.bytesize >= limit
 
-          if input_finished?
+          # The input ends either before a read or, for an entry whose
+          # data turns out empty, on the read itself (nil).
+          chunk = input_finished? ? nil : produce_input
+          if chunk.nil?
             return nil if @output_buffer.empty?
 
             @lineno = @lineno.next
@@ -91,7 +94,7 @@ module Ziperu
           end
 
           buffer_index = [buffer_index, @output_buffer.bytesize - sep.bytesize].max
-          @output_buffer << produce_input
+          @output_buffer << chunk
         end
 
         limit ||= @output_buffer.bytesize

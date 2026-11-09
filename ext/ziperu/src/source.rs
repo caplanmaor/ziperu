@@ -121,9 +121,15 @@ impl Source {
     }
 }
 
+/// Buffer for a clone that reads an entry. Small on purpose: a tiny entry
+/// costs one fill of this size, while the chunked reads of a large one
+/// (`reader::CHUNK`, and the decoders' own input reads) are bigger than
+/// the buffer and go straight to the source.
+const ENTRY_BUF_SIZE: usize = 8 * 1024;
+
 impl Clone for Source {
     fn clone(&self) -> Self {
-        self.clone_with_capacity(BUF_SIZE)
+        self.clone_with_capacity(ENTRY_BUF_SIZE)
     }
 }
 
@@ -278,7 +284,7 @@ impl Seek for RubyIo {
 
 /// The absolute position `pos` names, given the current one and a way to
 /// find the end.
-fn resolve_seek(
+pub(crate) fn resolve_seek(
     current: u64,
     end: impl FnOnce() -> io::Result<u64>,
     pos: SeekFrom,

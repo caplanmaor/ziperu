@@ -112,6 +112,11 @@ module Ziperu
         end
 
         io = ::StringIO.new(io) if io.kind_of?(::String)
+        # A pipe or socket answers to seek but cannot: reading the central
+        # directory would block forever. `InputStream` reads those.
+        unless io.kind_of?(::StringIO) || IOExtras.seekable?(io)
+          raise ArgumentError, 'Ziperu::File.open_buffer needs a seekable IO; '                                'use Ziperu::InputStream for a pipe or socket'
+        end
 
         zf = ::Ziperu::File.new(io, create: create, buffer: true,
                                  restore_ownership:     restore_ownership,

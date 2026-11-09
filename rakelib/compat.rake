@@ -81,11 +81,17 @@ namespace :compat do
       result
     end
 
+    # The committed COMPAT.md is the baseline: fewer passes than it
+    # records is a regression (COMPAT_ACCEPT=1 to take a new, lower one).
+    baseline = File.read("COMPAT.md")[/\*\*(\d+) of \d+ tests pass/, 1]&.to_i if File.exist?("COMPAT.md")
     write_report(results)
     totals = totals_for(results)
     puts
     puts "#{totals[:passed]}/#{totals[:runs]} rubyzip tests pass (#{percent(totals[:passed], totals[:runs])}%); " \
          "#{totals[:load_errors]} files failed to load. Report: COMPAT.md"
+    if !only && baseline && totals[:passed] < baseline && !ENV["COMPAT_ACCEPT"]
+      abort "rubyzip compatibility regressed: #{totals[:passed]} tests pass, COMPAT.md recorded #{baseline}"
+    end
   end
 end
 
@@ -197,6 +203,6 @@ def write_report(results)
     r[:failed_tests].uniq.sort.each { |t| lines << "- `#{t}`" }
     lines << ""
   end
-  File.write(File.expand_path("../COMPAT.md", __dir__), lines.join("\n") + "\n")
+  File.write(File.expand_path("../COMPAT.md", __dir__), lines.join("\n") + "\n", mode: "wb")
   File.write(File.join(RUBYZIP_DIR, "..", "compat-results.json"), JSON.pretty_generate(results))
 end

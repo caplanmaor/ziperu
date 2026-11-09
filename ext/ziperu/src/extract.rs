@@ -25,7 +25,7 @@ use zip::read::{read_zipfile_from_stream_with_options, ZipReadOptions};
 use zip::result::ZipError;
 use zip::ZipArchive;
 
-use crate::errors::{read_error, zip_error};
+use crate::errors::{io_error, read_error, zip_error};
 use crate::gvl::maybe_without_gvl;
 use crate::source::Source;
 
@@ -58,7 +58,16 @@ enum Failure {
     Exists(String),
     SizeLimit,
     Zip(ZipError),
+    /// Reading the entry failed.
     Io(io::Error),
+    /// Creating or writing `path` failed: raised as the matching `Errno`
+    /// with the path in the message, as Ruby's own File calls do.
+    IoAt(String, io::Error),
+}
+
+/// Attaches `path` to an IO error from a filesystem call on it.
+fn at(path: &Path) -> impl Fn(io::Error) -> Failure + '_ {
+    move |e| Failure::IoAt(path_string(path), e)
 }
 
 impl From<ZipError> for Failure {
@@ -190,6 +199,7 @@ fn raise(ruby: &Ruby, entry: Value, failure: Failure) -> Error {
         Failure::SizeLimit => exception(ruby, &ENTRY_SIZE_ERROR, (entry,)),
         Failure::Zip(e) => zip_error(ruby, e),
         Failure::Io(e) => read_error(ruby, e),
+        Failure::IoAt(path, e) => io_error(ruby, io::Error::new(e.kind(), format!("{e} - {path}"))),
     }
 }
 
@@ -236,14 +246,16 @@ impl Extractor<'_> {
         if path.exists() {
             return Err(Failure::Exists(path_string(path)));
         }
-        fs::create_dir_all(path)?;
+        fs::create_dir_all(path).map_err(at(path))?;
         self.made.insert(path.to_path_buf());
         if let Some(mtime) = spec.mtime {
             let times = FileTimes::new().set_accessed(mtime).set_modified(mtime);
-            open_directory(path)?.set_times(times)?;
+            open_directory(path)
+                .and_then(|dir| dir.set_times(times))
+                .map_err(at(path))?;
         }
         if let Some(mode) = spec.mode {
-            set_mode(path, mode)?;
+            set_mode(path, mode).map_err(at(path))?;
         }
         Ok(())
     }
@@ -251,7 +263,7 @@ impl Extractor<'_> {
     fn create_file(&mut self, path: &Path, spec: &Spec) -> Result<(), Failure> {
         if let Some(parent) = path.parent() {
             if !self.made.contains(parent) {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent).map_err(at(parent))?;
                 self.made.insert(parent.to_path_buf());
             }
         }
@@ -260,14 +272,26 @@ impl Extractor<'_> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {
                 return Err(Failure::Exists(path_string(path)));
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(at(path)(e)),
         };
-        let written = self.copy_entry(spec.index, &mut file)?;
+        let written = self
+            .copy_entry(spec.index, &mut file)
+            .map_err(|f| match f {
+                // Reading the entry is the entry's problem; writing is the path's.
+                Failure::Io(e)
+                    if e.kind() == io::ErrorKind::WriteZero
+                        || e.kind() == io::ErrorKind::StorageFull =>
+                {
+                    at(path)(e)
+                }
+                other => other,
+            })?;
         if let Some(mtime) = spec.mtime {
-            file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))?;
+            file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
+                .map_err(at(path))?;
         }
         if let Some(mode) = spec.mode {
-            set_file_mode(&file, mode)?;
+            set_file_mode(&file, mode).map_err(at(path))?;
         }
         drop(file);
         if !self.enforce_size {

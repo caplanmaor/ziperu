@@ -24,7 +24,7 @@ use zip::{AesMode, CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 use crate::archive::Archive;
 use crate::errors::{busy_error, io_error, zip_error, ERROR, NATIVE_DUPLICATE_ENTRY_ERROR};
 use crate::gvl::maybe_without_gvl;
-use crate::source::ruby_io_error;
+use crate::source::{resolve_seek, ruby_io_error};
 use crate::zipcrypto;
 
 const BUF_SIZE: usize = 64 * 1024;
@@ -134,8 +134,6 @@ pub struct RubyOut {
     attached: Arc<AtomicBool>,
     /// Where the next write or read goes.
     pos: u64,
-    /// Where the object's own position is believed to be.
-    io_pos: u64,
     /// One past the furthest byte written: the archive's end.
     end: u64,
     flushable: bool,
@@ -145,13 +143,11 @@ const SEEK_SET: i64 = 0;
 
 impl RubyOut {
     fn new(io: Value, attached: Arc<AtomicBool>) -> Result<Self, Error> {
-        let io_pos: u64 = io.funcall("tell", ())?;
         Ok(Self {
             flushable: io.respond_to("flush", false)?,
             io: Opaque::from(io),
             attached,
             pos: 0,
-            io_pos,
             end: 0,
         })
     }
@@ -176,7 +172,6 @@ impl RubyOut {
         };
         io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
             .map_err(ruby_io_error)?;
-        self.io_pos = self.pos;
         Ok(Some(io))
     }
 
@@ -229,7 +224,6 @@ impl Write for RubyOut {
             ));
         }
         self.pos += n as u64;
-        self.io_pos = self.pos;
         self.end = self.end.max(self.pos);
         Ok(n)
     }
@@ -260,36 +254,19 @@ impl Read for RubyOut {
         let n = bytes.len().min(buf.len());
         buf[..n].copy_from_slice(&bytes[..n]);
         self.pos += n as u64;
-        self.io_pos = self.pos;
         Ok(n)
     }
 }
 
 impl Seek for RubyOut {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.pos = match pos {
-            SeekFrom::Start(p) => p,
-            SeekFrom::Current(o) => offset(self.pos, o)?,
-            // The end of the archive, not of the object: rewriting a
-            // shorter archive into an IO must not land its central
-            // directory after the stale tail of the old one.
-            SeekFrom::End(o) => offset(self.end, o)?,
-        };
+        // The end is the archive's, not the object's: rewriting a shorter
+        // archive into an IO must not land its central directory after
+        // the stale tail of the old one.
+        let end = self.end;
+        self.pos = resolve_seek(self.pos, || Ok(end), pos)?;
         Ok(self.pos)
     }
-}
-
-fn offset(base: u64, delta: i64) -> io::Result<u64> {
-    (base as i64)
-        .checked_add(delta)
-        .filter(|t| *t >= 0)
-        .map(|t| t as u64)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid seek to a negative or overflowing position",
-            )
-        })
 }
 
 #[derive(TypedData)]
@@ -881,7 +858,7 @@ impl Writer {
             .inner
             .try_borrow_mut()
             .map_err(|_| busy_error(ruby, "writer"))?;
-        let mut writer = state
+        let writer = state
             .writer
             .take()
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
@@ -892,48 +869,11 @@ impl Writer {
         // reads that directory back for the stats and the header patches.
         let needs_gvl = rb_self.needs_gvl;
         let (sink, stats) = maybe_without_gvl(needs_gvl, || -> ZipResult<(Sink, EntryStats)> {
-            if let Some(pending) = pending {
-                let (last, patch) = pending.seal()?;
-                writer.write_all(&last)?;
-                patches.push(patch);
-            }
-            let archive = writer.finish_into_readable()?;
-            let meta = archive.metadata();
-            let mut stats = (0..meta.len())
-                .map(|i| {
-                    let e = meta.entry(i)?;
-                    Ok([
-                        e.header_start(),
-                        e.size(),
-                        e.compressed_size(),
-                        u64::from(e.crc32()),
-                    ])
-                })
-                .collect::<ZipResult<EntryStats>>()?;
+            let archive = finalize(writer, pending, &mut patches)?;
+            let mut stats = collect_stats(&archive)?;
             let mut sink = archive.into_inner();
             if !patches.is_empty() {
-                // The writer's own view has no central record offsets (it
-                // never read them); parse what was just written to get them.
-                let reread = ZipArchive::new(sink)?;
-                let meta = reread.metadata();
-                let targets = patches
-                    .iter()
-                    .map(|p| {
-                        let e = meta.entry(p.index)?;
-                        Ok((e.header_start(), e.central_header_start()))
-                    })
-                    .collect::<ZipResult<Vec<_>>>()?;
-                sink = reread.into_inner();
-                for (patch, (local, central)) in patches.iter().zip(targets) {
-                    sink.apply(patch, local, central)?;
-                    if let Some((_, crc, size, csize)) = patch.fields {
-                        if let Some(stat) = stats.get_mut(patch.index) {
-                            stat[1] = size;
-                            stat[2] = csize;
-                            stat[3] = u64::from(crc);
-                        }
-                    }
-                }
+                sink = apply_patches(sink, &patches, &mut stats)?;
             }
             sink.flush()?;
             if let Sink::Ruby(w) = &mut sink {
@@ -984,6 +924,67 @@ impl Writer {
         state.writer = Some(writer);
         result
     }
+}
+
+/// Seals a ZipCrypto entry still in progress and writes the central
+/// directory; the archive comes back readable for `collect_stats`.
+fn finalize(
+    mut writer: ZipWriter<Sink>,
+    pending: Option<Pending>,
+    patches: &mut Vec<Patch>,
+) -> ZipResult<ZipArchive<Sink>> {
+    if let Some(pending) = pending {
+        let (last, patch) = pending.seal()?;
+        writer.write_all(&last)?;
+        patches.push(patch);
+    }
+    writer.finish_into_readable()
+}
+
+/// What was written for each entry, in order; see `EntryStats`.
+fn collect_stats(archive: &ZipArchive<Sink>) -> ZipResult<EntryStats> {
+    let meta = archive.metadata();
+    (0..meta.len())
+        .map(|i| {
+            let e = meta.entry(i)?;
+            Ok([
+                e.header_start(),
+                e.size(),
+                e.compressed_size(),
+                u64::from(e.crc32()),
+            ])
+        })
+        .collect()
+}
+
+/// Corrects the headers the crate wrote for ZipCrypto entries (see
+/// `Patch`), and the stats to match.
+fn apply_patches(sink: Sink, patches: &[Patch], stats: &mut EntryStats) -> ZipResult<Sink> {
+    // The writer's own view has no central record offsets (it never read
+    // them); parse what was just written to get them.
+    let reread = ZipArchive::new(sink)?;
+    let targets = {
+        let meta = reread.metadata();
+        patches
+            .iter()
+            .map(|p| {
+                let e = meta.entry(p.index)?;
+                Ok((e.header_start(), e.central_header_start()))
+            })
+            .collect::<ZipResult<Vec<_>>>()?
+    };
+    let mut sink = reread.into_inner();
+    for (patch, (local, central)) in patches.iter().zip(targets) {
+        sink.apply(patch, local, central)?;
+        if let (Some((_, crc, size, csize)), Some(stat)) =
+            (patch.fields, stats.get_mut(patch.index))
+        {
+            stat[1] = size;
+            stat[2] = csize;
+            stat[3] = u64::from(crc);
+        }
+    }
+    Ok(sink)
 }
 
 /// Walks concatenated extra fields (id, length, data) as `(id, data)`.
