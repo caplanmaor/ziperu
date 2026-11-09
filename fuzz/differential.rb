@@ -313,7 +313,7 @@ module Fuzz
             expected[n.b] = { 'data' => d, 'dir' => false }
             ops << "get_output_stream #{n} (#{d.bytesize} bytes)"
           when 1
-            n = names.sample(random: @rng)
+            n = names.sample(random: @rng) or next
             zf.remove(n)
             expected.delete(n.b)
             ops << "remove #{n}"
