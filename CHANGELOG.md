@@ -2,6 +2,12 @@
 
 ## 0.2.0 (unreleased)
 
+- Reproducible archives: with `SOURCE_DATE_EPOCH` in the environment (or
+  `Ziperu.source_date_epoch` set), every new entry's timestamp is that
+  instant in UTC (a source file's own mtime wins when earlier) and the
+  "made by" system is Unix on every platform, so the same input gives
+  the same bytes on every run and machine. `add_recursive` already walks
+  directories in sorted order.
 - Names in other encodings. `Ziperu.unicode_names = true` now really
   sets the language encoding flag on every entry (the native writer had
   no way to, so the setting was lost; a non-ASCII UTF-8 name is flagged

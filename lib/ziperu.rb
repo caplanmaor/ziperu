@@ -101,7 +101,8 @@ module Ziperu
                 :max_total_size,
                 :max_compression_ratio,
                 :append_in_place,
-                :write_extended_timestamps
+                :write_extended_timestamps,
+                :source_date_epoch
 
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
@@ -147,6 +148,26 @@ module Ziperu
     # after `Entry#time=`): an extra field changes the bytes, and an EPUB's
     # first entry, for one, must have none.
     @write_extended_timestamps = false
+    # Reproducible archives: with a Unix time here, every new entry's
+    # timestamp is that instant (or the file's own, when earlier) in UTC,
+    # whatever the clock and zone say, and the "made by" host system is
+    # Unix on every platform, so the same input gives the same bytes on
+    # every run and machine. Read from the SOURCE_DATE_EPOCH environment
+    # variable, the convention build tools follow; set it here to apply
+    # it without the variable, or to nil to ignore the variable.
+    @source_date_epoch = ENV['SOURCE_DATE_EPOCH']&.then { |v| Integer(v, exception: false) }
+  end
+
+  # The time a new entry gets by default: `source_date_epoch` when set,
+  # the clock otherwise. `mtime` is the source file's own, which wins
+  # when it is earlier (the SOURCE_DATE_EPOCH convention).
+  def default_entry_time(mtime = nil)
+    epoch = source_date_epoch
+    return DOSTime.from_time(mtime || Time.now) unless epoch
+
+    clamped = Time.at(epoch).utc
+    clamped = mtime.utc if mtime && mtime < clamped
+    DOSTime.from_time(clamped)
   end
 
   # Set options in one block. The block runs only the first time.

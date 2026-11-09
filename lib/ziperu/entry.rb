@@ -144,7 +144,7 @@ module Ziperu
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
       compression_level: ::Ziperu.default_compression,
-      time: ::Ziperu::DOSTime.now, extra: ::Ziperu::ExtraField.new
+      time: nil, extra: ::Ziperu::ExtraField.new
     )
       super()
       # rubyzip 2.x's positional form.
@@ -159,7 +159,7 @@ module Ziperu
       check_name(@name)
 
       set_default_vars_values
-      @fstype = ::Ziperu::RUNNING_ON_WINDOWS ? ::Ziperu::FSTYPE_FAT : ::Ziperu::FSTYPE_UNIX
+      @fstype = ::Ziperu::RUNNING_ON_WINDOWS && !::Ziperu.source_date_epoch ? ::Ziperu::FSTYPE_FAT : ::Ziperu::FSTYPE_UNIX
 
       @zipfile            = zipfile
       @archive            = nil
@@ -177,7 +177,7 @@ module Ziperu
                             when Time
                               ::Ziperu::DOSTime.from_time(time)
                             else
-                              ::Ziperu::DOSTime.now
+                              ::Ziperu.default_entry_time
                             end
       @extra              =
         extra.kind_of?(ExtraField) ? extra : ExtraField.new(extra.to_s)
@@ -518,7 +518,7 @@ module Ziperu
       @ftype = :file
       @source_io = io
       @size = io.size if io.respond_to?(:size) && !io.size.nil?
-      @time = DOSTime.from_time(::Time.now)
+      @time = ::Ziperu.default_entry_time
     end
 
     # The decrypter for this entry when the owning `Ziperu::File` was
@@ -670,7 +670,7 @@ module Ziperu
 
     def get_extra_attributes_from_path(path) # :nodoc:
       stat = file_stat(path)
-      @time = DOSTime.from_time(stat.mtime)
+      @time = ::Ziperu.default_entry_time(stat.mtime)
       return if ::Ziperu::RUNNING_ON_WINDOWS
 
       @unix_uid   = stat.uid

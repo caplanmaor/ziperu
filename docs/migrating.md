@@ -124,6 +124,13 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **Reproducible archives.** With `SOURCE_DATE_EPOCH` set (the convention
+  Debian, Python 3.14 and the others follow), or `Ziperu.source_date_epoch
+  = 1700000000`, every new entry's timestamp is that instant in UTC (a
+  source file's own mtime wins when it is earlier) and the "made by"
+  system byte is Unix on every platform: the same input gives the same
+  bytes on every run and machine. rubyzip has no equivalent (its issue
+  364 has been open since 2018).
 - **Names in other encodings.** A non-ASCII UTF-8 name is written with
   the language encoding flag whatever `Ziperu.unicode_names` says (the
   native core sets it), so 7-Zip, Info-ZIP and Explorer show it right
