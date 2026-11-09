@@ -24,6 +24,14 @@
   faster. An entry's invalid DOS timestamp is parsed when its `time` is
   first asked for, unless `Ziperu.warn_invalid_date` is set, in which
   case the warning still comes when the archive is opened.
+- Adding entries to an archive on disk appends them in place: a commit
+  whose only changes are additions (`add`, `get_output_stream` on a new
+  name, `mkdir`) writes the new entries after the existing ones and a new
+  central directory, instead of rewriting the whole archive through a
+  temporary file, so adding one file to a large archive costs that file.
+  A failure in the middle puts the archive back as it was.
+  `Ziperu.append_in_place = false` restores the rewrite;
+  `OutputStream.open(path, append: true)` appends directly.
 - `Ziperu.max_compression_ratio`: an archive declaring an entry with a
   higher uncompressed-to-compressed ratio raises `Ziperu::LimitError` on
   open, like the other limits; the zip bomb check that `max_total_size`

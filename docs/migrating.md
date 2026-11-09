@@ -167,6 +167,13 @@ Everything here is additive: code that does not use it behaves as above.
   entry goes out as it is written, with its sizes in a data descriptor
   after the data, which every zip reader since PKZIP 2.0 understands;
   rubyzip needs a seekable IO there.
+- **Appending in place.** When a `Ziperu::File` commit only adds entries,
+  they are appended after the ones already there (plus a new central
+  directory) rather than the archive being rewritten through a temporary
+  file, as rubyzip does for every commit. A failure in the middle puts
+  the archive back as it was; `Ziperu.append_in_place = false` keeps
+  rubyzip's rewrite. `Ziperu::OutputStream.open(path, append: true)`
+  appends directly.
 - **Walking a huge archive.** `Ziperu::File.foreach(path) { |entry| ... }`
   yields the entries one at a time without listing them all first, in
   constant memory, each readable while the block runs; without a block it

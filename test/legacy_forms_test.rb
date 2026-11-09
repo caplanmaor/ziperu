@@ -3,6 +3,7 @@
 require_relative "test_helper"
 require "tmpdir"
 require "stringio"
+require "zip" # the Zip = Ziperu alias
 
 # rubyzip 2.x's call forms. `Zip::VERSION` is ziperu's own, so a library
 # that branches on it takes its 2.x path with ziperu; every form 3.0

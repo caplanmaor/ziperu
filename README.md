@@ -20,7 +20,7 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 `Zip = Ziperu`, so existing code runs unchanged.
 
 - **Precompiled** for Linux (glibc and musl), macOS and Windows, Ruby 3.1 to 4.0. No toolchain, no runtime dependencies.
-- **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, and unchanged entries are copied byte for byte on commit.
+- **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, unchanged entries are copied byte for byte on commit, and a commit that only adds entries appends them in place.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, AES and ZipCrypto.
 - **Safe by default**: no entry inflates past its declared size, extraction never escapes the destination, symlinks are opt-in, and limits on entry count, total size and compression ratio can be set up front.
 - **Friendlier than rubyzip where it costs nothing**: a password on the archive (`File.open(path, password: ...)`), `add` from an IO, Pathname arguments, `File#verify`, progress callbacks, and errors that fail at the call site.
@@ -48,6 +48,9 @@ Ruby 3.1 through 4.0. The glibc gems need RubyGems 3.3.22 or later (Ruby
 3.1.4 ships it); the musl gems need `libgcc` (`apk add libgcc`, already in
 the `ruby:3.2-alpine` and later images). Anywhere else the source gem
 builds with Rust 1.88+.
+
+JRuby and TruffleRuby are not supported: the core is a native extension
+against the CRuby API. rubyzip remains the library for those.
 
 ## Quick start
 
@@ -84,6 +87,86 @@ Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
   zf.extract_all("out/")
   zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit
 end
+```
+
+## Cookbook
+
+Zip a directory, unzip into one:
+
+```ruby
+Ziperu::File.add_recursive("site.zip", "public")   # what is under public/, at the root
+
+Ziperu::File.open("site.zip") do |zf|
+  zf.extract_all("restored/")               # never writes outside restored/
+end
+```
+
+Build an archive in memory and hand it out, or take one in:
+
+```ruby
+bytes = Ziperu::OutputStream.write_buffer do |zos|
+  zos.put_next_entry("report.csv")
+  zos.write(csv)
+end.string
+
+Ziperu::File.open_buffer(params[:upload].read) do |zf|
+  zf.each { |e| puts "#{e.name}: #{e.size} bytes" }
+end
+```
+
+Stream a zip download without a temp file (Rack; in Rails, write to
+`response.stream` inside `ActionController::Live` the same way):
+
+```ruby
+body = Ziperu::OutputStream.body do |zos|
+  attachments.each do |att|
+    zos.put_next_entry(att.filename)
+    att.download { |chunk| zos.write(chunk) }
+  end
+end
+[200, { "content-type" => "application/zip",
+        "content-disposition" => 'attachment; filename="attachments.zip"' }, body]
+```
+
+Add files to an archive you already have (appended in place, the rest is
+not rewritten), or replace one:
+
+```ruby
+Ziperu::File.open("backup.zip") do |zf|
+  zf.add("logs/today.log", "/var/log/app/today.log")
+  zf.get_output_stream("manifest.json") { |io| io.write(manifest.to_json) }
+end
+```
+
+Pick one entry out of a large archive, or read it all as a stream:
+
+```ruby
+entry = Ziperu::File.foreach("huge.zip").find { |e| e.name.end_with?(".sig") }
+
+Ziperu::InputStream.open(socket) do |zis|           # any IO, no seeking needed
+  while (entry = zis.get_next_entry)
+    process(entry.name, zis.read)
+  end
+end
+```
+
+Passwords, both ways:
+
+```ruby
+Ziperu::File.open("secret.zip", password: "s3cret") { |zf| zf.extract_all("out/") }
+
+Ziperu::OutputStream.open("secret.zip", encrypter: Ziperu::AESEncrypter.new("s3cret")) do |zos|
+  zos.put_next_entry("plan.txt")
+  zos.write("...")
+end
+```
+
+Keep hostile archives in check before reading a byte of them:
+
+```ruby
+Ziperu.max_entries = 10_000
+Ziperu.max_total_size = 2 << 30          # 2 GiB uncompressed
+Ziperu.max_compression_ratio = 1_000     # a zip bomb runs to a million
 ```
 
 ## Migrating from rubyzip
@@ -134,7 +217,8 @@ loaded. On one Windows machine (Ruby 3.4, median of 5):
 
 Inflating and deflating are where the Rust core pays off. Listing a large
 central directory is dominated by building Ruby `Entry` objects, which both
-libraries do in Ruby, and `extract_all` is bounded by file creation itself.
+libraries do in Ruby (ziperu parses their extra fields and timestamps only
+when asked), and `extract_all` is bounded by file creation itself.
 
 ## Development
 

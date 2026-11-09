@@ -72,6 +72,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_singleton_method("open_memory", function!(writer::Writer::open_memory, 0))?;
     writer.define_singleton_method("open_io", function!(writer::Writer::open_io, 1))?;
     writer.define_singleton_method("open_stream", function!(writer::Writer::open_stream, 1))?;
+    writer.define_singleton_method("open_append", function!(writer::Writer::open_append, 1))?;
+    writer.define_method("abort", method!(writer::Writer::abort, 0))?;
     writer.define_method("start_entry", method!(writer::Writer::start_entry, 2))?;
     writer.define_method("add_directory", method!(writer::Writer::add_directory, 2))?;
     writer.define_method("add_symlink", method!(writer::Writer::add_symlink, 3))?;

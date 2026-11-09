@@ -209,6 +209,7 @@ module Ziperu
 
     def comment=(comment)
       @dirty = true
+      @comment_changed = true
       @comment = comment
     end
 
@@ -434,18 +435,47 @@ module Ziperu
     def commit
       return if name.kind_of?(StringIO) || !commit_required?
 
-      on_success_replace do |tmp_file|
-        ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
-          @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
-          zos.comment = comment
+      if (appended = appended_entries)
+        # Only additions: they go after the entries already there, which
+        # are left untouched (see Ziperu.append_in_place). A failure puts
+        # the archive back as it was.
+        ::Ziperu::OutputStream.open(@name, append: true,
+                                           suppress_extra_fields: @suppress_extra_fields) do |zos|
+          appended.each { |e| e.write_to_zip_output_stream(zos) }
         end
-        true
+      else
+        on_success_replace do |tmp_file|
+          ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
+            @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
+            zos.comment = comment
+          end
+          true
+        end
       end
       # Only now are the changes on disk; until here the entries keep
       # their dirty state so a failed commit can be retried.
       @cdir.each(&:clean_up)
       initialize_cdir(@name)
     end
+
+    # The entries to append, when the pending changes are additions and
+    # nothing else: every entry the archive holds is still listed, in
+    # place, unchanged, and the comment is as it was. Nil otherwise, and
+    # the archive is rewritten.
+    def appended_entries
+      return nil if @create || @buffer || @native.nil? || @comment_changed || ::Ziperu.sort_entries
+      return nil unless ::Ziperu.append_in_place
+
+      all = @cdir.entries
+      held = @native.entry_count
+      return nil if all.size <= held || all.first(held).each_with_index.any? do |e, i|
+        !(e.index == i && e.archive.equal?(@native) && !e.dirty? && !e.needs_restream? &&
+          !e.extra_changed? && !@cdir.shadowed?(e))
+      end
+
+      all.drop(held)
+    end
+    private :appended_entries
 
     # Writes the archive, with any changes, to `io` and returns it. `io`
     # may be a pipe, socket or response body: entries are streamed to it
@@ -633,6 +663,7 @@ module Ziperu
       @cdir = ::Ziperu::EntrySet.new
       @comment = ''
       @dirty = false
+      @comment_changed = false
 
       if ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.

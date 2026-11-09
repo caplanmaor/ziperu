@@ -448,6 +448,12 @@ struct State {
     pending: Option<Pending>,
     /// For a stream: the per-entry facts, kept as the entries go by.
     stream: Option<StreamStats>,
+    /// Entries the archive held before this writer opened it to append;
+    /// `finish` reports on the ones after them.
+    base: usize,
+    /// For an append: where the old central directory began, and its
+    /// bytes to the end of the file, so `abort` can put it back.
+    tail: Option<(u64, Vec<u8>)>,
 }
 
 impl State {
@@ -933,11 +939,85 @@ impl Writer {
                 patches: Vec::new(),
                 pending: None,
                 stream,
+                base: 0,
+                tail: None,
             }),
             io,
             attached,
             needs_gvl: io.is_some(),
         }
+    }
+
+    /// Opens the archive at `path` to add entries to it. The crate reads
+    /// its central directory and writes the new entries over it, then a
+    /// central directory for all; the entries already there are not
+    /// touched. The old central directory is kept in memory so that
+    /// `abort` can put it back if the append fails.
+    pub fn open_append(ruby: &Ruby, path: String) -> Result<Self, Error> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_error(ruby, e))?;
+        let (start, base) = {
+            let archive = ZipArchive::new(&mut file).map_err(|e| zip_error(ruby, e))?;
+            (archive.central_directory_start(), archive.len())
+        };
+        let mut tail = Vec::new();
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_to_end(&mut tail))
+            .map_err(|e| io_error(ruby, e))?;
+        // The crate leaves the position where its reading ended, at the
+        // end of the file, and would write the new entries after the old
+        // central directory, leaving it as dead bytes. A second handle to
+        // the same open file shares its position: moving it moves the
+        // writer's.
+        let mut handle = file.try_clone().map_err(|e| io_error(ruby, e))?;
+        let writer = ZipWriter::new_append(Sink::File(BufWriter::new(file)))
+            .map_err(|e| zip_error(ruby, e))?;
+        handle
+            .seek(SeekFrom::Start(start))
+            .map_err(|e| io_error(ruby, e))?;
+        let out = Self::new(Inner::Seekable(writer), None, None, None);
+        {
+            let mut state = out.inner.borrow_mut();
+            state.count = base;
+            state.base = base;
+            state.tail = Some((start, tail));
+        }
+        Ok(out)
+    }
+
+    /// Gives up on an append: the entries written so far are discarded
+    /// and the archive is put back as it was. A writer that is not an
+    /// append is just dropped.
+    pub fn abort(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
+        let mut state = rb_self
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| busy_error(ruby, "writer"))?;
+        let Some(writer) = state.writer.take() else {
+            return Ok(());
+        };
+        let tail = state.tail.take();
+        drop(state);
+        let (Inner::Seekable(mut writer), Some((start, tail))) = (writer, tail) else {
+            return Ok(());
+        };
+        maybe_without_gvl(rb_self.needs_gvl, || -> ZipResult<()> {
+            // The crate's `finish` is the only way to the sink; what it
+            // writes is overwritten or cut off just below.
+            writer.abort_file()?;
+            let mut sink = writer.finish()?;
+            sink.seek(SeekFrom::Start(start))?;
+            sink.write_all(&tail)?;
+            sink.flush()?;
+            if let Sink::File(f) = &mut sink {
+                f.get_mut().set_len(start + tail.len() as u64)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| zip_error(ruby, e))
     }
 
     /// Finishes the previous entry and begins a new file entry.
@@ -1239,6 +1319,8 @@ impl Writer {
         let mut patches = std::mem::take(&mut state.patches);
         let pending = state.pending.take();
         let mut stream = state.stream.take();
+        let base = state.base;
+        state.tail = None;
         drop(state);
         // Finishes the last entry and writes the central directory, then
         // (for a sink that can be read back) collects the stats and patches
@@ -1282,8 +1364,9 @@ impl Writer {
             Sink::File(_) | Sink::Ruby(_) => None,
             Sink::Memory(c) => Some(ruby.str_from_slice(&c.into_inner())),
         };
-        let out = ruby.ary_new_capa(stats.len());
-        for entry in stats {
+        // An append reports on the entries it added, not those already there.
+        let out = ruby.ary_new_capa(stats.len().saturating_sub(base));
+        for entry in stats.into_iter().skip(base) {
             out.push(entry.to_vec())?;
         }
         Ok((bytes, out))

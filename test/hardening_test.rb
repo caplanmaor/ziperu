@@ -128,7 +128,11 @@ class HardeningTest < Minitest::Test
       bytes.setbyte(cd + 8, bytes.getbyte(cd + 8) & ~8)
     end
     File.binwrite(file, bytes)
-    Ziperu::File.open(file) { |zf| zf.get_output_stream("x") { |o| o.write "x" } }
+    # A rewrite (an addition alone would append, copying nothing).
+    Ziperu::File.open(file) do |zf|
+      zf.get_output_stream("x") { |o| o.write "x" }
+      zf.comment = "rewritten"
+    end
     Ziperu::File.open(file) do |zf|
       e = zf.get_entry("a.txt")
       assert_equal 1, e.gp_flags & 9

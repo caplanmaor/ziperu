@@ -97,7 +97,8 @@ module Ziperu
                 :validate_declared_number_of_entries,
                 :max_entries,
                 :max_total_size,
-                :max_compression_ratio
+                :max_compression_ratio,
+                :append_in_place
 
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
@@ -129,6 +130,13 @@ module Ziperu
     # runs to a million or more; ordinary data rarely passes 100, though
     # a file of zeros deflates about 1000:1, so pick with that in mind.
     @max_compression_ratio = nil
+    # When a commit only adds entries to an existing archive on disk, they
+    # are appended in place, after the entries already there, instead of
+    # the whole archive being rewritten through a temporary file: adding
+    # one file to a large archive costs that file, not the archive. A
+    # failure in the middle puts the archive back as it was; a crash in
+    # the middle may not. Set to false to always rewrite.
+    @append_in_place = true
   end
 
   # Set options in one block. The block runs only the first time.

@@ -28,15 +28,22 @@ module Ziperu
     # archive is built in memory and written out in one go at `close`.
     def initialize(file_name, legacy_stream = nil, legacy_encrypter = nil,
                    stream: false, encrypter: nil, suppress_extra_fields: false,
-                   memory: false, **opts)
+                   memory: false, append: false, **opts)
       super(**opts)
       # rubyzip 2.x's `new(io, stream, encrypter)`.
       stream = legacy_stream unless legacy_stream.nil?
       encrypter ||= legacy_encrypter
       @file_name = file_name
       @io = nil
+      @append = append
       @encrypter = encrypter || ::Ziperu::NullEncrypter.new
-      if stream
+      if append
+        # Adds to the archive at `file_name` in place: the entries it holds
+        # stay as they are and the new ones follow them. Its comment is
+        # kept unless `comment=` is called.
+        raise ArgumentError, 'append: takes a path, not an IO' if stream
+        @writer = Native::Writer.open_append(file_name.to_s)
+      elsif stream
         @io = file_name
         @io.binmode if @io.respond_to?(:binmode)
         @writer =
@@ -57,7 +64,7 @@ module Ziperu
         @writer = Native::Writer.open_path(file_name.to_s)
       end
       @suppress_extra_fields = suppress_extra_fields
-      @comment = ''
+      @comment = append ? nil : ''
       @closed = false
       @current_entry = nil
       @written = []
@@ -155,10 +162,16 @@ module Ziperu
 
     # Closes the stream after a failure: the native writer is released,
     # but the entries written so far are left as they were, since the
-    # archive they were written to is not going to be used.
+    # archive they were written to is not going to be used. An append
+    # puts the archive back as it was.
     def abort # :nodoc:
       @aborted = true
-      @io ? close_buffer : close
+      if @append
+        @writer.abort
+        @closed = true
+      else
+        @io ? close_buffer : close
+      end
     rescue StandardError
       # Nothing to add to the exception already on its way.
       nil
@@ -257,10 +270,14 @@ module Ziperu
     private
 
     def finish_archive
-      comment = @comment.to_s.b
-      raise ArgumentError, "archive comment is #{comment.bytesize} bytes; the limit is 65535" if comment.bytesize > 0xFFFF
+      unless @comment.nil? # nil: an append keeping the archive's own
+        comment = @comment.to_s.b
+        if comment.bytesize > 0xFFFF
+          raise ArgumentError, "archive comment is #{comment.bytesize} bytes; the limit is 65535"
+        end
 
-      @writer.comment = comment
+        @writer.comment = comment
+      end
       @current_entry = nil
       begin
         bytes, stats = @writer.finish
