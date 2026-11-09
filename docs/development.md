@@ -50,6 +50,23 @@ that is ours (entry ownership, the chunked reader, the Ruby IO source) is
 only reachable through the Ruby API, which is what the differential fuzzer
 drives.
 
+## Memory checks
+
+```bash
+bundle exec rake mem:growth          # loop the whole API, fail if RSS keeps growing
+gem install ruby_memcheck            # once; needs valgrind >= 3.20 (Linux)
+bundle exec rake mem:check           # the GC-boundary tests under valgrind
+```
+
+`mem:growth` (test/mem/growth.rb) runs a workload that crosses the native
+boundary every way the gem offers (files, IOs, streams, AES, ZipCrypto,
+threads, append) and samples the resident size after a full GC every 20
+iterations; it fails if the process has grown more than 8 MiB since it
+warmed up. `mem:check` runs the tests that hand Ruby objects to the core
+under valgrind through ruby_memcheck, which filters Ruby's own noise.
+CI runs both on Linux (the `memcheck` job), and `cargo test` for the
+pure-Rust parts.
+
 ## Benchmarks
 
 `rake bench` runs [bench/bench.rb](../bench/bench.rb) with rubyzip and ziperu

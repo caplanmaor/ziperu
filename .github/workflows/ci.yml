@@ -119,3 +119,25 @@ jobs:
           rustup-components: clippy, rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+        working-directory: ext/ziperu
+
+  # The native core under valgrind (ruby_memcheck), and a loop of the
+  # whole API with the resident size sampled, for leaks neither the test
+  # suite nor GC stress can see.
+  memcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: gem install ruby_memcheck
+      - run: bundle exec rake compile
+      - run: bundle exec rake mem:check
+      - run: bundle exec rake mem:growth
+        env:
+          ITERATIONS: "300"
