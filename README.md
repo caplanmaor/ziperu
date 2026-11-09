@@ -6,6 +6,14 @@ Rust core. Same `Ziperu::File` / `Ziperu::Entry` / `Ziperu::InputStream` /
 crate through [Magnus](https://github.com/matsadler/magnus).
 
 ```ruby
+gem "ziperu"   # in the Gemfile, in place of gem "rubyzip"
+```
+
+Precompiled gems are published for Linux, macOS and Windows, so no Rust
+toolchain is needed to install. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
+```ruby
 require "ziperu"   # or require "zip" to get the Zip alias
 
 Ziperu::File.open("archive.zip") do |zf|
