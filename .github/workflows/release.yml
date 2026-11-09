@@ -58,7 +58,9 @@ jobs:
         id: cross-gem
         with:
           platform: ${{ matrix.platform }}
-          ruby-versions: ${{ join(fromJSON(needs.ci-data.outputs.result).stable-ruby-versions, ',') }}
+          # The stable set starts at the oldest Ruby still maintained; the
+          # gemspec promises 3.1 and up, so build the two EOL minors too.
+          ruby-versions: ${{ format('3.1,3.2,{0}', join(fromJSON(needs.ci-data.outputs.result).stable-ruby-versions, ',')) }}
       - uses: actions/upload-artifact@v4
         with:
           name: cross-gem-${{ matrix.platform }}
