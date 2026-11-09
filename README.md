@@ -44,7 +44,9 @@ Bundler and `gem install` pick the precompiled gem for the platform
 `aarch64-linux-musl`, `arm-linux-musl`, `x86_64-darwin`, `arm64-darwin`,
 `x64-mingw-ucrt`, `aarch64-mingw-ucrt`), each holding the extension for
 Ruby 3.1 through 4.0. The glibc gems need RubyGems 3.3.22 or later (Ruby
-3.1.4 ships it). Anywhere else the source gem builds with Rust 1.88+.
+3.1.4 ships it); the musl gems need `libgcc` (`apk add libgcc`, already in
+the `ruby:3.2-alpine` and later images). Anywhere else the source gem
+builds with Rust 1.88+.
 
 ## Quick start
 

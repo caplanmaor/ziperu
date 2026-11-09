@@ -111,9 +111,10 @@ jobs:
           pattern: cross-gem-*
           merge-multiple: true
           path: gems
+      # libgcc is what the README asks for on Alpine; the 3.2+ images have it.
       - name: Install the gem built for this platform and load it
         run: |
-          docker run --rm -v "$PWD:/work" -w /work ruby:${{ matrix.ruby }}-alpine             ruby .github/scripts/smoke.rb gems
+          docker run --rm -v "$PWD:/work" -w /work ruby:${{ matrix.ruby }}-alpine sh -ec 'apk add --no-cache libgcc >/dev/null && ruby .github/scripts/smoke.rb gems'
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

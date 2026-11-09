@@ -27,7 +27,11 @@ rescue LoadError => e
   rescue LoadError
     # RubyGems hands the glibc Linux gem to musl systems (Alpine) and the
     # bare error names a missing ld-linux; say what to do instead.
-    hint = if e.message.include?("ld-linux") || e.message.include?("musl")
+    hint = if e.message.include?("libgcc_s")
+             # Rust's unwinder links libgcc_s dynamically on musl; Alpine's
+             # ruby images from 3.2 on ship it, 3.1 does not.
+             " The native extension needs libgcc_s.so.1: on Alpine run `apk add libgcc`."
+           elsif e.message.include?("ld-linux") || e.message.include?("musl")
              " The installed ziperu gem was built for another libc; on Alpine (musl) use " \
              "`gem install ziperu --platform #{RUBY_PLATFORM}` or " \
              "`bundle lock --add-platform #{RUBY_PLATFORM}`, or install the source gem with " \

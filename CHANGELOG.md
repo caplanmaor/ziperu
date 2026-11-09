@@ -15,9 +15,10 @@ and Python's `zipfile`, on Linux (glibc and musl), macOS and Windows.
   The archive's compressed sizes are also right in the local header.
 - The glibc Linux gems are published as `x86_64-linux-gnu` and
   `aarch64-linux-gnu`, so RubyGems no longer installs them on Alpine
-  (musl) where they could not load; the musl gems link the GCC unwinder
-  statically and load on Alpine images without `libgcc`. A mismatched
-  binary now raises a `LoadError` that says what to install.
+  (musl) where they could not load. The musl gems need Alpine's `libgcc`
+  package (in the `ruby:3.2-alpine` and later images); a mismatched binary
+  or that missing library now raises a `LoadError` that says what to
+  install.
 - `Pathname` arguments to `Ziperu::File.open`, `InputStream.open`,
   `count_entries` and `rename` work (they were read in text mode, which
   broke on Windows).
