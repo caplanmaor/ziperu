@@ -5,11 +5,15 @@
 //! lives in `lib/`.
 
 mod archive;
+mod entry_options;
 mod errors;
 mod extract;
 mod gvl;
+mod rb;
 mod reader;
+mod sink;
 mod source;
+mod stream_stats;
 mod writer;
 mod zipcrypto;
 

@@ -35,6 +35,24 @@ exception!(EEXIST, "Errno::EEXIST");
 exception!(EISDIR, "Errno::EISDIR");
 exception!(ENOTDIR, "Errno::ENOTDIR");
 
+/// `.rb(ruby)?` on a crate or io result: the error as the Ruby exception
+/// `zip_error` / `io_error` would raise for it.
+pub(crate) trait IntoRuby<T> {
+    fn rb(self, ruby: &Ruby) -> Result<T, Error>;
+}
+
+impl<T> IntoRuby<T> for Result<T, ZipError> {
+    fn rb(self, ruby: &Ruby) -> Result<T, Error> {
+        self.map_err(|e| zip_error(ruby, e))
+    }
+}
+
+impl<T> IntoRuby<T> for io::Result<T> {
+    fn rb(self, ruby: &Ruby) -> Result<T, Error> {
+        self.map_err(|e| io_error(ruby, e))
+    }
+}
+
 pub fn zip_error(ruby: &Ruby, err: ZipError) -> Error {
     match err {
         ZipError::Io(e) => io_error(ruby, e),
