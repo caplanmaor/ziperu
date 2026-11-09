@@ -286,13 +286,17 @@ impl EntryReader {
         if eof {
             inner.finished = true;
         }
-        if filled == 0 {
-            // Shorter than declared; the crate's CRC check normally raises
-            // before we get here. Treat as end of stream.
-            return Ok(None);
-        }
         if oversize {
             return Err(size_limit_error(ruby));
+        }
+        if filled == 0 {
+            // Nothing left: the declared size was reached (and the probe
+            // found no more), or the stream ended short of it, in which
+            // case the crate's CRC check normally raises first. Either way
+            // the entry is finished; a reader looping on `sysread` until
+            // nil depends on `eof?` saying so.
+            inner.finished = true;
+            return Ok(None);
         }
         if probe && filled == want {
             inner.finished = true;

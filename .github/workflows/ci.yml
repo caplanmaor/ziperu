@@ -71,6 +71,8 @@ jobs:
   # the seed to reproduce them.
   fuzz:
     runs-on: ubuntu-latest
+    # A hang must not hold a runner for the six hours GitHub allows.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1

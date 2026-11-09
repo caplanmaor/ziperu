@@ -386,6 +386,46 @@ class HardeningTest < Minitest::Test
     end
   end
 
+  def test_reading_an_empty_deflated_entry_reaches_eof
+    io = Ziperu::OutputStream.write_buffer do |z|
+      z.put_next_entry("empty.txt") # Deflated: two bytes of compressed data, none when inflated
+      z.put_next_entry("after.txt")
+      z.write("after")
+    end
+    Ziperu::File.open_buffer(io.string) do |zf|
+      e = zf.get_entry("empty.txt")
+      assert_equal 0, e.size
+      assert_operator e.compressed_size, :>, 0
+      e.get_input_stream do |is|
+        reads = 0
+        while (buf = is.sysread(1024))
+          reads += 1
+          flunk "sysread never returns nil for an empty entry" if reads > 3
+          assert_equal "", buf
+        end
+        assert is.eof?
+      end
+      assert_equal "", zf.read("empty.txt")
+      zf.extract_all(path("out"))
+      assert_equal "", File.read(path("out/empty.txt"))
+      assert_equal "after", File.read(path("out/after.txt"))
+    end
+    # The same through the stream reader (no index), as duplicate-name
+    # records and pipes are read.
+    r, w = IO.pipe
+    w.write(io.string)
+    w.close
+    Ziperu::InputStream.open(r) do |is|
+      is.get_next_entry
+      reads = 0
+      while (buf = is.sysread(1024))
+        reads += 1
+        flunk "sysread never returns nil over a pipe" if reads > 3
+      end
+      assert_equal "after", (is.get_next_entry && is.read)
+    end
+  end
+
   def test_get_raw_input_stream
     Ziperu::File.open(fixture("text.zip")) do |zf|
       head = zf.get_entry("short.txt").get_raw_input_stream { |io| io.read(4) }
