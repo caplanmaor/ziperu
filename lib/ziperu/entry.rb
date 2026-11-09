@@ -40,6 +40,24 @@ module Ziperu
 
     attr_reader :compression_level, :filepath, :source_io # :nodoc:
 
+    # Whether the data is still outside the archive: a file on disk or an
+    # IO given to `add`, to be streamed in when the archive is written.
+    # Until then the entry reads and extracts from that source.
+    def pending_data? # :nodoc:
+      !@filepath.nil? || !@source_io.nil?
+    end
+
+    # Whether the entry's bytes are those of the native archive `native`:
+    # it was read from it and its data was not replaced since.
+    def backed_by?(native) # :nodoc:
+      return false if pending_data?
+
+      # `archive`, not `@archive`: it reopens the archive the owning
+      # Ziperu::File released on close, as rubyzip lets entries be read then.
+      current = archive
+      !current.nil? && current.equal?(native)
+    end
+
     # The entry's extra fields. For an entry read from an archive, the
     # local header's fields (which is where Info-ZIP unix uid/gid and the
     # extended timestamp's atime/ctime live) are merged in on first use,
@@ -413,28 +431,28 @@ module Ziperu
     # Optional decrypter can be provided for an encrypted entry
     # Warning: may behave weird with symlinks.
     def get_input_stream(decrypter: nil, &block)
-      if @source_io
-        # Added from an IO and not yet committed: read it from the top
-        # (a pipe or socket cannot be rewound and is read once).
-        @source_io.rewind if ::Ziperu::IOExtras.seekable?(@source_io)
-        return block ? yield(@source_io) : @source_io
-      end
-      if @filepath.nil? || ftype == :directory
-        return open_input_stream(decrypter: decrypter || default_decrypter, &block)
-      end
+      return open_pending_data(&block) if pending_data? && ftype != :directory
 
-      # Not yet in an archive: the data is a file on disk.
-      case ftype
-      when :file
-        ::File.open(@filepath, 'rb', &block)
-      when :symlink
-        stringio = ::StringIO.new(::File.readlink(@filepath))
-        yield(stringio) if block
-        stringio
-      else
-        raise "unknown @file_type #{ftype}"
-      end
+      open_input_stream(decrypter: decrypter || default_decrypter, &block)
     end
+
+    # An IO over the data of an entry not yet in the archive (see
+    # `pending_data?`): the file on disk, the link's target, or the IO
+    # given to `add`, read from the top (a pipe or socket cannot be
+    # rewound and is read once).
+    def open_pending_data(&block)
+      io =
+        if @source_io
+          @source_io.rewind if ::Ziperu::IOExtras.seekable?(@source_io)
+          @source_io
+        elsif ftype == :symlink
+          ::StringIO.new(::File.readlink(@filepath))
+        else
+          return ::File.open(@filepath, 'rb', &block)
+        end
+      block ? yield(io) : io
+    end
+    private :open_pending_data
 
     def gather_fileinfo_from_srcpath(src_path) # :nodoc:
       stat   = file_stat(src_path)
@@ -522,7 +540,7 @@ module Ziperu
     # or a compression method the writer lacks).
     def write_plan # :nodoc:
       return :header if ftype == :directory || (ftype == :symlink && (@filepath || changed?))
-      return :restream if @filepath || @source_io
+      return :restream if pending_data?
 
       if changed? || @index.nil? || loses_fields_on_raw_copy?
         check_restreamable!
@@ -665,7 +683,7 @@ module Ziperu
     end
 
     def extra_size # :nodoc:
-      return extra.local_size if @archive.nil? || @filepath || @source_io
+      return extra.local_size if @archive.nil? || pending_data?
 
       (@index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)).bytesize
     end
@@ -685,7 +703,7 @@ module Ziperu
     # one: in a single native call when the entry is in an archive and its
     # declared size is to be trusted, through a stream otherwise.
     def read_all # :nodoc:
-      if @filepath.nil? && @source_io.nil? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
+      if !pending_data? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
         get_raw_input_string
       else
         get_input_stream(&:read)
@@ -729,12 +747,10 @@ module Ziperu
       end
 
       ::File.open(dest_path, 'wb') do |os|
-        if @filepath
-          # Added or replaced from disk and not yet committed: the data is
-          # the file's, not the archive's.
-          ::File.open(@filepath, 'rb') { |is| ::IO.copy_stream(is, os) }
-        elsif @source_io
-          get_input_stream { |is| ::Ziperu::IOExtras.copy_stream(os, is) }
+        if pending_data?
+          # Added or replaced from disk or an IO and not yet committed:
+          # the data is that source's, not the archive's.
+          get_input_stream { |is| ::IO.copy_stream(is, os) }
         else
           open_input_stream(enforce_size: Ziperu.validate_entry_sizes, decrypter: default_decrypter) do |is|
             bytes_written = 0

@@ -379,7 +379,7 @@ module Ziperu
       failures = {}
       entries.each do |entry|
         # An entry replaced from disk has nothing in the archive to check.
-        next if entry.directory? || entry.filepath || entry.source_io || !entry.archive.equal?(native)
+        next if entry.directory? || !entry.backed_by?(native)
         next if entry.encrypted? && password.nil?
 
         begin
@@ -435,7 +435,7 @@ module Ziperu
       all = @cdir.entries
       held = @native.entry_count
       return nil if all.size <= held || all.first(held).each_with_index.any? do |e, i|
-        !(e.index == i && e.archive.equal?(@native) && !e.dirty? && !e.needs_restream? &&
+        !(e.index == i && e.backed_by?(@native) && !e.dirty? && !e.needs_restream? &&
           !e.extra_changed? && !@cdir.shadowed?(e))
       end
 
@@ -579,10 +579,9 @@ module Ziperu
     NATIVE_EXTRACT_BATCH = 256 # :nodoc:
 
     def native_extractable?(entry, native)
-      return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.archive.equal?(native)
-      # Replaced from disk or an IO: the archive holds the old bytes. An
-      # encrypted entry goes through the Ruby path, which has the password.
-      return false if entry.filepath || entry.source_io || entry.encrypted?
+      return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.backed_by?(native)
+      # An encrypted entry goes through the Ruby path, which has the password.
+      return false if entry.encrypted?
       return false unless entry.file? || entry.directory?
 
       name = entry.name
