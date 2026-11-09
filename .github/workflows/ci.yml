@@ -127,6 +127,8 @@ jobs:
   # suite nor GC stress can see.
   memcheck:
     runs-on: ubuntu-latest
+    env:
+      BUNDLE_WITH: memcheck
     steps:
       - uses: actions/checkout@v4
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
@@ -135,7 +137,6 @@ jobs:
           bundler-cache: true
           cargo-cache: true
       - run: sudo apt-get update && sudo apt-get install -y valgrind
-      - run: gem install ruby_memcheck
       - run: bundle exec rake compile
       - run: bundle exec rake mem:check
       - run: bundle exec rake mem:growth

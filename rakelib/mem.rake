@@ -8,8 +8,8 @@
 #   rake mem:check    the GC-boundary tests under valgrind, through the
 #                     ruby_memcheck gem (Linux, valgrind >= 3.20)
 #
-# `mem:check` needs `gem install ruby_memcheck` and valgrind on the PATH;
-# it is not in the Gemfile because of its nokogiri dependency.
+# `mem:check` needs valgrind on the PATH and `BUNDLE_WITH=memcheck bundle`;
+# ruby_memcheck is an optional Gemfile group because of its nokogiri dependency.
 namespace :mem do
   desc "Loop a workload and fail if the process keeps growing (ITERATIONS=200)"
   task growth: :compile do
@@ -31,7 +31,7 @@ namespace :mem do
   rescue LoadError
     desc "The GC-boundary tests under valgrind (needs `gem install ruby_memcheck`)"
     task :check do
-      abort "mem:check needs the ruby_memcheck gem and valgrind: gem install ruby_memcheck"
+      abort "mem:check needs the ruby_memcheck gem and valgrind: BUNDLE_WITH=memcheck bundle install"
     end
   end
 end
