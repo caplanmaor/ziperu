@@ -2,6 +2,14 @@
 
 ## 0.2.0 (unreleased)
 
+- Parallel compression and extraction. `OutputStream#add_files(files,
+  threads: n)` compresses files from disk on `n` threads (the crate's
+  rayon-backed append; entries come out in the order given);
+  `Ziperu::File.open(path, threads: n)` and `File.add_recursive(zip, dir,
+  threads: n)` do the same for a commit's additions from disk.
+  `extract_all(dir, threads: n)` inflates and writes the files on `n`
+  threads, each reading the archive through its own handle. Both default
+  to one thread, as before.
 - `Ziperu::File.open(path, write: false)` opens an archive read-only:
   any change raises and `close` never writes, where rubyzip rewrites the
   archive on close. `write: "other.zip"` writes the changes to a new

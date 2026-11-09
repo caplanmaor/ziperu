@@ -41,6 +41,7 @@ module Ziperu
       @file_name = file_name
       @io = nil
       @append = append
+      @streamed = false
       @encrypter = encrypter || ::Ziperu::NullEncrypter.new
       if append
         # Adds to the archive at `file_name` in place: the entries it holds
@@ -63,6 +64,7 @@ module Ziperu
           else
             # A pipe, socket or response body: each entry goes out as it is
             # written, with its sizes in a data descriptor after the data.
+            @streamed = true
             Native::Writer.open_stream(@io)
           end
       else
@@ -210,6 +212,75 @@ module Ziperu
       @written << new_entry
       @current_entry = new_entry
     end
+
+    # Adds files from disk, compressed on `threads` threads: `files` maps
+    # entry names to paths (a Hash, or pairs). The entries come out in the
+    # order given, each compressed in memory on the pool and appended as
+    # it is ready, so the archive is the same as with `put_next_entry` and
+    # `write` one by one, only faster on a multi-core machine.
+    #
+    #   Ziperu::OutputStream.open("site.zip") do |zos|
+    #     zos.add_files({ "index.html" => "public/index.html", ... }, threads: 8)
+    #   end
+    #
+    # Encrypted streams and streams to an IO that cannot seek add the files
+    # one by one instead.
+    def add_files(files, threads: 4)
+      check_open!
+      entries = files.map do |name, path|
+        entry = Entry.new(@file_name, name.to_s)
+        entry.gather_fileinfo_from_srcpath(path)
+        entry
+      end
+      put_entries(entries, threads: threads)
+    end
+
+    # Writes `entries` as `Entry#write_to_zip_output_stream` would, one by
+    # one, except that runs of plain files from disk go through
+    # `add_files_parallel` when `threads` is above one and this stream can
+    # take it (seekable sink, no encryption).
+    def put_entries(entries, threads: 1) # :nodoc:
+      parallel = threads > 1 && !@streamed && @encrypter.kind_of?(NullEncrypter)
+      entries.chunk { |e| parallel && e.write_plan == :restream && e.file? && !e.filepath.nil? }
+             .each do |from_disk, run|
+        if from_disk && run.size > 1
+          add_from_disk_parallel(run, threads)
+        else
+          run.each { |e| e.write_to_zip_output_stream(self) }
+        end
+      end
+      nil
+    end
+
+    # A batch is compressed to memory in full before it is appended, so
+    # the batches are bounded by the bytes they read.
+    PARALLEL_BATCH_BYTES = 256 * 1024 * 1024 # :nodoc:
+    PARALLEL_BATCH_FILES = 512 # :nodoc:
+
+    def add_from_disk_parallel(entries, threads)
+      batch = []
+      bytes = 0
+      flush = lambda do
+        items = batch.map { |e| [e.name.b, e.filepath.to_s, native_entry_options(e)] }
+        @writer.add_files_parallel(items, threads)
+        @written.concat(batch)
+        batch = []
+        bytes = 0
+      end
+      entries.each do |e|
+        flush.call if !batch.empty? && (bytes + e.size > PARALLEL_BATCH_BYTES || batch.size >= PARALLEL_BATCH_FILES)
+        batch << e
+        bytes += e.size
+      end
+      flush.call unless batch.empty?
+      @current_entry = nil
+    rescue Native::DuplicateEntryError
+      # The native core does not say which; the names tell.
+      names = @written.map(&:name) + entries.map(&:name)
+      name = names.tally.find { |_, count| count > 1 }&.first || entries.first.name
+      raise EntryExistsError.new('put_next_entry', name)
+    end
+    private :add_from_disk_parallel
 
     # Copies an entry from another archive without recompressing it. With
     # `touch: true` the entry's current permissions and mtime are written

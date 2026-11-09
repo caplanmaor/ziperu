@@ -13,12 +13,13 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
-    TypedData, Value,
+    TryConvert, TypedData, Value,
 };
 use zip::result::{ZipError, ZipResult};
 use zip::write::StreamWriter;
@@ -532,6 +533,67 @@ impl Writer {
             })
             .map_err(|e| entry_error(ruby, &name, e))?;
             state.crypto.patches.push(patch);
+            Ok(())
+        })
+    }
+
+    /// Adds files from disk, compressed on `threads` threads: `items` is
+    /// an Array of `[name, path, options]`, name being raw bytes and the
+    /// options what `start_entry` takes, minus encryption. The crate
+    /// compresses every file to memory on a pool, then appends them in the
+    /// order given (so Ruby batches by size); the sink has to be seekable.
+    pub fn add_files_parallel(
+        ruby: &Ruby,
+        rb_self: &Self,
+        items: RArray,
+        threads: usize,
+    ) -> Result<(), Error> {
+        struct Item {
+            name: Vec<u8>,
+            shown: String,
+            path: String,
+            options: EntryOptions,
+        }
+        let mut parsed = Vec::with_capacity(items.len());
+        for item in items.into_iter() {
+            let item = RArray::try_convert(item)?;
+            let name: RString = item.entry(0)?;
+            let name = bytes_of(name);
+            let options = EntryOptions::from_hash(ruby, item.entry(2)?)?;
+            if options.zipcrypto || options.password.is_some() {
+                return Err(Error::new(
+                    ruby.exception_arg_error(),
+                    "encrypted entries cannot be added in parallel",
+                ));
+            }
+            parsed.push(Item {
+                shown: String::from_utf8_lossy(&name).into_owned(),
+                name,
+                path: item.entry(1)?,
+                options,
+            });
+        }
+        let entries = parsed
+            .iter()
+            .map(|i| {
+                let options = i.options.to_file_options(ruby)?.name(&i.name);
+                Ok((i.shown.as_str(), Path::new(&i.path), options))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.max(1))
+            .build()
+            .map_err(|e| Error::new(ruby.exception_arg_error(), e.to_string()))?;
+        rb_self.with_state(ruby, |state, zip| {
+            let Zip::Seekable(w) = zip else {
+                return Err(stream_error(ruby, "entries added in parallel"));
+            };
+            maybe_without_gvl(rb_self.needs_gvl(), || -> ZipResult<()> {
+                state.crypto.seal_pending(w)?;
+                pool.install(|| w.par_append_from_paths_atomic(entries))
+            })
+            .map_err(|e| entry_error(ruby, b"", e))?;
+            state.count += parsed.len();
             Ok(())
         })
     }

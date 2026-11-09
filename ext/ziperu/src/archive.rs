@@ -419,9 +419,18 @@ impl Archive {
         dest: String,
         specs: RArray,
         enforce_size: bool,
+        threads: usize,
     ) -> Result<RArray, Error> {
         let archive = rb_self.archive(ruby)?.clone();
-        crate::extract::extract_entries(ruby, archive, rb_self.needs_gvl, dest, specs, enforce_size)
+        crate::extract::extract_entries(
+            ruby,
+            archive,
+            rb_self.needs_gvl,
+            dest,
+            specs,
+            enforce_size,
+            threads,
+        )
     }
 }
 

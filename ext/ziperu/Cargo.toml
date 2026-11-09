@@ -23,7 +23,10 @@ zip = { version = "9", default-features = false, features = [
     "aes-crypto",
     "time",
     "unreserved",
+    "rayon",
 ] }
+# For `Writer#add_files_parallel`: a pool of the size Ruby asks for.
+rayon = "1"
 
 # For ZipCrypto writing (the zip crate keeps its encrypter private): the
 # same deflate backend the crate uses, a CRC and some randomness.

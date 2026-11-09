@@ -48,8 +48,12 @@ module Ziperu
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Ziperu.default_compression,
                    suppress_extra_fields: false, password: nil, decrypter: nil,
-                   write: true)
+                   write: true, threads: 1)
       super()
+
+      # On commit, runs of files added from disk are compressed on this
+      # many threads (see OutputStream#add_files).
+      @threads = threads
 
       # Where changes go on commit. `true`: back into the archive opened,
       # as rubyzip does. `false`: nowhere; the archive is read-only and
@@ -94,6 +98,9 @@ module Ziperu
       @compression_level     = compression_level
       @suppress_extra_fields = suppress_extra_fields
     end
+
+    # Threads a commit compresses files added from disk on.
+    attr_accessor :threads
 
     # Opened with `write: false`: nothing can be changed.
     def read_only?
@@ -194,17 +201,17 @@ module Ziperu
 
       # Recursively adds the contents of `src_dir` to the new archive
       # `zip_file_name`, nested under `prefix` if given.
-      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, &continue_on_exists_proc)
-        Ziperu::File.open(zip_file_name, create: true) do |zf|
+      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, threads: 1, &continue_on_exists_proc)
+        Ziperu::File.open(zip_file_name, create: true, threads: threads) do |zf|
           zf.add_recursive(src_dir, prefix: prefix, max_depth: max_depth, &continue_on_exists_proc)
         end
       end
 
       # Extracts every entry of the archive at `zip_file_name` into
       # `destination_directory`.
-      def extract_all(zip_file_name, destination_directory = '.', &block)
+      def extract_all(zip_file_name, destination_directory = '.', **options, &block)
         Ziperu::File.open(zip_file_name) do |zf|
-          zf.extract_all(destination_directory, &block)
+          zf.extract_all(destination_directory, **options, &block)
         end
       end
     end
@@ -364,7 +371,12 @@ module Ziperu
     # rubyzip 3) or `:create`, which creates links whose target stays inside
     # `destination_directory`. `progress:` is called with
     # `(entry, done, total)` after each entry.
-    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, &block)
+    # `threads: n` extracts the files on that many threads (the archive is
+    # read through one handle per thread); a file or String archive only,
+    # since an IO is driven from Ruby. Directories are made first, links
+    # last, as before. An error is raised for the first entry (in archive
+    # order) that failed, once every thread has stopped.
+    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, threads: 1, &block)
       # Directories first, so files have somewhere to go; links last, so
       # nothing is written through one. Of several records under one name
       # only the last is extracted, which is the one rubyzip would know.
@@ -379,7 +391,7 @@ module Ziperu
       # left at its default of raising) the native core extracts every
       # qualifying entry in one call; the rest take the per-entry path.
       slow = if block.nil? && !::Ziperu.on_exists_proc && !@restore_ownership
-               extract_all_native(ordered, destination_directory, report)
+               extract_all_native(ordered, destination_directory, report, threads)
              else
                ordered
              end
@@ -434,7 +446,7 @@ module Ziperu
         # The changes go to a new archive; the one opened is not touched,
         # and keeps being what this object reads.
         ::Ziperu::OutputStream.open(@write_to, suppress_extra_fields: @suppress_extra_fields) do |zos|
-          @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
+          zos.put_entries(@cdir.writable_entries, threads: @threads)
           zos.comment = comment
         end
       elsif (appended = appended_entries)
@@ -443,12 +455,12 @@ module Ziperu
         # the archive back as it was.
         ::Ziperu::OutputStream.open(@name, append: true,
                                            suppress_extra_fields: @suppress_extra_fields) do |zos|
-          appended.each { |e| e.write_to_zip_output_stream(zos) }
+          zos.put_entries(appended, threads: @threads)
         end
       else
         on_success_replace do |tmp_file|
           ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
-            @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
+            zos.put_entries(@cdir.writable_entries, threads: @threads)
             zos.comment = comment
           end
           true
@@ -586,7 +598,7 @@ module Ziperu
     # Entries the native core cannot take are returned for the Ruby loop:
     # symlinks (skipped there with a warning), encrypted entries, entries
     # not read from this archive, and names it cannot represent.
-    def extract_all_native(ordered, destination_directory, report)
+    def extract_all_native(ordered, destination_directory, report, threads)
       native = native_archive
       dest = ::File.absolute_path(destination_directory || '.')
       slow = []
@@ -604,7 +616,7 @@ module Ziperu
       # A few hundred entries per call, so an interrupt is noticed between
       # calls rather than after the whole archive.
       specs.each_slice(NATIVE_EXTRACT_BATCH) do |batch|
-        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes).each do |index, kind, path|
+        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes, threads).each do |index, kind, path|
           entry = by_index[index]
           case kind
           when :unsafe

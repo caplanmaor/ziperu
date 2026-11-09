@@ -98,12 +98,17 @@ enum Notice {
     Oversize,
 }
 
-/// Extracts `specs` under `dest` (an absolute path) in order and returns
-/// one `[index, kind, path]` triple per entry that was skipped as unsafe
+/// Extracts `specs` under `dest` (an absolute path) and returns one
+/// `[index, kind, path]` triple per entry that was skipped as unsafe
 /// (`kind` `:unsafe`) or came out larger than declared (`:oversize`, path
 /// nil). An existing file raises `Ziperu::DestinationExistsError`, a header
 /// that understates the size `Ziperu::EntrySizeError`; either leaves the
 /// entries before it extracted, as the Ruby loop would.
+///
+/// With `threads` above one (and a source that can be read without the
+/// GVL), the directories are made first, in order, and the files are
+/// then shared out among that many threads, each reading through its own
+/// handle on the archive.
 pub fn extract_entries(
     ruby: &Ruby,
     archive: ZipArchive<Source>,
@@ -111,6 +116,7 @@ pub fn extract_entries(
     dest: String,
     specs: RArray,
     enforce_size: bool,
+    threads: usize,
 ) -> Result<RArray, Error> {
     let mut entries = Vec::with_capacity(specs.len());
     let mut parsed = Vec::with_capacity(specs.len());
@@ -141,27 +147,16 @@ pub fn extract_entries(
         });
     }
 
+    let threads = if needs_gvl { 1 } else { threads.max(1) };
     let outcome = maybe_without_gvl(needs_gvl, || {
-        let mut extractor = Extractor {
-            archive,
-            dest: dest.as_str(),
-            enforce_size,
-            made: HashSet::new(),
-            buf: vec![0; CHUNK],
-            notices: Vec::new(),
-        };
-        for (i, spec) in parsed.iter().enumerate() {
-            if let Err(failure) = extractor.extract(spec) {
-                return Err((i, failure));
-            }
-        }
-        Ok(extractor.notices)
+        extract_all(archive, &dest, enforce_size, &parsed, threads)
     });
 
-    let notices = match outcome {
+    let mut notices = match outcome {
         Ok(notices) => notices,
         Err((i, failure)) => return Err(raise(ruby, entries[i], failure)),
     };
+    notices.sort_by_key(|(index, _)| *index);
     let unsafe_kind = ruby.to_symbol("unsafe");
     let oversize_kind = ruby.to_symbol("oversize");
     let out = ruby.ary_new_capa(notices.len());
@@ -173,6 +168,70 @@ pub fn extract_entries(
         out.push(triple)?;
     }
     Ok(out)
+}
+
+/// What one extractor comes back with: its notices, or the first entry
+/// (by index into the batch) that failed, and how.
+type Outcome = Result<Vec<(usize, Notice)>, (usize, Failure)>;
+
+/// Runs the specs: the directories first, in order, then the files, on
+/// `threads` threads when there is more than one file. Fails with the
+/// first failure in spec order.
+fn extract_all(
+    archive: ZipArchive<Source>,
+    dest: &str,
+    enforce_size: bool,
+    specs: &[Spec],
+    threads: usize,
+) -> Outcome {
+    let files_from = specs
+        .iter()
+        .position(|s| !s.directory)
+        .unwrap_or(specs.len());
+    let (dirs, files) = specs.split_at(files_from);
+    let mut extractor = Extractor::new(archive, dest, enforce_size);
+    extractor.extract_each(dirs, 0)?;
+    if threads <= 1 || files.len() <= 1 {
+        extractor.extract_each(files, files_from)?;
+        return Ok(extractor.notices);
+    }
+
+    // Each thread takes every `threads`th file, so a run of large ones
+    // is shared out, and reads through its own handle on the archive.
+    let threads = threads.min(files.len());
+    let results: Vec<Outcome> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|t| {
+                let mut worker = Extractor::new(extractor.archive.clone(), dest, enforce_size);
+                worker.made.clone_from(&extractor.made);
+                scope.spawn(move || {
+                    for (i, spec) in files.iter().enumerate().skip(t).step_by(threads) {
+                        worker.extract(spec).map_err(|f| (files_from + i, f))?;
+                    }
+                    Ok(worker.notices)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().expect("extraction thread panicked"))
+            .collect()
+    });
+    let mut notices = extractor.notices;
+    let mut first_failure: Option<(usize, Failure)> = None;
+    for result in results {
+        match result {
+            Ok(found) => notices.extend(found),
+            Err((i, f)) if first_failure.as_ref().is_none_or(|(j, _)| i < *j) => {
+                first_failure = Some((i, f));
+            }
+            Err(_) => {}
+        }
+    }
+    match first_failure {
+        Some(failure) => Err(failure),
+        None => Ok(notices),
+    }
 }
 
 fn system_time(sec: i64, nsec: u32) -> Option<SystemTime> {
@@ -211,7 +270,27 @@ struct Extractor<'a> {
     notices: Vec<(usize, Notice)>,
 }
 
-impl Extractor<'_> {
+impl<'a> Extractor<'a> {
+    fn new(archive: ZipArchive<Source>, dest: &'a str, enforce_size: bool) -> Self {
+        Self {
+            archive,
+            dest,
+            enforce_size,
+            made: HashSet::new(),
+            buf: vec![0; CHUNK],
+            notices: Vec::new(),
+        }
+    }
+
+    /// Extracts `specs` in order; `offset` is the index of the first in
+    /// the whole batch, for naming the one that failed.
+    fn extract_each(&mut self, specs: &[Spec], offset: usize) -> Result<(), (usize, Failure)> {
+        for (i, spec) in specs.iter().enumerate() {
+            self.extract(spec).map_err(|f| (offset + i, f))?;
+        }
+        Ok(())
+    }
+
     fn extract(&mut self, spec: &Spec) -> Result<(), Failure> {
         let Some(path) = safe_path(self.dest, &spec.name) else {
             let shown = resolve(self.dest, &spec.name);
@@ -230,12 +309,13 @@ impl Extractor<'_> {
         if self.made.contains(path) {
             return Ok(());
         }
-        if path.is_dir() {
-            self.made.insert(path.to_path_buf());
-            return Ok(());
-        }
-        if path.exists() {
-            return Err(Failure::Exists(path_string(path)));
+        match fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                self.made.insert(path.to_path_buf());
+                return Ok(());
+            }
+            Ok(_) => return Err(Failure::Exists(path_string(path))),
+            Err(_) => {}
         }
         fs::create_dir_all(path).map_err(at(path))?;
         self.made.insert(path.to_path_buf());

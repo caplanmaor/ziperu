@@ -58,7 +58,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("read_entry", method!(archive::Archive::read_entry, 1))?;
     archive.define_method(
         "extract_entries",
-        method!(archive::Archive::extract_entries, 3),
+        method!(archive::Archive::extract_entries, 4),
     )?;
     archive.define_method("close", method!(archive::Archive::close, 0))?;
     archive.define_method("closed?", method!(archive::Archive::is_closed, 0))?;
@@ -78,6 +78,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_singleton_method("open_stream", function!(writer::Writer::open_stream, 1))?;
     writer.define_singleton_method("open_append", function!(writer::Writer::open_append, 1))?;
     writer.define_method("abort", method!(writer::Writer::abort, 0))?;
+    writer.define_method(
+        "add_files_parallel",
+        method!(writer::Writer::add_files_parallel, 2),
+    )?;
     writer.define_method("start_entry", method!(writer::Writer::start_entry, 2))?;
     writer.define_method("add_directory", method!(writer::Writer::add_directory, 2))?;
     writer.define_method("add_symlink", method!(writer::Writer::add_symlink, 3))?;

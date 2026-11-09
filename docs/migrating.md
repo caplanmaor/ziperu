@@ -124,6 +124,12 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **Threads.** `extract_all(dir, threads: 8)` inflates and writes the
+  files on eight threads (the archive is read through one handle per
+  thread, with the GVL released); `OutputStream#add_files(files, threads:
+  8)`, `Ziperu::File.open(path, threads: 8)` and `File.add_recursive(zip,
+  dir, threads: 8)` compress files from disk in parallel. The entries
+  come out in the same order as one by one; the default is one thread.
 - **Non-destructive open.** `Ziperu::File.open(path, write: false)` is
   read-only: any change raises, and `close` never touches the file, where
   rubyzip's `open` rewrites the archive on close (and has lost content

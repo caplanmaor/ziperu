@@ -94,10 +94,10 @@ end
 Zip a directory, unzip into one:
 
 ```ruby
-Ziperu::File.add_recursive("site.zip", "public")   # what is under public/, at the root
-
+Ziperu::File.add_recursive("site.zip", "public", threads: 8)   # what is under public/,
+                                                               # compressed on 8 threads
 Ziperu::File.open("site.zip") do |zf|
-  zf.extract_all("restored/")               # never writes outside restored/
+  zf.extract_all("restored/", threads: 8)   # never writes outside restored/
 end
 ```
 
