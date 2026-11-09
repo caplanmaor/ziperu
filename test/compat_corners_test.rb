@@ -134,9 +134,11 @@ class CompatCornersTest < Minitest::Test
     meta = { index: 0, name: "x", size: 0, compressed_size: 0, crc: 0, compression_method: 0,
              flags: 0, fstype: 0, version_made_by: 20, external_attributes: 0, unix_mode: nil,
              dos_date: 0, dos_time: 0, comment: "", extra: "", header_offset: 0, data_offset: 0 }
+    # The timestamp is parsed when first asked for, except that with the
+    # warning on it is parsed up front, so the warning comes on open.
     Ziperu.warn_invalid_date = true
     assert_output("", /invalid date/) { Ziperu::Entry.from_meta(nil, meta) }
     Ziperu.warn_invalid_date = false
-    assert_silent { Ziperu::Entry.from_meta(nil, meta) }
+    assert_silent { Ziperu::Entry.from_meta(nil, meta).time }
   end
 end

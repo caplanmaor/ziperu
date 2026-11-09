@@ -76,6 +76,10 @@ body = Ziperu::OutputStream.body do |zos|   # a Rack body: an Enumerator of
 end
 [200, { "content-type" => "application/zip" }, body]
 
+Ziperu::File.foreach("huge.zip") do |entry|   # one entry at a time, constant
+  puts entry.name if entry.size > 1 << 30      # memory, however many there are
+end
+
 Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
   zf.extract_all("out/")
   zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit

@@ -42,7 +42,8 @@ module Ziperu
     # ziperu's own version and take their 2.x path, so both forms work.
     CREATE = true
 
-    def initialize(path_or_io, legacy_create = nil, create: false, buffer: false,
+    def initialize(path_or_io, legacy_create = nil, legacy_buffer = nil, legacy_options = nil,
+                   create: false, buffer: false,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
@@ -63,7 +64,15 @@ module Ziperu
                  else
                    path_or_io
                  end
-      create = legacy_create unless legacy_create.nil? # the 2.x positional flag
+      # rubyzip 2.x's positional form: `new(path, create, buffer, options)`.
+      create = legacy_create unless legacy_create.nil?
+      buffer = legacy_buffer unless legacy_buffer.nil?
+      if legacy_options
+        restore_ownership   = legacy_options.fetch(:restore_ownership, restore_ownership)
+        restore_permissions = legacy_options.fetch(:restore_permissions, restore_permissions)
+        restore_times       = legacy_options.fetch(:restore_times, restore_times)
+        compression_level   = legacy_options.fetch(:compression_level, compression_level)
+      end
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
@@ -80,14 +89,16 @@ module Ziperu
 
       # Similar to ::new. If a block is passed the Ziperu::File object is passed
       # to the block and is automatically closed afterwards.
-      def open(file_name, legacy_create = nil, create: false,
+      def open(file_name, legacy_create = nil, legacy_options = nil, create: false,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Ziperu.default_compression,
                suppress_extra_fields: false, password: nil, decrypter: nil)
+        # rubyzip 2.x's `open(path, create, options)`.
         create = legacy_create unless legacy_create.nil?
-        zf = ::Ziperu::File.new(file_name, create:                create,
+        zf = ::Ziperu::File.new(file_name, nil, nil, legacy_options,
+                                        create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
@@ -103,6 +114,17 @@ module Ziperu
         ensure
           zf.close
         end
+      end
+
+      # rubyzip 2.x's way to build an archive in memory (3.x dropped it):
+      # yields a new archive over a StringIO and returns that StringIO,
+      # written, when the block is done. `open_buffer(create: true)` is
+      # the current form.
+      def add_buffer
+        io = ::StringIO.new
+        zf = ::Ziperu::File.new(io, create: true, buffer: true)
+        yield zf
+        zf.write_buffer(io)
       end
 
       # Like #open, but reads zip archive contents from a String or open IO
@@ -145,11 +167,22 @@ module Ziperu
         end
       end
 
-      # Iterates over the contents of the ZipFile.
-      def foreach(zip_file_name, &block)
-        ::Ziperu::File.open(zip_file_name) do |zip_file|
-          zip_file.each(&block)
+      # Yields each entry of the archive at `path_or_io`, in order, without
+      # building the whole listing first: the way to walk an archive with
+      # hundreds of thousands of entries, or to stop at the first match.
+      # Each entry can be read (`get_input_stream`, `extract`) while the
+      # block runs; the archive is closed when `foreach` returns. Without a
+      # block, returns an Enumerator.
+      def foreach(path_or_io, &block)
+        return enum_for(:foreach, path_or_io) unless block
+
+        native = InputStream.open_archive(path_or_io)
+        begin
+          native.each_entry { |meta| yield Entry.from_meta(native, meta, nil) }
+        ensure
+          native.close
         end
+        nil
       end
 
       # Count the entries in a zip archive without building entry objects.
@@ -189,10 +222,22 @@ module Ziperu
     # instance of Ziperu::Entry, a new Ziperu::Entry will be initialized using the
     # arguments specified. If a block is passed the stream object is passed
     # to the block and closed afterwards.
-    def get_output_stream(entry, permissions: nil, comment: nil,
+    def get_output_stream(entry, *legacy, permissions: nil, comment: nil,
                           extra: nil, compressed_size: nil, crc: nil,
                           compression_method: nil, compression_level: nil,
                           size: nil, time: nil, &a_proc)
+      unless legacy.empty? # rubyzip 2.x's positional form, `(name, 0o644)` mostly
+        given = %i[permissions comment extra compressed_size crc compression_method size time]
+                .zip(legacy).to_h
+        permissions        = given.fetch(:permissions, permissions)
+        comment            = given.fetch(:comment, comment)
+        extra              = given.fetch(:extra, extra)
+        compressed_size    = given.fetch(:compressed_size, compressed_size)
+        crc                = given.fetch(:crc, crc)
+        compression_method = given.fetch(:compression_method, compression_method)
+        size               = given.fetch(:size, size)
+        time               = given.fetch(:time, time)
+      end
       new_entry =
         if entry.kind_of?(Entry)
           entry
@@ -611,7 +656,7 @@ module Ziperu
       path_or_io.binmode if path_or_io.respond_to?(:binmode)
       @native = InputStream.open_archive(path_or_io)
       @comment = @native.comment # the stored bytes, as rubyzip reads them
-      @native.entries.each { |meta| @cdir.push_record(Entry.from_meta(@native, meta, self)) }
+      @native.each_entry { |meta| @cdir.push_record(Entry.from_meta(@native, meta, self)) }
     end
 
     def release_native

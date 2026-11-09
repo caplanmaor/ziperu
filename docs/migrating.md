@@ -84,9 +84,15 @@ until it goes. Exception classes follow the namespace, so rescue
   it can; `Ziperu::File.open` raises in both.
 - `Zip::VERSION` is ziperu's own version, not rubyzip's. Code that gates on
   it (`Gem::Version.new(Zip::VERSION) >= "3"`) takes its rubyzip 2.x path,
-  so ziperu accepts those call forms too: `Zip::File.open(path,
-  Zip::File::CREATE)`, `Zip::File.new(path, true)`. New code should check
-  `Ziperu::RUBYZIP_COMPAT_VERSION`.
+  so ziperu accepts the 2.x call forms alongside the 3.x keywords:
+  `Zip::File.open(path, Zip::File::CREATE)` and `Zip::File.new(path,
+  create, buffer, options)`, `Zip::File.add_buffer { |zf| }`,
+  `get_output_stream(name, permissions, comment, ...)`, `Zip::Entry.new(zip,
+  name, comment, extra, ...)`, `Zip::InputStream.open(io, offset,
+  decrypter)`, `Zip::OutputStream.new(io, stream, encrypter)` and
+  `write_buffer(io, encrypter)`, `Zip::GPFBit3Error`, and the rubyzip 1.x
+  error names (`Zip::ZipError`, `Zip::ZipEntryExistsError`, ...). New code
+  should use the keywords and check `Ziperu::RUBYZIP_COMPAT_VERSION`.
 - An open `Ziperu::File` holds its file open until `close`. On Windows a
   commit by *another* `Ziperu::File` on the same path therefore moves the
   old archive aside before putting the new one in place, and removes it
@@ -150,6 +156,11 @@ Everything here is additive: code that does not use it behaves as above.
   entry goes out as it is written, with its sizes in a data descriptor
   after the data, which every zip reader since PKZIP 2.0 understands;
   rubyzip needs a seekable IO there.
+- **Walking a huge archive.** `Ziperu::File.foreach(path) { |entry| ... }`
+  yields the entries one at a time without listing them all first, in
+  constant memory, each readable while the block runs; without a block it
+  is an Enumerator (`foreach(path).find { ... }` stops at the first
+  match). rubyzip's `foreach` opens the whole archive.
 - **A streaming HTTP response body.** `Ziperu::OutputStream.body { |zos| ... }`
   is an Enumerator of the archive's bytes in chunks, produced as they are
   consumed: hand it to Rack (or anything with `each`) as the body and the

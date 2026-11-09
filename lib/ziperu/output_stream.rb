@@ -26,9 +26,13 @@ module Ziperu
     # ZipCrypto entries need their headers patched once the data is
     # written, so with a `TraditionalEncrypter` (or `memory: true`) the
     # archive is built in memory and written out in one go at `close`.
-    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false,
+    def initialize(file_name, legacy_stream = nil, legacy_encrypter = nil,
+                   stream: false, encrypter: nil, suppress_extra_fields: false,
                    memory: false, **opts)
       super(**opts)
+      # rubyzip 2.x's `new(io, stream, encrypter)`.
+      stream = legacy_stream unless legacy_stream.nil?
+      encrypter ||= legacy_encrypter
       @file_name = file_name
       @io = nil
       @encrypter = encrypter || ::Ziperu::NullEncrypter.new
@@ -62,7 +66,8 @@ module Ziperu
     class << self
       # Same as #initialize but if a block is passed the opened stream is
       # passed to the block and closed when the block returns.
-      def open(file_name, encrypter: nil, suppress_extra_fields: false, **opts)
+      def open(file_name, legacy_encrypter = nil, encrypter: nil, suppress_extra_fields: false, **opts)
+        encrypter ||= legacy_encrypter # rubyzip 2.x's `open(path, encrypter)`
         unless block_given?
           return new(file_name, encrypter: encrypter,
                                 suppress_extra_fields: suppress_extra_fields, **opts)
@@ -85,8 +90,9 @@ module Ziperu
 
       # Same as #open but writes to an IO instead; returns the IO. A pipe,
       # socket or response body is streamed to as the entries are written.
-      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false,
-                       memory: false, **opts)
+      def write_buffer(io = ::StringIO.new, legacy_encrypter = nil, encrypter: nil,
+                       suppress_extra_fields: false, memory: false, **opts)
+        encrypter ||= legacy_encrypter # rubyzip 2.x's `write_buffer(io, encrypter)`
         zos = new(io, stream: true, encrypter: encrypter, memory: memory,
                       suppress_extra_fields: suppress_extra_fields, **opts)
         begin

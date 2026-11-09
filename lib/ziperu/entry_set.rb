@@ -146,8 +146,10 @@ module Ziperu
     # and a lookup with the same bytes in another encoding should find
     # them (which in rubyzip it does not).
     def to_key(entry)
-      k = entry.to_s.b.chomp('/')
-      k.downcase! if ::Ziperu.case_insensitive_match
+      k = entry.to_s
+      k = k.b unless k.encoding == ::Encoding::BINARY
+      k = k.chomp('/') if k.end_with?('/')
+      k = k.downcase if ::Ziperu.case_insensitive_match
       k
     end
   end

@@ -48,13 +48,20 @@ module Ziperu
       if @archive && !@local_extra_merged
         @local_extra_merged = true
         local = @index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)
-        @extra.merge(local, local: true)
+        parsed_extra.merge(local, local: true)
         # Edits made through this object (`extra.merge`, `extra.delete`)
         # leave no other trace; the bytes are compared at commit.
         @extra_snapshot = extra_bytes
       end
-      @extra
+      parsed_extra
     end
+
+    # The central directory's extra fields, parsed on first use: most
+    # entries of a large archive are only ever listed.
+    def parsed_extra
+      @extra ||= ExtraField.new(@extra_raw)
+    end
+    private :parsed_extra
 
     # Whether the extra fields differ from what the archive holds. Such an
     # edit is written whenever the archive is next committed, but does not
@@ -66,7 +73,7 @@ module Ziperu
     end
 
     def extra_bytes # :nodoc:
-      [@extra.to_local_bin.b, @extra.to_c_dir_bin.b]
+      [parsed_extra.to_local_bin.b, parsed_extra.to_c_dir_bin.b]
     end
 
     # The native archive this entry was read from, reopened if the owning
@@ -115,13 +122,24 @@ module Ziperu
 
     # Create a new Ziperu::Entry.
     def initialize(
-      zipfile = '', name = '',
+      zipfile = '', name = '', *legacy,
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
       compression_level: ::Ziperu.default_compression,
       time: ::Ziperu::DOSTime.now, extra: ::Ziperu::ExtraField.new
     )
       super()
+      unless legacy.empty? # rubyzip 2.x's positional form
+        given = %i[comment extra compressed_size crc compression_method size time]
+                .zip(legacy).to_h
+        comment            = given.fetch(:comment, comment)
+        extra              = given.fetch(:extra, extra)
+        compressed_size    = given.fetch(:compressed_size, compressed_size)
+        crc                = given.fetch(:crc, crc)
+        compression_method = given.fetch(:compression_method, compression_method)
+        size               = given.fetch(:size, size)
+        time               = given.fetch(:time, time)
+      end
       @name = name
       check_name(@name)
 
@@ -200,8 +218,21 @@ module Ziperu
           extra[:ntfs].send(component)
         end
 
-      time || (@time if component == :mtime)
+      time || (stored_time if component == :mtime)
     end
+
+    # The DOS timestamp from the central directory, parsed on first use.
+    # Like rubyzip, an unparseable one is reported (when
+    # `Ziperu.warn_invalid_date` is set) and the entry keeps "now".
+    def stored_time
+      return @time if @time || @dos_date.nil?
+
+      @time = ::Ziperu::DOSTime.parse_binary_dos_format(@dos_date, @dos_time)
+    rescue ArgumentError
+      warn 'WARNING: invalid date/time in zip entry.' if ::Ziperu.warn_invalid_date
+      @time = ::Ziperu::DOSTime.now
+    end
+    private :stored_time
 
     alias mtime time
 
@@ -798,7 +829,7 @@ module Ziperu
       # same bytes. The raw name, before separators are normalised, is what
       # the archive knows the entry by.
       @gp_flags = meta[:flags]
-      @original_name = meta[:name].dup
+      @original_name = meta[:name]
       @name = decode_stored_text(@original_name.dup)
       @name.tr!('\\', '/')
       @size = meta[:size]
@@ -810,8 +841,13 @@ module Ziperu
       @version = meta[:version_made_by]
       @external_file_attributes = meta[:external_attributes]
       set_time(meta[:dos_date], meta[:dos_time])
-      @comment = decode_stored_text(meta[:comment].dup)
-      @extra = ExtraField.new(meta[:extra])
+      # Most entries have no comment and many no extra fields: those share
+      # one empty String rather than carrying their own.
+      comment = meta[:comment]
+      @comment = comment.empty? ? '' : decode_stored_text(comment)
+      @extra = nil
+      extra = meta[:extra]
+      @extra_raw = extra.empty? ? '' : extra
       @local_extra_merged = false
       @local_header_offset = meta[:header_offset]
       set_ftype_from_c_dir_entry
@@ -829,13 +865,25 @@ module Ziperu
       text
     end
 
-    # Like rubyzip, an unparseable DOS timestamp is reported (when
-    # `Ziperu.warn_invalid_date` is set) and the entry keeps "now".
+    # Keeps the DOS timestamp as read; `stored_time` parses it when asked.
+    # With `Ziperu.warn_invalid_date` set, a timestamp whose fields are out
+    # of range is parsed here instead, so that the warning comes when the
+    # archive is opened, as rubyzip's does.
     def set_time(binary_dos_date, binary_dos_time)
-      @time = ::Ziperu::DOSTime.parse_binary_dos_format(binary_dos_date, binary_dos_time)
-    rescue ArgumentError
-      @time = ::Ziperu::DOSTime.now
-      warn 'WARNING: invalid date/time in zip entry.' if ::Ziperu.warn_invalid_date
+      @time = nil
+      @dos_date = binary_dos_date
+      @dos_time = binary_dos_time
+      return unless ::Ziperu.warn_invalid_date
+
+      stored_time unless dos_fields_in_range?(binary_dos_date, binary_dos_time)
+    end
+
+    # The cheap check: every field within the range `Time.local` accepts.
+    # (A day past the month's end is accepted and rolled over, as rubyzip
+    # does.)
+    def dos_fields_in_range?(date, time)
+      ((date >> 5) & 0xF).between?(1, 12) && (date & 0x1F) >= 1 &&
+        (time >> 11) <= 23 && ((time >> 5) & 0x3F) <= 59 && (time & 0x1F) <= 29
     end
 
     def set_compression_level_flags

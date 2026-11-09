@@ -197,6 +197,26 @@ impl Archive {
     /// alone, since the crate's view keeps only the last of each name: a
     /// record the crate still addresses carries its index, the others nil.
     pub fn entries(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let out = ruby.ary_new();
+        Self::each_meta(ruby, rb_self, |h| out.push(h))?;
+        Ok(out)
+    }
+
+    /// `entries`, one Hash at a time to the block: a large archive's
+    /// listing need never be in memory all at once.
+    pub fn each_entry(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
+        let block = ruby.block_proc()?;
+        Self::each_meta(ruby, rb_self, |h| block.call::<_, Value>((h,)).map(|_| ()))
+    }
+
+    /// Hands the Hash for each entry, in central directory order, to
+    /// `emit`. The archive is not borrowed while `emit` runs, so it may
+    /// call back in.
+    fn each_meta(
+        ruby: &Ruby,
+        rb_self: &Self,
+        mut emit: impl FnMut(RHash) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let archive = rb_self.archive(ruby)?;
         let meta = archive.metadata();
         let duplicates = archive.has_duplicate_names();
@@ -216,12 +236,11 @@ impl Archive {
                 let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
                 by_offset.insert(entry.central_header_start(), i);
             }
-            let out = ruby.ary_new_capa(records.len());
             for record in &records {
                 let index = by_offset.get(&record.central_offset).copied();
-                out.push(record_hash(ruby, &keys, index, record, archive_offset)?)?;
+                emit(record_hash(ruby, &keys, index, record, archive_offset)?)?;
             }
-            return Ok(out);
+            return Ok(());
         }
 
         let records = maybe_without_gvl(rb_self.needs_gvl, || {
@@ -233,12 +252,11 @@ impl Archive {
                 .collect::<ZipResult<Vec<_>>>()
         })
         .map_err(|e| zip_error(ruby, e))?;
-        let out = ruby.ary_new_capa(meta.len());
         for (i, record) in records.iter().enumerate() {
             let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
-            out.push(entry_hash(ruby, &keys, i, &entry, record)?)?;
+            emit(entry_hash(ruby, &keys, i, &entry, record)?)?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// The Hash for a single entry.
@@ -251,6 +269,31 @@ impl Archive {
         let record = raw_central_record(&mut raw, entry.central_header_start())
             .map_err(|e| io_error(ruby, e))?;
         entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &record)
+    }
+
+    /// The Hashes for up to `count` entries from `index` on, in one go:
+    /// `InputStream` walks an archive with these, a batch at a time,
+    /// rather than opening the source once per entry.
+    pub fn entry_metas(
+        ruby: &Ruby,
+        rb_self: &Self,
+        index: usize,
+        count: usize,
+    ) -> Result<RArray, Error> {
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
+        let mut raw = archive.clone().into_inner().clone_small();
+        drop(archive);
+        let end = index.saturating_add(count).min(meta.len());
+        let keys = MetaKeys::new(ruby);
+        let out = ruby.ary_new_capa(end.saturating_sub(index));
+        for i in index..end {
+            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+            let record = raw_central_record(&mut raw, entry.central_header_start())
+                .map_err(|e| io_error(ruby, e))?;
+            out.push(entry_hash(ruby, &keys, i, &entry, &record)?)?;
+        }
+        Ok(out)
     }
 
     /// The raw extra field bytes of entry `index`'s local header. Some

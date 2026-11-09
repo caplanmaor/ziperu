@@ -134,6 +134,15 @@ module Ziperu
   class GPFBit3Error < Error; end
   class InternalError < Error; end
 
+  # rubyzip 1.x's names, which 2.x still carried and code written back
+  # then rescues; 3.0 removed them.
+  ZipError = Error
+  ZipEntryExistsError = EntryExistsError
+  ZipDestinationFileExistsError = DestinationExistsError
+  ZipCompressionMethodError = CompressionMethodError
+  ZipEntryNameError = EntryNameError
+  ZipInternalError = InternalError
+
   # Raised when an archive exceeds `Ziperu.max_entries` or
   # `Ziperu.max_total_size` on open.
   class LimitError < Error

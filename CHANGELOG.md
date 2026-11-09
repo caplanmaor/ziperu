@@ -13,6 +13,26 @@
 - `Ziperu::OutputStream.body { |zos| ... }` returns the archive as an
   Enumerator of chunks, produced on demand: a Rack response body for a
   streamed download, with no temp file.
+- Large archives: `Ziperu::File.foreach(path) { |entry| ... }` walks the
+  entries one at a time, in constant memory, with each entry readable as
+  it goes by (and is an Enumerator without a block, so `first`, `find`
+  and `lazy` work); `Ziperu::File.open` on an archive of 200,000 entries
+  takes half the time and under half the memory it did (the listing is
+  handed over one entry at a time, extra fields and timestamps are parsed
+  on first use, entries without a comment share one empty String); an
+  `InputStream` walk fetches entries in batches and is about a third
+  faster. An entry's invalid DOS timestamp is parsed when its `time` is
+  first asked for, unless `Ziperu.warn_invalid_date` is set, in which
+  case the warning still comes when the archive is opened.
+- The rest of rubyzip 2.x's call forms, for libraries that take their
+  2.x path because `Zip::VERSION` is ziperu's: `Zip::File.new(path,
+  create, buffer, options)` and `Zip::File.open(path, create, options)`,
+  `Zip::File.add_buffer`, positional `get_output_stream(name,
+  permissions, ...)` and `Zip::Entry.new(zip, name, comment, ...)`,
+  `Zip::InputStream.new(io, offset, decrypter)`, `Zip::OutputStream.new(io,
+  stream, encrypter)`, `OutputStream.open(path, encrypter)` and
+  `write_buffer(io, encrypter)`, and the rubyzip 1.x error names
+  (`Zip::ZipError` and friends) that 3.0 removed.
 - `Ziperu::File.open(path, password: "...")` (or `decrypter:`) decrypts
   every entry for `read`, `get_input_stream`, `extract`, `extract_all` and
   `verify`, AES and ZipCrypto alike; `InputStream.open` takes `password:`

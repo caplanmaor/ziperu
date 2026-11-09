@@ -26,7 +26,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_singleton_method("open_io", function!(archive::Archive::open_io, 1))?;
     archive.define_method("entry_count", method!(archive::Archive::entry_count, 0))?;
     archive.define_method("entries", method!(archive::Archive::entries, 0))?;
+    archive.define_method("each_entry", method!(archive::Archive::each_entry, 0))?;
     archive.define_method("entry_meta", method!(archive::Archive::entry_meta, 1))?;
+    archive.define_method("entry_metas", method!(archive::Archive::entry_metas, 2))?;
     archive.define_method("local_extra", method!(archive::Archive::local_extra, 1))?;
     archive.define_method(
         "local_extra_at",

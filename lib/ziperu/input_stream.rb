@@ -25,8 +25,12 @@ module Ziperu
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, password: nil,
+    def initialize(context, legacy_offset = nil, legacy_decrypter = nil,
+                   offset: 0, decrypter: nil, password: nil,
                    enforce_size: ::Ziperu.validate_entry_sizes, **opts)
+      # rubyzip 2.x's `new(io, offset, decrypter)`.
+      offset = legacy_offset unless legacy_offset.nil?
+      decrypter ||= legacy_decrypter
       # `password:` is the plain form of `decrypter:`; the native core tells
       # AES from ZipCrypto by the entry, so one password serves both.
       decrypter ||= TraditionalDecrypter.new(password) if password
@@ -95,12 +99,27 @@ module Ziperu
         return @current_entry = nil
       end
 
-      meta = @records ? @records[@next_index] : @archive.entry_meta(@next_index)
-      @current_entry = Entry.from_meta(@archive, meta)
+      @current_entry = Entry.from_meta(@archive, meta_at(@next_index))
       @next_index += 1
       open_entry
       @current_entry
     end
+
+    # Entries are fetched from the archive a batch at a time: opening the
+    # source once per entry is most of the cost of walking a large archive.
+    META_BATCH = 64
+    private_constant :META_BATCH
+
+    def meta_at(index)
+      return @records[index] if @records
+
+      unless @batch && index >= @batch_at && index < @batch_at + @batch.size
+        @batch_at = index
+        @batch = @archive.entry_metas(index, META_BATCH)
+      end
+      @batch[index - @batch_at]
+    end
+    private :meta_at
 
     # Position the stream at an entry that already exists as an object
     # (used by Entry#get_input_stream to avoid rebuilding it).
@@ -158,8 +177,10 @@ module Ziperu
     class << self
       # Same as #initialize but if a block is passed the opened stream is
       # passed to the block and closed when the block returns.
-      def open(filename_or_io, offset: 0, decrypter: nil, password: nil, **opts)
-        zio = new(filename_or_io, offset: offset, decrypter: decrypter, password: password, **opts)
+      def open(filename_or_io, legacy_offset = nil, legacy_decrypter = nil,
+               offset: 0, decrypter: nil, password: nil, **opts)
+        zio = new(filename_or_io, legacy_offset, legacy_decrypter,
+                  offset: offset, decrypter: decrypter, password: password, **opts)
         return zio unless block_given?
 
         begin
