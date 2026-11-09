@@ -82,8 +82,10 @@ until it goes. Exception classes follow the namespace, so rescue
   `Ziperu::Error`, where rubyzip walks the local headers and yields what
   it can; `Ziperu::File.open` raises in both.
 - `Zip::VERSION` is ziperu's own version, not rubyzip's. Code that gates on
-  it (`Gem::Version.new(Zip::VERSION) >= "3"`) should check
-  `Ziperu::RUBYZIP_COMPAT_VERSION` instead.
+  it (`Gem::Version.new(Zip::VERSION) >= "3"`) takes its rubyzip 2.x path,
+  so ziperu accepts those call forms too: `Zip::File.open(path,
+  Zip::File::CREATE)`, `Zip::File.new(path, true)`. New code should check
+  `Ziperu::RUBYZIP_COMPAT_VERSION`.
 - An open `Ziperu::File` holds its file open until `close`. On Windows a
   commit by *another* `Ziperu::File` on the same path therefore moves the
   old archive aside before putting the new one in place, and removes it

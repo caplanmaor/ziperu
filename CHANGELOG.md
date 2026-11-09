@@ -20,7 +20,13 @@
 - Walking a large archive with `InputStream` is about 2.5x faster (each
   entry read an 8 KiB buffer instead of 64 KiB; large reads bypass it).
 - The committed COMPAT.md is now the baseline CI holds rubyzip's test
-  suite to.
+  suite to, and the test suites of roo, caxlsx, rubyXL, docx, write_xlsx,
+  sablon and gepub run weekly with ziperu standing in for rubyzip. Running
+  them turned up three gaps, now closed: the rubyzip 2.x call forms
+  `Zip::File.open(path, Zip::File::CREATE)` and `Zip::File.new(path, true)`
+  (libraries that branch on `Zip::VERSION >= 3` take their 2.x path with
+  ziperu), `Zip::CentralDirectory.new.read_from_stream(io)` (roo), and
+  `Entry#calculate_local_header_size` / `#local_entry_offset` (roo again).
 
 ## 0.1.2
 
