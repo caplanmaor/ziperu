@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-09)
 
 - XZ and PPMd on write (`Entry::XZ`, `Entry::PPMD`), alongside bzip2 and
   zstd; 7-Zip reads all four. `add_recursive(dir, symlinks: :store)`
