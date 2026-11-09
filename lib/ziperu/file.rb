@@ -339,7 +339,7 @@ module Ziperu
       # Directories first, so files have somewhere to go; links last, so
       # nothing is written through one. Of several records under one name
       # only the last is extracted, which is the one rubyzip would know.
-      dirs, rest = entries.reject { |e| @cdir.shadowed?(e) }.partition(&:directory?)
+      dirs, rest = @cdir.writable_entries.partition(&:directory?)
       links, others = rest.partition(&:symlink?)
       ordered = dirs + others + links
       total = ordered.size
@@ -412,7 +412,7 @@ module Ziperu
       else
         on_success_replace do |tmp_file|
           ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
-            @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
+            @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
             zos.comment = comment
           end
           true
@@ -463,10 +463,10 @@ module Ziperu
 
       # ZipCrypto entries are copied with patched headers, which a stream
       # (a pipe, say) cannot take: such an archive is built in memory first.
-      memory = @cdir.any? { |e| !@cdir.shadowed?(e) && e.zipcrypto? }
+      memory = @cdir.writable_entries.any?(&:zipcrypto?)
       ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields,
                                               memory: memory) do |zos|
-        @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
+        @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
         zos.comment = comment
       end
     end

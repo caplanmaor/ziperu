@@ -56,7 +56,7 @@ module Ziperu
             # cannot be opened (a truncated one, say) is an error.
             raise if self.class.archive_like?(context)
 
-            @not_an_archive = e
+            @open_error = e
             nil
           end
         end
@@ -81,7 +81,7 @@ module Ziperu
       @reader = nil
       @archive&.close if @owns_archive
       @archive = nil
-      @not_an_archive = nil
+      @open_error = nil
     end
 
     # Returns an Entry object and positions the stream at the beginning of
@@ -343,9 +343,11 @@ module Ziperu
       found && found[:index]
     end
 
-    # Closed by `close`, as opposed to never opened on an archive at all.
+    # Closed by `close`, as opposed to opened on something that is not an
+    # archive (`@open_error` holds why), which yields no entries but is
+    # not closed.
     def closed?
-      @archive.nil? && @not_an_archive.nil?
+      @archive.nil? && @open_error.nil?
     end
 
     # Re-raise the native core's errors as the rubyzip-shaped ones.

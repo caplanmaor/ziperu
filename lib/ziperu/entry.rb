@@ -496,20 +496,39 @@ module Ziperu
     # lacks) fall back to the raw copy, so only the rename or the
     # permissions persist for them.
     def write_to_zip_output_stream(zip_output_stream) # :nodoc:
-      if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
+      case write_plan
+      when :header
         # No data to stream: a symlink's target goes into the header call.
         zip_output_stream.put_next_entry(self)
-      elsif @filepath || @source_io || needs_restream? || no_raw_copy?
+      when :restream
         zip_output_stream.put_next_entry(self)
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
         end
-      elsif zipcrypto?
+      when :copy_encrypted
         zip_output_stream.copy_encrypted_entry(self)
       else
         renamed = @name.b != @original_name.b.tr('\\', '/')
         zip_output_stream.copy_raw_entry(self, (@name if renamed), touch: dirty? && !renamed)
       end
+    end
+
+    # How the entry reaches an output stream: `:header` for a directory or
+    # a symlink (nothing to stream), `:restream` to decompress and write
+    # afresh (a new entry, or one edited beyond what a raw copy carries),
+    # `:copy_encrypted` for a ZipCrypto entry copied byte for byte under
+    # its own headers, `:copy_raw` otherwise. Raises, with the reason, for
+    # an entry that would have to be restreamed but cannot be (encrypted,
+    # or a compression method the writer lacks).
+    def write_plan # :nodoc:
+      return :header if ftype == :directory || (ftype == :symlink && (@filepath || changed?))
+      return :restream if @filepath || @source_io
+
+      if changed? || @index.nil? || loses_fields_on_raw_copy?
+        check_restreamable!
+        return :restream
+      end
+      zipcrypto? ? :copy_encrypted : :copy_raw
     end
 
     # What `FileSystem#chmod` sets, and what a touch on the raw copy writes.
@@ -526,41 +545,46 @@ module Ziperu
     end
 
     # Whether the entry has to be decompressed and written afresh rather
-    # than copied byte for byte. An encrypted entry cannot be: edits to it
-    # beyond a rename or chmod raise rather than vanish on commit, and the
-    # extra fields the raw copy loses are lost.
+    # than copied byte for byte: it was edited beyond what a raw copy
+    # carries, or the raw copy would lose extra fields it has.
     def needs_restream? # :nodoc:
-      if (dirty? && !raw_copy_carries_changes?) || extra_changed?
-        unless restreamable?
-          changed = dirty_fields.map { |f| f.to_s.chomp('=') }
-          changed << 'extra' if extra_changed?
-          changed = changed.uniq.join(', ')
-          kind = encrypted? ? 'an encrypted' : "a #{COMPRESSION_METHODS[compression_method]}"
-          raise Error, "cannot change #{changed} of entry '#{@name}': #{kind} entry " \
-                       'can only be copied as is (a rename or chmod is fine)'
-        end
+      changed? || loses_fields_on_raw_copy?
+    end
 
-        return true
-      end
+    # Edited beyond a rename or chmod (which the raw copy carries).
+    def changed? # :nodoc:
+      (dirty? && !raw_copy_carries_changes?) || extra_changed?
+    end
 
+    def loses_fields_on_raw_copy? # :nodoc:
       restreamable? && (extra.keys & RAW_COPY_LOSES).any?
     end
 
+    # Whether the writer can decompress and rewrite the entry: it is not
+    # encrypted and its compression method is one the writer has.
     def restreamable? # :nodoc:
       !encrypted? && ::Ziperu::WRITABLE_COMPRESSION_METHODS.include?(compression_method)
     end
 
-    # A record the native core cannot address by index (one of several
-    # under the same name) has no raw copy: it is written afresh, which
-    # needs a method the writer has and no encryption.
-    def no_raw_copy? # :nodoc:
-      return false unless @index.nil?
-      return true if restreamable?
+    # Raises unless the entry can be restreamed, saying why it must be:
+    # edits to an encrypted entry (or one in a method the writer lacks)
+    # beyond a rename or chmod raise rather than vanish on commit, and a
+    # record the native core cannot address by index (one of several
+    # under the same name) has no raw copy to fall back on.
+    def check_restreamable!
+      return if restreamable?
 
       kind = encrypted? ? 'an encrypted' : "a #{COMPRESSION_METHODS[compression_method]}"
+      if changed?
+        changed = dirty_fields.map { |f| f.to_s.chomp('=') }
+        changed << 'extra' if extra_changed?
+        raise Error, "cannot change #{changed.uniq.join(', ')} of entry '#{@name}': #{kind} entry " \
+                     'can only be copied as is (a rename or chmod is fine)'
+      end
       raise Error, "cannot write entry '#{@name}': #{kind} entry that shares its name with " \
                    'another record can only be read'
     end
+    private :check_restreamable!
 
     # Whether the reopened archive still holds this entry where it was.
     def still_at_place?(reopened) # :nodoc:

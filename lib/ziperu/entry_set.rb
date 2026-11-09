@@ -73,6 +73,18 @@ module Ziperu
       !current.nil? && !current.equal?(entry)
     end
 
+    # The entries that are written back: every entry but a shadowed
+    # record (see `push_record`), in order.
+    def writable_entries
+      return entries if @shadowed.zero?
+
+      entries.reject { |e| shadowed?(e) }
+    end
+
+    def each_writable(&block)
+      writable_entries.each(&block)
+    end
+
     def size
       @all.size
     end

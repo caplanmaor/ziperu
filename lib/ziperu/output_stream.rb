@@ -14,7 +14,12 @@ module Ziperu
   class OutputStream
     include ::Ziperu::IOExtras::AbstractOutputStream
 
-    attr_accessor :comment
+    attr_reader :comment
+
+    def comment=(comment)
+      @keep_comment = false
+      @comment = comment
+    end
 
     # Opens the indicated zip file. If a file with that name already exists
     # it will be overwritten. With `stream: true`, `file_name` is an IO
@@ -64,7 +69,9 @@ module Ziperu
         @writer = Native::Writer.open_path(file_name.to_s)
       end
       @suppress_extra_fields = suppress_extra_fields
-      @comment = append ? nil : ''
+      @comment = ''
+      # An append keeps the archive's own comment unless one is set.
+      @keep_comment = append
       @closed = false
       @current_entry = nil
       @written = []
@@ -255,7 +262,7 @@ module Ziperu
     private
 
     def finish_archive
-      unless @comment.nil? # nil: an append keeping the archive's own
+      unless @keep_comment
         comment = @comment.to_s.b
         if comment.bytesize > 0xFFFF
           raise ArgumentError, "archive comment is #{comment.bytesize} bytes; the limit is 65535"
