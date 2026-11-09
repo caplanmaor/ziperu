@@ -40,6 +40,10 @@ module Ziperu
 
     attr_reader :compression_level, :filepath, :source_io # :nodoc:
 
+    # The per-entry zip64 choice given to `Entry.new`, `put_next_entry` or
+    # `get_output_stream`: true, false, or nil for the default.
+    attr_accessor :zip64
+
     # Whether the data is still outside the archive: a file on disk or an
     # IO given to `add`, to be streamed in when the archive is written.
     # Until then the entry reads and extracts from that source.
@@ -144,9 +148,13 @@ module Ziperu
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
       compression_level: ::Ziperu.default_compression,
-      time: nil, extra: ::Ziperu::ExtraField.new
+      time: nil, extra: ::Ziperu::ExtraField.new, zip64: nil
     )
       super()
+      # Whether to write the entry zip64-ready (64-bit size fields and a
+      # 64-bit data descriptor): true, false, or nil to decide by the size
+      # and `Ziperu.write_zip64_support`, as rubyzip does.
+      @zip64 = zip64
       # rubyzip 2.x's positional form.
       given = Compat.positional(
         legacy, %i[comment extra compressed_size crc compression_method size time],
@@ -895,6 +903,7 @@ module Ziperu
 
     def init_from_meta(archive, meta, zipfile, metadata_encoding = nil)
       @dirty = false
+      @zip64 = nil
       set_default_vars_values
       @zipfile = zipfile
       @archive = archive

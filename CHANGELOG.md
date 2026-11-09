@@ -2,6 +2,12 @@
 
 ## 0.2.0 (unreleased)
 
+- Zip64 per entry: `put_next_entry(name, zip64: true | false)`,
+  `get_output_stream(name, zip64: ...)` and `Entry.new(..., zip64: ...)`
+  decide for one entry, where before only the global
+  `Ziperu.write_zip64_support` and `suppress_extra_fields: :zip64` did;
+  `Ziperu.write_zip64_support = :always` writes every file entry
+  zip64-ready, for testing readers.
 - Reproducible archives: with `SOURCE_DATE_EPOCH` in the environment (or
   `Ziperu.source_date_epoch` set), every new entry's timestamp is that
   instant in UTC (a source file's own mtime wins when earlier) and the

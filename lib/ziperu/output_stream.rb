@@ -194,7 +194,7 @@ module Ziperu
     # can be a Ziperu::Entry or a string.
     def put_next_entry(
       entry_name, comment = '', extra = ExtraField.new,
-      compression_method = Entry::DEFLATED, level = Ziperu.default_compression
+      compression_method = Entry::DEFLATED, level = Ziperu.default_compression, zip64: nil
     )
       check_open!
 
@@ -204,7 +204,7 @@ module Ziperu
         else
           Entry.new(
             @file_name, entry_name.to_s, comment: comment, extra: extra,
-            compression_method: compression_method, compression_level: level
+            compression_method: compression_method, compression_level: level, zip64: zip64
           )
         end
 
@@ -449,10 +449,16 @@ module Ziperu
     # rubyzip writes a zip64 extra for a file entry only when it has to:
     # the size is unknown up front (it may turn out huge) or is already
     # over the 32-bit limit. The native writer does the same with
-    # `large_file`.
+    # `large_file`. An entry's own `zip64:` overrides that either way
+    # (short of a size that leaves no choice), and
+    # `Ziperu.write_zip64_support = :always` makes every file entry
+    # zip64-ready, for testing readers.
     def zip64_needed?(entry, suppressed)
       return true if entry.size >= 0xFFFFFFFF || entry.compressed_size >= 0xFFFFFFFF
-      return false if suppressed || !Ziperu.write_zip64_support || !entry.file?
+      return false unless entry.file?
+      return entry.zip64 unless entry.zip64.nil?
+      return true if Ziperu.write_zip64_support == :always && !suppressed
+      return false if suppressed || !Ziperu.write_zip64_support
 
       entry.zip64? || !entry.size_known?
     end

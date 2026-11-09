@@ -117,6 +117,10 @@ module Ziperu
     @continue_on_exists_proc = false
     @sort_entries = false
     @default_compression = Zlib::DEFAULT_COMPRESSION
+    # Zip64 for file entries: true writes the 64-bit fields when they may be
+    # needed (a size unknown up front, or over 4 GiB), as rubyzip 3 does;
+    # false only when the size leaves no choice; :always for every file
+    # entry, to test readers. An entry's own `zip64:` overrides it.
     @write_zip64_support = true
     @warn_invalid_date = true
     @case_insensitive_match = false

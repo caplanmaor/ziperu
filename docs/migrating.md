@@ -39,7 +39,11 @@ until it goes. Exception classes follow the namespace, so rescue
   in its data descriptor; `Ziperu.write_zip64_support = false` or
   `suppress_extra_fields: :zip64` turns that off (`suppress_extra_fields:
   true` drops every extra field), and an entry that then grows past
-  4 GiB raises `Ziperu::Error`. The central directory's own zip64 records
+  4 GiB raises `Ziperu::Error`. One entry can be decided on its own with
+  `put_next_entry(name, zip64: true | false)`, `get_output_stream(name,
+  zip64: ...)` or `Entry.new(..., zip64: ...)`; `write_zip64_support =
+  :always` makes every file entry zip64-ready, for testing readers (what
+  rubyzip's issue 648 asked for). The central directory's own zip64 records
   are written whenever the archive needs them (over 4 GiB, or 65,535
   entries), whatever the setting; everything reads either way.
 - Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
