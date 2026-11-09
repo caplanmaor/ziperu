@@ -28,6 +28,9 @@ exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
 exception!(NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
 exception!(ENOENT, "Errno::ENOENT");
 exception!(EACCES, "Errno::EACCES");
+exception!(EEXIST, "Errno::EEXIST");
+exception!(EISDIR, "Errno::EISDIR");
+exception!(ENOTDIR, "Errno::ENOTDIR");
 
 pub fn zip_error(ruby: &Ruby, err: ZipError) -> Error {
     match err {
@@ -87,6 +90,9 @@ pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
     match err.kind() {
         io::ErrorKind::NotFound => Error::new(ruby.get_inner(&ENOENT), err.to_string()),
         io::ErrorKind::PermissionDenied => Error::new(ruby.get_inner(&EACCES), err.to_string()),
+        io::ErrorKind::AlreadyExists => Error::new(ruby.get_inner(&EEXIST), err.to_string()),
+        io::ErrorKind::IsADirectory => Error::new(ruby.get_inner(&EISDIR), err.to_string()),
+        io::ErrorKind::NotADirectory => Error::new(ruby.get_inner(&ENOTDIR), err.to_string()),
         // The crate's size check reports as plain InvalidData (crc32.rs).
         io::ErrorKind::InvalidData
             if err

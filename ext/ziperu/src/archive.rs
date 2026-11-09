@@ -586,7 +586,7 @@ fn entry_hash(
     entry: &ZipFileEntry<'_>,
     raw: &RawCentralRecord,
 ) -> Result<RHash, Error> {
-    let h = ruby.hash_new_capa(15);
+    let h = ruby.hash_new();
     h.aset(keys.index, index)?;
     h.aset(keys.name, ruby.str_from_slice(entry.name_raw()))?;
     h.aset(keys.size, entry.size())?;
@@ -623,7 +623,7 @@ fn record_hash(
     record: &RawCentralRecord,
     archive_offset: u64,
 ) -> Result<RHash, Error> {
-    let h = ruby.hash_new_capa(15);
+    let h = ruby.hash_new();
     h.aset(keys.index, index)?;
     h.aset(keys.name, ruby.str_from_slice(&record.name))?;
     h.aset(keys.size, record.size)?;

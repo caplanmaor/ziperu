@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+require "rubygems/package"
+require "stringio"
+require "zlib"
+
 # Runs rubyzip's own test suite against this gem and reports how much of it
 # passes. `rake compat` fetches rubyzip's source into tmp/, generates its
 # fixtures with the real rubyzip, then runs each test file in a subprocess

@@ -113,7 +113,7 @@ class FeaturesTest < Minitest::Test
     outside = File.join(@tmp, "outside")
     Dir.mkdir(outside)
     link = File.join(@tmp, "escape")
-    File.symlink("../outside", link)
+    File.symlink("../../outside", link)
     archive = File.join(@tmp, "escape.zip")
     Ziperu::File.open(archive, create: true) { |zf| zf.add("sub/escape", link) }
     out = File.join(@tmp, "out2")
