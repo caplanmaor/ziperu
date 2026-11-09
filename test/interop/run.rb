@@ -37,7 +37,9 @@ end
 
 def have?(tool) = system("which #{tool} >/dev/null 2>&1")
 SEVEN = %w[7z 7zz 7za].find { |t| have?(t) }
-puts "ruby #{RUBY_VERSION} #{RUBY_PLATFORM} ziperu #{Ziperu::VERSION} 7z=#{SEVEN.inspect} unzip=#{have?("unzip")} zip=#{have?("zip")} python3=#{have?("python3")}"
+# p7zip 16.02 (Ubuntu's package) predates zstd in zip; 7-Zip 21+ reads it.
+SEVEN_ZSTD = SEVEN && `#{SEVEN} i 2>/dev/null`.match?(/zstd/i)
+puts "ruby #{RUBY_VERSION} #{RUBY_PLATFORM} ziperu #{Ziperu::VERSION} 7z=#{SEVEN.inspect} 7z-zstd=#{SEVEN_ZSTD.inspect} unzip=#{have?("unzip")} zip=#{have?("zip")} python3=#{have?("python3")}"
 
 Dir.mktmpdir("interop") do |dir|
   Dir.chdir(dir)
@@ -104,7 +106,7 @@ Dir.mktmpdir("interop") do |dir|
         ok ? compare_tree.call("out_unzip") : out
       end
     end
-    if SEVEN
+    if SEVEN && (m != :zstd || SEVEN_ZSTD)
       check("7z t #{m}") { ok, out = sh(SEVEN, "t", path); ok || out }
       check("7z extract #{m} matches") do
         FileUtils.rm_rf("out_7z"); ok, out = sh(SEVEN, "x", "-y", "-oout_7z", path)
