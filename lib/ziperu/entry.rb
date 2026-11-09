@@ -588,6 +588,30 @@ module Ziperu
       block ? yield(io) : io
     end
 
+    # The size of the entry's local header, so that
+    # `local_header_offset + calculate_local_header_size` is where its data
+    # starts. rubyzip's internal name; roo seeks to the raw data of an
+    # encrypted OpenDocument entry with it. For an entry in an archive the
+    # header's own name and extra lengths are used, not the central
+    # directory's, which may differ.
+    def calculate_local_header_size # :nodoc:
+      LOCAL_ENTRY_STATIC_HEADER_LENGTH + name_size + extra_size
+    end
+
+    def local_entry_offset # :nodoc:
+      local_header_offset + calculate_local_header_size
+    end
+
+    def name_size # :nodoc:
+      (@original_name || @name).to_s.bytesize
+    end
+
+    def extra_size # :nodoc:
+      return extra.local_size if @archive.nil? || @filepath || @source_io
+
+      (@index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)).bytesize
+    end
+
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
       raise Error, "entry '#{@name}' is not in an archive" if archive.nil?

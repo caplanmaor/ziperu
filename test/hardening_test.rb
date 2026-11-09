@@ -483,6 +483,18 @@ class HardeningTest < Minitest::Test
     end
   end
 
+  def test_local_header_size_points_at_the_data
+    bytes = File.binread(fixture("text.zip"))
+    Ziperu::File.open(fixture("text.zip")) do |zf|
+      zf.each do |e|
+        off = e.local_header_offset
+        nlen, xlen = bytes.byteslice(off + 26, 4).unpack("vv")
+        assert_equal 30 + nlen + xlen, e.calculate_local_header_size, e.name
+        assert_equal off + 30 + nlen + xlen, e.local_entry_offset, e.name
+      end
+    end
+  end
+
   def test_get_raw_input_stream
     Ziperu::File.open(fixture("text.zip")) do |zf|
       head = zf.get_entry("short.txt").get_raw_input_stream { |io| io.read(4) }
