@@ -458,6 +458,31 @@ class HardeningTest < Minitest::Test
     end
   end
 
+  def test_rubyzip_2_positional_create_and_the_create_constant
+    file = path("legacy.zip")
+    assert Ziperu::File::CREATE
+    Ziperu::File.open(file, Ziperu::File::CREATE) { |zf| zf.get_output_stream("a") { |o| o.write "a" } }
+    assert_equal "a", Ziperu::File.open(file, false) { |zf| @r = zf.read("a") } && @r
+    zf = Ziperu::File.new(path("legacy2.zip"), true)
+    zf.get_output_stream("b") { |o| o.write "b" }
+    zf.close
+    assert_equal "b", Ziperu::File.open(path("legacy2.zip")) { |z| @r = z.read("b") } && @r
+  end
+
+  def test_central_directory_read_from_stream
+    File.open(fixture("text.zip"), "rb") do |io|
+      cdir = Ziperu::CentralDirectory.new
+      cdir.read_from_stream(io)
+      names = cdir.entries.map(&:name)
+      assert_includes names, "short.txt"
+      assert_equal names.size, cdir.size
+      entry = cdir.find { |e| e.name == "short.txt" }
+      assert_equal "short\n", entry.get_input_stream(&:read)
+      entry.extract("short.txt", destination_directory: @dir)
+      assert_equal "short\n", File.read(path("short.txt"))
+    end
+  end
+
   def test_get_raw_input_stream
     Ziperu::File.open(fixture("text.zip")) do |zf|
       head = zf.get_entry("short.txt").get_raw_input_stream { |io| io.read(4) }

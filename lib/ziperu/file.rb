@@ -37,7 +37,12 @@ module Ziperu
 
     # Opens a zip archive. Pass create: true to create a new archive if it
     # doesn't exist already.
-    def initialize(path_or_io, create: false, buffer: false,
+    # rubyzip 2.x's `Zip::File.open(path, Zip::File::CREATE)`. Libraries
+    # that branch on `Zip::VERSION >= "3"` (sablon, selenium-webdriver) see
+    # ziperu's own version and take their 2.x path, so both forms work.
+    CREATE = true
+
+    def initialize(path_or_io, legacy_create = nil, create: false, buffer: false,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
@@ -58,6 +63,7 @@ module Ziperu
                  else
                    path_or_io
                  end
+      create = legacy_create unless legacy_create.nil? # the 2.x positional flag
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
@@ -74,12 +80,13 @@ module Ziperu
 
       # Similar to ::new. If a block is passed the Ziperu::File object is passed
       # to the block and is automatically closed afterwards.
-      def open(file_name, create: false,
+      def open(file_name, legacy_create = nil, create: false,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Ziperu.default_compression,
                suppress_extra_fields: false, password: nil, decrypter: nil)
+        create = legacy_create unless legacy_create.nil?
         zf = ::Ziperu::File.new(file_name, create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,

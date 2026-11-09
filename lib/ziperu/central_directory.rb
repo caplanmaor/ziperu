@@ -23,7 +23,31 @@ module Ziperu
     MAX_END_OF_CD_SIZE     =
       MAX_FILE_COMMENT_SIZE + STATIC_EOCD_SIZE + ZIP64_EOCD_LOC_SIZE
 
+    include Enumerable
+
     attr_reader :size, :cdir_offset, :comment
+
+    # rubyzip's way of listing an archive held in an IO without a
+    # `Zip::File` (roo reads spreadsheets from a stream this way): the
+    # entries are read, and each can be read or extracted afterwards.
+    def read_from_stream(io)
+      io.binmode if io.respond_to?(:binmode)
+      @native = InputStream.open_archive(io)
+      @comment = @native.comment
+      @entry_set = EntrySet.new
+      @native.entries.each { |meta| @entry_set.push_record(Entry.from_meta(@native, meta)) }
+      @size = @entry_set.size
+      @cdir_offset = @native.central_directory_start if @native.respond_to?(:central_directory_start)
+      self
+    end
+
+    def entries
+      (@entry_set || EntrySet.new).entries
+    end
+
+    def each(&block)
+      entries.each(&block)
+    end
 
     # Number of entries declared by the EOCD of `path_or_io`.
     def self.count_entries(path_or_io)
