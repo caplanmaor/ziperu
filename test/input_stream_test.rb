@@ -215,6 +215,123 @@ class ZipInputStreamTest < Minitest::Test
     end
   end
 
+  def test_ungetc_with_string
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      first_line = zis.gets
+      zis.ungetc(first_line)
+      assert_equal("#!/usr/bin/env ruby", zis.gets(chomp: true))
+      assert_equal("", zis.gets(chomp: true))
+      assert_equal("$VERBOSE =", zis.read(10))
+    end
+  end
+
+  def test_getc_and_getbyte
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      char = zis.getc
+      assert_equal("#", char)
+      assert_equal(Encoding::BINARY, char.encoding)
+      assert_equal("!".ord, zis.getbyte)
+      assert_equal(2, zis.pos)
+      assert_equal("/usr/bin/env ruby", zis.gets(chomp: true))
+
+      zis.read
+      assert_predicate(zis, :eof?)
+      assert_nil(zis.getc)
+      assert_nil(zis.getbyte)
+      assert_raises(EOFError) { zis.readchar }
+      assert_raises(EOFError) { zis.readbyte }
+    end
+  end
+
+  def test_readchar_and_readbyte
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      2.times { zis.get_next_entry }
+      assert_equal("short.txt", zis.get_next_entry.name)
+      assert_equal("s", zis.readchar)
+      assert_equal("h".ord, zis.readbyte)
+      assert_equal("ort\n", zis.read)
+      assert_raises(EOFError) { zis.readchar }
+    end
+  end
+
+  def test_ungetbyte_then_gets
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      byte = zis.getbyte
+      zis.ungetbyte(byte)
+      zis.ungetbyte("xy")
+      assert_equal("xy#!/usr/bin/env ruby", zis.gets(chomp: true))
+    end
+  end
+
+  def test_each_byte_matches_read
+    expected = File.binread(fixture("text/long.txt")).bytes
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      assert_equal(expected, zis.each_byte.to_a)
+      assert_predicate(zis, :eof?)
+    end
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      bytes = []
+      zis.each_byte { |b| bytes << b }
+      assert_equal(expected, bytes)
+    end
+  end
+
+  def test_each_byte_over_binary_entry
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      4.times { zis.get_next_entry }
+      assert_equal("dir/bin.dat", zis.get_next_entry.name)
+      assert_equal(File.binread(fixture("text/dir/bin.dat")).bytes, zis.each_byte.to_a)
+    end
+  end
+
+  def test_each_char
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      2.times { zis.get_next_entry }
+      zis.get_next_entry # short.txt
+      assert_equal(%W[s h o r t \n], zis.each_char.to_a)
+    end
+  end
+
+  def test_readpartial
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      assert_equal("#!/usr", zis.readpartial(6))
+      buffer = +""
+      assert_same(buffer, zis.readpartial(4, buffer))
+      assert_equal("/bin", buffer)
+      zis.read
+      assert_raises(EOFError) { zis.readpartial(1) }
+    end
+  end
+
+  def test_read_nonblock
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      zis.get_next_entry
+      assert_equal("#!/usr", zis.read_nonblock(6))
+      zis.read
+      assert_raises(EOFError) { zis.read_nonblock(1) }
+      assert_nil(zis.read_nonblock(1, exception: false))
+    end
+  end
+
+  def test_io_metadata
+    ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
+      assert_equal(Encoding::BINARY, zis.external_encoding)
+      assert_nil(zis.internal_encoding)
+      assert_same(zis, zis.binmode)
+      assert(zis.binmode?)
+      refute(zis.tty?)
+      refute(zis.isatty)
+      assert(zis.sync)
+      assert_nil(zis.fileno)
+    end
+  end
+
   def test_readline_then_read
     ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       zis.get_next_entry

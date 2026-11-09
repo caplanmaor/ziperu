@@ -256,6 +256,209 @@ class AbstractInputStreamTest < Minitest::Test
     assert_equal(Encoding::UTF_8, io.gets&.encoding)
   end
 
+  def test_getc
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    char = io.getc
+    assert_equal("H", char)
+    assert_equal(Encoding::ASCII_8BIT, char.encoding)
+    assert_equal(1, io.pos)
+    assert_equal("e", io.getc)
+
+    io.read
+    assert_predicate(io, :eof?)
+    assert_nil(io.getc)
+    assert_nil(io.getc)
+  end
+
+  def test_getbyte
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal("H".ord, io.getbyte)
+    assert_equal(1, io.pos)
+    assert_equal("e".ord, io.getbyte)
+
+    io.read
+    assert_nil(io.getbyte)
+  end
+
+  def test_getbyte_is_binary
+    io = TestAbstractInputStream.new("\xFF\x00".b)
+    assert_equal(255, io.getbyte)
+    assert_equal(0, io.getbyte)
+    assert_nil(io.getbyte)
+  end
+
+  def test_readchar_and_readbyte
+    io = TestAbstractInputStream.new("ab")
+
+    assert_equal("a", io.readchar)
+    assert_equal("b".ord, io.readbyte)
+    assert_predicate(io, :eof?)
+    assert_raises(EOFError) { io.readchar }
+    assert_raises(EOFError) { io.readbyte }
+  end
+
+  def test_each_byte
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    bytes = []
+    io.each_byte { |b| bytes << b }
+    assert_equal(TEST_STRING.bytes, bytes)
+    assert_predicate(io, :eof?)
+
+    io.each_byte { |b| flunk "yielded #{b} at EOF" }
+  end
+
+  def test_each_byte_returns_an_enumerator
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    enum = io.each_byte
+    assert_instance_of(Enumerator, enum)
+    assert_equal(TEST_STRING.bytes, enum.to_a)
+  end
+
+  def test_each_char
+    io = TestAbstractInputStream.new("abc")
+
+    assert_equal(%w[a b c], io.each_char.to_a)
+    assert_predicate(io, :eof?)
+
+    io = TestAbstractInputStream.new("abc")
+    chars = []
+    io.each_char { |c| chars << c }
+    assert_equal(%w[a b c], chars)
+  end
+
+  def test_ungetc_with_integer
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal("H", io.getc)
+    io.ungetc("H".ord)
+    assert_equal("H", io.getc)
+    io.ungetc("H".ord)
+    assert_equal(TEST_STRING, io.read)
+  end
+
+  def test_ungetc_with_string
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal("Hello", io.read(5))
+    io.ungetc("Hello")
+    assert_equal(TEST_LINES[0], io.gets)
+    assert_equal(TEST_LINES[1], io.gets)
+  end
+
+  def test_ungetc_with_nil_is_a_no_op
+    io = TestAbstractInputStream.new("ab")
+    io.ungetc(nil)
+    assert_equal("ab", io.read)
+  end
+
+  def test_ungetc_pushes_in_front_of_unread_data
+    io = TestAbstractInputStream.new("ab")
+
+    io.ungetc("x")
+    io.ungetc("y")
+    assert_equal("yxab", io.read)
+  end
+
+  def test_ungetc_at_eof
+    io = TestAbstractInputStream.new("ab")
+    io.read
+    assert_predicate(io, :eof?)
+
+    io.ungetc("z")
+    refute_predicate(io, :eof?)
+    assert_equal("z", io.getc)
+    assert_predicate(io, :eof?)
+  end
+
+  def test_ungetbyte
+    io = TestAbstractInputStream.new("ab")
+
+    byte = io.getbyte
+    io.ungetbyte(byte)
+    assert_equal(byte, io.getbyte)
+
+    io.ungetbyte("\xFF\xFE".b)
+    assert_equal(255, io.getbyte)
+    assert_equal(254, io.getbyte)
+    assert_equal("b", io.read)
+  end
+
+  def test_ungetc_then_gets
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    first = io.gets
+    io.ungetc(first)
+    assert_equal(TEST_LINES[0], io.gets)
+    assert_equal(TEST_LINES[1], io.gets)
+    assert_equal(TEST_LINES[2], io.gets)
+    assert_nil(io.gets)
+  end
+
+  def test_readpartial
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    chunk = io.readpartial(5)
+    assert_equal("Hello", chunk)
+    assert_equal(Encoding::ASCII_8BIT, chunk.encoding)
+    assert_equal(5, io.pos)
+
+    assert_equal(TEST_STRING[5..], io.readpartial(1_000))
+    assert_predicate(io, :eof?)
+    assert_raises(EOFError) { io.readpartial(1) }
+    assert_raises(EOFError) { io.readpartial(0) }
+  end
+
+  def test_readpartial_with_outbuf
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    buffer = +""
+    result = io.readpartial(5, buffer)
+    assert_same(buffer, result)
+    assert_equal("Hello", buffer)
+  end
+
+  def test_readpartial_with_zero_before_eof
+    io = TestAbstractInputStream.new(TEST_STRING)
+    assert_equal("", io.readpartial(0))
+  end
+
+  def test_read_nonblock
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal("Hello", io.read_nonblock(5))
+    buffer = +""
+    assert_same(buffer, io.read_nonblock(1_000, buffer))
+    assert_equal(TEST_STRING[5..], buffer)
+
+    assert_raises(EOFError) { io.read_nonblock(1) }
+    assert_nil(io.read_nonblock(1, exception: false))
+    assert_nil(io.read_nonblock(1, +"", exception: false))
+  end
+
+  def test_encodings
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal(Encoding::BINARY, io.external_encoding)
+    assert_nil(io.internal_encoding)
+    assert_same(io, io.binmode)
+    assert_equal(true, io.binmode?)
+  end
+
+  def test_misc_io_predicates
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal(false, io.tty?)
+    assert_equal(false, io.isatty)
+    assert_equal(true, io.sync)
+    io.sync = false
+    assert_equal(true, io.sync)
+    assert_nil(io.fileno)
+  end
+
   private
 
   def line_tests(method_name: :gets)

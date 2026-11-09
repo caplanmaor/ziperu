@@ -42,8 +42,14 @@ module Ziperu
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Ziperu.default_compression,
-                   suppress_extra_fields: false)
+                   suppress_extra_fields: false, password: nil, decrypter: nil)
       super()
+
+      # One password for the archive: `read`, `get_input_stream`,
+      # `extract`, `extract_all` and `verify` decrypt with it (AES or
+      # ZipCrypto, whichever each entry uses). rubyzip only takes a
+      # decrypter on `InputStream`; `decrypter:` is accepted here too.
+      @password = password || decrypter&.password
 
       @name    = if path_or_io.respond_to?(:to_path) && !path_or_io.respond_to?(:seek)
                    path_or_io.to_path # a Pathname
@@ -73,13 +79,15 @@ module Ziperu
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Ziperu.default_compression,
-               suppress_extra_fields: false)
+               suppress_extra_fields: false, password: nil, decrypter: nil)
         zf = ::Ziperu::File.new(file_name, create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
                                         compression_level:     compression_level,
-                                        suppress_extra_fields: suppress_extra_fields)
+                                        suppress_extra_fields: suppress_extra_fields,
+                                        password:              password,
+                                        decrypter:             decrypter)
 
         return zf unless block_given?
 
@@ -97,7 +105,7 @@ module Ziperu
                       restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                       restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                       compression_level: ::Ziperu.default_compression,
-                      suppress_extra_fields: false)
+                      suppress_extra_fields: false, password: nil, decrypter: nil)
         unless IO_METHODS.map { |method| io.respond_to?(method) }.all? || io.kind_of?(String)
           raise 'Ziperu::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
@@ -110,7 +118,9 @@ module Ziperu
                                  restore_permissions:   restore_permissions,
                                  restore_times:         restore_times,
                                  compression_level:     compression_level,
-                                 suppress_extra_fields: suppress_extra_fields)
+                                 suppress_extra_fields: suppress_extra_fields,
+                                 password:              password,
+                                 decrypter:             decrypter)
 
         return zf unless block_given?
 
@@ -215,7 +225,12 @@ module Ziperu
                       compression_level: @compression_level
                     )
                   end
-      new_entry.gather_fileinfo_from_srcpath(src_path)
+      if src_path.respond_to?(:read)
+        # An IO (File, StringIO, Tempfile, a socket): streamed at commit.
+        new_entry.gather_fileinfo_from_io(src_path)
+      else
+        new_entry.gather_fileinfo_from_srcpath(src_path)
+      end
       @cdir << new_entry
       @dirty = true
       new_entry
@@ -336,11 +351,11 @@ module Ziperu
     # entries are checked when a `decrypter` is given and skipped otherwise.
     def verify(decrypter: nil)
       native = native_archive
-      password = decrypter&.password&.b
+      password = (decrypter&.password || @password)&.b
       failures = {}
       entries.each do |entry|
         # An entry replaced from disk has nothing in the archive to check.
-        next if entry.directory? || entry.filepath || !entry.archive.equal?(native)
+        next if entry.directory? || entry.filepath || entry.source_io || !entry.archive.equal?(native)
         next if entry.encrypted? && password.nil?
 
         begin
@@ -414,6 +429,11 @@ module Ziperu
 
     # Returns true if any changes has been made to this archive since the
     # previous commit
+    # The archive's password, if one was given to `open`.
+    def password # :nodoc:
+      @password
+    end
+
     def commit_required?
       return true if @create || @dirty
 
@@ -499,8 +519,9 @@ module Ziperu
 
     def native_extractable?(entry, native)
       return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.archive.equal?(native)
-      # Replaced from disk: the archive holds the old bytes.
-      return false if entry.filepath
+      # Replaced from disk or an IO: the archive holds the old bytes. An
+      # encrypted entry goes through the Ruby path, which has the password.
+      return false if entry.filepath || entry.source_io || entry.encrypted?
       return false unless entry.file? || entry.directory?
 
       name = entry.name

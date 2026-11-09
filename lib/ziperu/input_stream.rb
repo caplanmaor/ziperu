@@ -25,7 +25,11 @@ module Ziperu
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, enforce_size: ::Ziperu.validate_entry_sizes, **opts)
+    def initialize(context, offset: 0, decrypter: nil, password: nil,
+                   enforce_size: ::Ziperu.validate_entry_sizes, **opts)
+      # `password:` is the plain form of `decrypter:`; the native core tells
+      # AES from ZipCrypto by the entry, so one password serves both.
+      decrypter ||= TraditionalDecrypter.new(password) if password
       super(**opts)
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       # An archive handed in (by Entry#get_input_stream) stays open for its
@@ -154,8 +158,8 @@ module Ziperu
     class << self
       # Same as #initialize but if a block is passed the opened stream is
       # passed to the block and closed when the block returns.
-      def open(filename_or_io, offset: 0, decrypter: nil, **opts)
-        zio = new(filename_or_io, offset: offset, decrypter: decrypter, **opts)
+      def open(filename_or_io, offset: 0, decrypter: nil, password: nil, **opts)
+        zio = new(filename_or_io, offset: offset, decrypter: decrypter, password: password, **opts)
         return zio unless block_given?
 
         begin

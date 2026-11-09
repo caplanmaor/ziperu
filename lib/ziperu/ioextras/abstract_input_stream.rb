@@ -103,8 +103,85 @@ module Ziperu
         data&.force_encoding(encoding)
       end
 
-      def ungetc(byte) # :nodoc:
-        @output_buffer = byte.chr + @output_buffer
+      # Half-open style: the bytes read here are what read(maxlen) gives, so
+      # a short answer is possible but never a blocking one.
+      def readpartial(maxlen, outbuf = nil)
+        raise EOFError, 'end of file reached' if eof?
+
+        read(maxlen, outbuf) || raise(EOFError, 'end of file reached')
+      end
+
+      def read_nonblock(maxlen, outbuf = nil, exception: true)
+        return nil if !exception && eof?
+
+        readpartial(maxlen, outbuf)
+      end
+
+      # The external encoding is always binary, so a character is a byte.
+      def getc
+        read(1)
+      end
+
+      def getbyte
+        read(1)&.getbyte(0)
+      end
+
+      def readchar
+        getc || raise(EOFError, 'end of file reached')
+      end
+
+      def readbyte
+        getbyte || raise(EOFError, 'end of file reached')
+      end
+
+      def each_byte
+        return to_enum(:each_byte) unless block_given?
+
+        while (byte = getbyte)
+          yield byte
+        end
+      end
+
+      def each_char
+        return to_enum(:each_char) unless block_given?
+
+        while (char = getc)
+          yield char
+        end
+      end
+
+      # Accepts a String or an Integer byte, as IO#ungetc does; rubyzip only
+      # took the Integer.
+      def ungetc(char)
+        return if char.nil?
+
+        @output_buffer = pushback_bytes(char) + @output_buffer
+      end
+
+      alias ungetbyte ungetc
+
+      def binmode
+        self
+      end
+
+      def binmode?
+        true
+      end
+
+      def tty?
+        false
+      end
+
+      alias isatty tty?
+
+      def sync
+        true
+      end
+
+      def sync=(_value); end
+
+      def fileno
+        nil
       end
 
       def flush # :nodoc:
@@ -132,6 +209,12 @@ module Ziperu
       end
 
       alias eof eof? # :nodoc:
+
+      private
+
+      def pushback_bytes(char)
+        char.kind_of?(::Integer) ? char.chr.b : char.to_str.b
+      end
     end
   end
 end

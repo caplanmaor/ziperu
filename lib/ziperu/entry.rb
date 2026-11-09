@@ -37,7 +37,7 @@ module Ziperu
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
                   :internal_file_attributes, :local_header_offset # :nodoc:
 
-    attr_reader :compression_level, :filepath # :nodoc:
+    attr_reader :compression_level, :filepath, :source_io # :nodoc:
 
     # The entry's extra fields. For an entry read from an archive, the
     # local header's fields (which is where Info-ZIP unix uid/gid and the
@@ -367,7 +367,15 @@ module Ziperu
     # Optional decrypter can be provided for an encrypted entry
     # Warning: may behave weird with symlinks.
     def get_input_stream(decrypter: nil, &block)
-      return open_input_stream(decrypter: decrypter, &block) if @filepath.nil? || ftype == :directory
+      if @source_io
+        # Added from an IO and not yet committed: read it from the top
+        # (a pipe or socket cannot be rewound and is read once).
+        @source_io.rewind if ::Ziperu::IOExtras.seekable?(@source_io)
+        return block ? yield(@source_io) : @source_io
+      end
+      if @filepath.nil? || ftype == :directory
+        return open_input_stream(decrypter: decrypter || default_decrypter, &block)
+      end
 
       # Not yet in an archive: the data is a file on disk.
       case ftype
@@ -411,6 +419,27 @@ module Ziperu
       get_extra_attributes_from_path(@filepath)
     end
 
+    # `add` from an IO rather than a path: the data is streamed from the
+    # object when the archive is written, so it stays open until then.
+    def gather_fileinfo_from_io(io) # :nodoc:
+      if name_is_directory?
+        raise ArgumentError, "entry name '#{@name}' indicates a directory entry, but an IO was given"
+      end
+
+      @ftype = :file
+      @source_io = io
+      @size = io.size if io.respond_to?(:size) && !io.size.nil?
+      @time = DOSTime.from_time(::Time.now)
+    end
+
+    # The decrypter for this entry when the owning `Ziperu::File` was
+    # opened with a password; nil otherwise, or for a plain entry.
+    def default_decrypter # :nodoc:
+      return unless encrypted? && @zipfile.kind_of?(::Ziperu::File) && (pw = @zipfile.password)
+
+      aes? ? AESDecrypter.new(pw) : TraditionalDecrypter.new(pw)
+    end
+
     # Writes this entry (header and data) to an OutputStream. An entry read
     # from an archive is copied without recompression when it is unchanged,
     # or when its only change is one the native raw copy can carry: a new
@@ -424,7 +453,7 @@ module Ziperu
       if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
         # No data to stream: a symlink's target goes into the header call.
         zip_output_stream.put_next_entry(self)
-      elsif @filepath || needs_restream? || no_raw_copy?
+      elsif @filepath || @source_io || needs_restream? || no_raw_copy?
         zip_output_stream.put_next_entry(self)
         get_input_stream do |is|
           ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
@@ -556,7 +585,7 @@ module Ziperu
     # one: in a single native call when the entry is in an archive and its
     # declared size is to be trusted, through a stream otherwise.
     def read_all # :nodoc:
-      if @filepath.nil? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
+      if @filepath.nil? && @source_io.nil? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
         get_raw_input_string
       else
         get_input_stream(&:read)
@@ -604,8 +633,10 @@ module Ziperu
           # Added or replaced from disk and not yet committed: the data is
           # the file's, not the archive's.
           ::File.open(@filepath, 'rb') { |is| ::IO.copy_stream(is, os) }
+        elsif @source_io
+          get_input_stream { |is| ::Ziperu::IOExtras.copy_stream(os, is) }
         else
-          open_input_stream(enforce_size: Ziperu.validate_entry_sizes) do |is|
+          open_input_stream(enforce_size: Ziperu.validate_entry_sizes, decrypter: default_decrypter) do |is|
             bytes_written = 0
             while (buf = is.sysread(IOExtras::CHUNK_SIZE))
               os << buf
@@ -691,6 +722,7 @@ module Ziperu
 
       @ftype           = nil
       @filepath        = nil
+      @source_io       = nil
       @gp_flags        = 0
       if ::Ziperu.unicode_names
         @gp_flags |= EFS
