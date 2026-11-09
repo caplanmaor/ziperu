@@ -28,10 +28,11 @@ until it goes. Exception classes follow the namespace, so rescue
   the DOS time) plus the data descriptor bit 3 announces, which rubyzip
   omits and Info-ZIP's `unzip` insists on. Only Stored and Deflate entries
   can be encrypted this way, and a committed `Ziperu::File` never
-  encrypts; existing ZipCrypto entries are copied byte for byte. Writing
-  such entries through `write_buffer` into an IO needs one opened for
-  reading and writing (the headers are patched at the end). `AESEncrypter`
-  is the better choice wherever the consumer can open AES.
+  encrypts; existing ZipCrypto entries are copied byte for byte. Their
+  headers are patched once the data is written, so `write_buffer` to an IO
+  that cannot seek builds such an archive in memory first, and
+  `copy_raw_entry` of a ZipCrypto entry into one raises `ArgumentError`.
+  `AESEncrypter` is the better choice wherever the consumer can open AES.
 - Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
   PKZIP 1.x methods (Shrink, Reduce, Implode) read normally; rubyzip raises
   `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
@@ -144,4 +145,8 @@ Everything here is additive: code that does not use it behaves as above.
   Deflate64 and the PKZIP 1.x methods on read (see above).
 - **Streaming reads and writes through any IO.** `open_buffer(io)` reads an
   IO lazily and `write_buffer(io)` writes entry by entry, so neither holds
-  the archive in memory.
+  the archive in memory. `write_buffer` takes an IO that cannot seek (a
+  pipe, a socket, a Rack response body, an S3 multipart upload): each
+  entry goes out as it is written, with its sizes in a data descriptor
+  after the data, which every zip reader since PKZIP 2.0 understands;
+  rubyzip needs a seekable IO there.

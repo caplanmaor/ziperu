@@ -1,8 +1,8 @@
 # rubyzip compatibility
 
-rubyzip 3.7.0's own test suite run against ziperu 0.1.2 (`rake compat`, 2026-11-09).
+rubyzip 3.7.0's own test suite run against ziperu 0.2.0 (`rake compat`, 2026-11-09).
 
-**409 of 476 tests pass (85.9%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
+**414 of 476 tests pass (87.0%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
 | File | Pass | Runs | Fail | Error | Skip |
 |---|---:|---:|---:|---:|---:|
@@ -10,7 +10,7 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.2 (`rake compat`, 2026-11-
 | test/bzip2_support_test.rb | 0 | 1 | 1 | 0 | 0 |
 | test/case_sensitivity_test.rb | 3 | 3 | 0 | 0 | 0 |
 | test/central_directory_entry_test.rb | 0 | 5 | 2 | 3 | 0 |
-| test/central_directory_test.rb | 1 | 11 | 3 | 6 | 1 |
+| test/central_directory_test.rb | 6 | 11 | 1 | 3 | 1 |
 | test/constants_test.rb | 1 | 1 | 0 | 0 | 0 |
 | test/crypto/aes_encryption_test.rb | 0 | 13 | 0 | 13 | 0 |
 | test/crypto/null_encryption_test.rb | 0 | 5 | 1 | 4 | 0 |
@@ -71,11 +71,6 @@ rubyzip 3.7.0's own test suite run against ziperu 0.1.2 (`rake compat`, 2026-11-
 **test/central_directory_test.rb**
 - `ZipCentralDirectoryTest#test_equality:`
 - `ZipCentralDirectoryTest#test_error_file_with_too_high_number_of_entries_declared`
-- `ZipCentralDirectoryTest#test_read_eocd_with_wrong_cdir_offset_from_buffer`
-- `ZipCentralDirectoryTest#test_read_eocd_with_wrong_cdir_offset_from_file`
-- `ZipCentralDirectoryTest#test_read_file_with_cdir_headers_in_payload:`
-- `ZipCentralDirectoryTest#test_read_from_invalid_stream:`
-- `ZipCentralDirectoryTest#test_read_from_stream:`
 - `ZipCentralDirectoryTest#test_warn_file_with_too_high_number_of_entries_declared:`
 - `ZipCentralDirectoryTest#test_write_to_stream:`
 

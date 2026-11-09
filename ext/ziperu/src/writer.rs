@@ -10,15 +10,15 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use magnus::{
     gc::Marker, prelude::*, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash,
     RString, Ruby, TypedData, Value,
 };
 use zip::result::{ZipError, ZipResult};
-use zip::write::FullFileOptions;
+use zip::write::{FullFileOptions, StreamWriter};
 use zip::{AesMode, CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
 use crate::archive::Archive;
@@ -118,6 +118,115 @@ impl Seek for Sink {
     }
 }
 
+/// Counts the bytes that reach the sink, and notes the data descriptors
+/// among them. A stream's writer cannot be asked where it is or what it
+/// has written (the crate keeps that to itself, and finishes an entry only
+/// when the next one starts), so the per-entry facts `finish` reports for a
+/// streamed archive come from here.
+struct Counting {
+    sink: Sink,
+    written: Arc<AtomicU64>,
+    sniffer: Sniffer,
+    /// The data descriptors written since the last `StreamStats::mark`.
+    descriptors: Arc<Mutex<Vec<Descriptor>>>,
+}
+
+/// Catches data descriptors as the crate writes them: the signature, the
+/// CRC, then the two sizes, each field as a write of its own, 4 bytes each
+/// or 8 for 64-bit sizes. Entry data comes in larger chunks; one that
+/// happens to look like a descriptor is told apart by its sizes, which
+/// `StreamStats::seal` checks against what was written.
+#[derive(Default)]
+struct Sniffer {
+    start: u64,
+    buf: Vec<u8>,
+}
+
+impl Sniffer {
+    fn feed(&mut self, at: u64, buf: &[u8]) -> Option<Descriptor> {
+        let fits = match self.buf.len() {
+            0 => {
+                if buf == DATA_DESCRIPTOR_SIGNATURE.to_le_bytes() {
+                    self.start = at;
+                    self.buf.extend_from_slice(buf);
+                }
+                return None;
+            }
+            4 | 12 => buf.len() == 4,
+            8 => buf.len() == 4 || buf.len() == 8,
+            16 => buf.len() == 8,
+            _ => false,
+        };
+        if !fits {
+            self.buf.clear();
+            return self.feed(at, buf);
+        }
+        self.buf.extend_from_slice(buf);
+        let whole = match self.buf.len() {
+            16 => buf.len() == 4,
+            24 => true,
+            _ => false,
+        };
+        if !whole {
+            return None;
+        }
+        let found = Descriptor::parse(self.start, &self.buf);
+        self.buf.clear();
+        found
+    }
+}
+
+/// A data descriptor as written: where it ends, and what it says.
+#[derive(Clone, Copy)]
+struct Descriptor {
+    end: u64,
+    crc: u32,
+    csize: u64,
+    size: u64,
+}
+
+impl Descriptor {
+    /// Parses `buf` if it is a whole data descriptor, starting at `at`.
+    fn parse(at: u64, buf: &[u8]) -> Option<Self> {
+        if buf.len() != 16 && buf.len() != 24 || buf[..4] != DATA_DESCRIPTOR_SIGNATURE.to_le_bytes()
+        {
+            return None;
+        }
+        let u32_at = |i: usize| u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
+        let u64_at = |i: usize| u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
+        let (csize, size) = if buf.len() == 16 {
+            (u64::from(u32_at(8)), u64::from(u32_at(12)))
+        } else {
+            (u64_at(8), u64_at(16))
+        };
+        Some(Self {
+            end: at + buf.len() as u64,
+            crc: u32_at(4),
+            csize,
+            size,
+        })
+    }
+}
+
+impl Write for Counting {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.sink.write(buf)?;
+        let at = self.written.fetch_add(n as u64, Ordering::Relaxed);
+        if n == buf.len() {
+            if let Some(d) = self.sniffer.feed(at, buf) {
+                self.descriptors.lock().unwrap().push(d);
+            }
+        } else {
+            self.sniffer.buf.clear();
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
+}
+
 /// A seekable Ruby IO-like object (`write`, `seek`, `tell`, `read` and
 /// optionally `flush`) written through method calls under the GVL. The
 /// writer owns the object while open, so unlike `source::RubyIo` it trusts
@@ -137,18 +246,22 @@ pub struct RubyOut {
     /// One past the furthest byte written: the archive's end.
     end: u64,
     flushable: bool,
+    /// False for a pipe, socket or response body: writes go out in order
+    /// and nothing is ever seeked to.
+    seekable: bool,
 }
 
 const SEEK_SET: i64 = 0;
 
 impl RubyOut {
-    fn new(io: Value, attached: Arc<AtomicBool>) -> Result<Self, Error> {
+    fn new(io: Value, attached: Arc<AtomicBool>, seekable: bool) -> Result<Self, Error> {
         Ok(Self {
             flushable: io.respond_to("flush", false)?,
             io: Opaque::from(io),
             attached,
             pos: 0,
             end: 0,
+            seekable,
         })
     }
 
@@ -170,8 +283,10 @@ impl RubyOut {
         let Some(io) = self.value()? else {
             return Ok(None);
         };
-        io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
-            .map_err(ruby_io_error)?;
+        if self.seekable {
+            io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
+                .map_err(ruby_io_error)?;
+        }
         Ok(Some(io))
     }
 
@@ -182,6 +297,9 @@ impl RubyOut {
         let Some(io) = self.value()? else {
             return Ok(());
         };
+        if !self.seekable {
+            return Ok(());
+        }
         if io.respond_to("truncate", false).map_err(ruby_io_error)? {
             io.funcall::<_, _, Value>("truncate", (self.end as i64,))
                 .map_err(ruby_io_error)?;
@@ -300,15 +418,168 @@ impl Drop for Writer {
     }
 }
 
+/// The crate's writer over a sink it can seek in, or over one that only
+/// grows (a pipe, a socket, a response body), where it puts each entry's
+/// sizes in a data descriptor after the data instead of seeking back.
+enum Inner {
+    Seekable(ZipWriter<Sink>),
+    Stream(ZipWriter<StreamWriter<Counting>>),
+}
+
+/// Runs `$body` with `$w` bound to whichever writer is inside; the body is
+/// compiled once per kind, so it may use anything both offer.
+macro_rules! with_zip {
+    ($inner:expr, |$w:ident| $body:expr) => {
+        match $inner {
+            Inner::Seekable($w) => $body,
+            Inner::Stream($w) => $body,
+        }
+    };
+}
+
 struct State {
     /// `None` once finished.
-    writer: Option<ZipWriter<Sink>>,
+    writer: Option<Inner>,
     /// Entries started so far; the next one gets this index.
     count: usize,
     /// Header fields to set once the archive is written; see `Patch`.
     patches: Vec<Patch>,
     /// The ZipCrypto entry being written, if the current one is.
     pending: Option<Pending>,
+    /// For a stream: the per-entry facts, kept as the entries go by.
+    stream: Option<StreamStats>,
+}
+
+impl State {
+    /// Before an action of the crate's that ends the entry in progress.
+    fn stream_mark(&mut self) -> u64 {
+        self.stream.as_mut().map_or(0, StreamStats::mark)
+    }
+
+    /// After it: closes the entry in progress and tells where the next
+    /// one's header begins.
+    fn stream_seal(&mut self, mark: u64) -> u64 {
+        self.stream.as_mut().map_or(0, |s| s.seal(mark))
+    }
+}
+
+/// What `finish` reports about a streamed archive's entries. The sink
+/// cannot be read back, so each entry's facts are gathered as it goes by:
+/// an entry written through `write` is finished by the crate only when the
+/// next one starts, or at the end, when its compressor is flushed and its
+/// data descriptor written; that descriptor, caught by `Counting`, gives
+/// the compressed size and where the next header begins. Directories,
+/// symlinks and raw copies carry their sizes in the header and are written
+/// out at once, so the byte count before the next action is their end.
+struct StreamStats {
+    written: Arc<AtomicU64>,
+    descriptors: Arc<Mutex<Vec<Descriptor>>>,
+    entries: EntryStats,
+    current: Option<Current>,
+}
+
+struct Current {
+    index: usize,
+    header_start: u64,
+    size: u64,
+    csize: u64,
+    crc: u32,
+    /// Present while the data passes through `write`; the entry then ends
+    /// with a data descriptor.
+    hasher: Option<crc32fast::Hasher>,
+}
+
+impl StreamStats {
+    fn position(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
+    /// Returns the position before an action of the crate's, and starts
+    /// watching for the data descriptor it may write.
+    fn mark(&mut self) -> u64 {
+        self.descriptors.lock().unwrap().clear();
+        self.position()
+    }
+
+    /// Closes the entry in progress, if any, once the crate's action is
+    /// done. Returns where the next entry's header begins.
+    fn seal(&mut self, mark: u64) -> u64 {
+        let Some(c) = self.current.take() else {
+            return mark;
+        };
+        let (end, size, csize, crc) = match c.hasher {
+            None => (mark, c.size, c.csize, c.crc),
+            Some(hasher) => {
+                let found = self
+                    .descriptors
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .find(|d| d.size == c.size);
+                match found {
+                    // The descriptor is what the archive says; for AES
+                    // entries that is a CRC of zero, as in the headers.
+                    Some(d) => (d.end, d.size, d.csize, d.crc),
+                    None => {
+                        debug_assert!(false, "no data descriptor followed a streamed entry");
+                        (mark, c.size, 0, hasher.finalize())
+                    }
+                }
+            }
+        };
+        if self.entries.len() <= c.index {
+            self.entries.resize(c.index + 1, [0; 4]);
+        }
+        self.entries[c.index] = [c.header_start, size, csize, u64::from(crc)];
+        end
+    }
+
+    /// An entry whose data goes through `feed`, byte by byte.
+    fn begin_hashed(&mut self, index: usize, header_start: u64) {
+        self.current = Some(Current {
+            index,
+            header_start,
+            size: 0,
+            csize: 0,
+            crc: 0,
+            hasher: Some(crc32fast::Hasher::new()),
+        });
+    }
+
+    /// An entry whose sizes and CRC are known already: a directory, a
+    /// symlink, a raw copy. Its header holds them, so no descriptor.
+    fn begin_known(&mut self, index: usize, header_start: u64, size: u64, csize: u64, crc: u32) {
+        self.current = Some(Current {
+            index,
+            header_start,
+            size,
+            csize,
+            crc,
+            hasher: None,
+        });
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        if let Some(c) = &mut self.current {
+            c.size += bytes.len() as u64;
+            if let Some(h) = &mut c.hasher {
+                h.update(bytes);
+            }
+        }
+    }
+}
+
+/// What a stream cannot take: anything that would need a header patched
+/// once the data is written.
+fn stream_error(ruby: &Ruby, what: &str) -> Error {
+    Error::new(
+        ruby.exception_arg_error(),
+        format!(
+            "{what} cannot be written to a stream (an IO that cannot seek); \
+             write to a file, a StringIO or a seekable IO instead"
+        ),
+    )
 }
 
 /// What the crate wrote for an entry is not quite right for ZipCrypto,
@@ -399,7 +670,7 @@ fn data_descriptor(crc: u32, csize: u64, size: u64) -> io::Result<[u8; 16]> {
 
 /// Finishes a ZipCrypto entry in progress, if any, before the writer
 /// moves on to the next entry or the central directory.
-fn seal_pending(state: &mut State, w: &mut ZipWriter<Sink>) -> io::Result<()> {
+fn seal_pending<W: Write + Seek>(state: &mut State, w: &mut ZipWriter<W>) -> io::Result<()> {
     if let Some(pending) = state.pending.take() {
         let (last, patch) = pending.seal()?;
         w.write_all(&last)?;
@@ -589,32 +860,79 @@ impl Writer {
             .truncate(true)
             .open(&path)
             .map_err(|e| io_error(ruby, e))?;
-        Ok(Self::new(Sink::File(BufWriter::new(file)), None, None))
+        Ok(Self::new(
+            Inner::Seekable(ZipWriter::new(Sink::File(BufWriter::new(file)))),
+            None,
+            None,
+            None,
+        ))
     }
 
     pub fn open_memory() -> Self {
-        Self::new(Sink::Memory(Cursor::new(Vec::new())), None, None)
+        Self::new(
+            Inner::Seekable(ZipWriter::new(Sink::Memory(Cursor::new(Vec::new())))),
+            None,
+            None,
+            None,
+        )
     }
 
     /// Any seekable IO-like Ruby object; the archive is written from its
     /// start, entry by entry, as the stream takes shape.
     pub fn open_io(io: Value) -> Result<Self, Error> {
         let attached = Arc::new(AtomicBool::new(true));
-        let out = RubyOut::new(io, Arc::clone(&attached))?;
+        let out = RubyOut::new(io, Arc::clone(&attached), true)?;
+        let sink = Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out));
         Ok(Self::new(
-            Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out)),
+            Inner::Seekable(ZipWriter::new(sink)),
             Some(Opaque::from(io)),
             Some(attached),
+            None,
         ))
     }
 
-    fn new(sink: Sink, io: Option<Opaque<Value>>, attached: Option<Arc<AtomicBool>>) -> Self {
+    /// A Ruby IO-like object that only takes writes (a pipe, a socket, a
+    /// response body): each entry goes out as it is written, with its
+    /// sizes in a data descriptor after the data, and nothing is seeked
+    /// back to. ZipCrypto entries are refused, since their headers are
+    /// patched at the end.
+    pub fn open_stream(io: Value) -> Result<Self, Error> {
+        let attached = Arc::new(AtomicBool::new(true));
+        let out = RubyOut::new(io, Arc::clone(&attached), false)?;
+        let written = Arc::new(AtomicU64::new(0));
+        let descriptors = Arc::new(Mutex::new(Vec::new()));
+        let counting = Counting {
+            sink: Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out)),
+            written: Arc::clone(&written),
+            sniffer: Sniffer::default(),
+            descriptors: Arc::clone(&descriptors),
+        };
+        Ok(Self::new(
+            Inner::Stream(ZipWriter::new_stream(counting)),
+            Some(Opaque::from(io)),
+            Some(attached),
+            Some(StreamStats {
+                written,
+                descriptors,
+                entries: Vec::new(),
+                current: None,
+            }),
+        ))
+    }
+
+    fn new(
+        writer: Inner,
+        io: Option<Opaque<Value>>,
+        attached: Option<Arc<AtomicBool>>,
+        stream: Option<StreamStats>,
+    ) -> Self {
         Self {
             inner: RefCell::new(State {
-                writer: Some(ZipWriter::new(sink)),
+                writer: Some(writer),
                 count: 0,
                 patches: Vec::new(),
                 pending: None,
+                stream,
             }),
             io,
             attached,
@@ -644,35 +962,46 @@ impl Writer {
         // Starting an entry flushes the previous one's compressor, which is
         // real work for a large entry; nothing Ruby-owned is touched unless
         // the sink is a Ruby IO.
-        rb_self.with_state(ruby, |state, w| {
+        rb_self.with_state(ruby, |state, inner| {
+            if options.zipcrypto && state.stream.is_some() {
+                return Err(stream_error(ruby, "ZipCrypto entries"));
+            }
             maybe_without_gvl(rb_self.needs_gvl, || -> ZipResult<()> {
-                seal_pending(state, w)?;
-                w.start_file_with_options(file_options.name(&name))?;
-                // The crate has the entry from here on, whatever happens
-                // to the rest; later patches count on the index.
-                let index = state.count;
-                state.count += 1;
-                if options.zipcrypto {
-                    let password = options.password.as_deref().unwrap_or_default();
-                    let mut keys = zipcrypto::Keys::new(password);
-                    // The check byte is the high byte of the DOS time the
-                    // header carries, which is what the crate wrote.
-                    let header = keys.header((options.last_modified().timepart() >> 8) as u8)?;
-                    w.write_all(&header)?;
-                    let deflate = (options.method == 8).then(|| {
-                        flate2::write::DeflateEncoder::new(Vec::new(), options.flate_level())
-                    });
-                    state.pending = Some(Pending {
-                        index,
-                        keys,
-                        method: options.method,
-                        deflate,
-                        crc: crc32fast::Hasher::new(),
-                        size: 0,
-                        csize: ZIPCRYPTO_HEADER_LEN,
-                    });
-                }
-                Ok(())
+                with_zip!(inner, |w| {
+                    seal_pending(state, w)?;
+                    let mark = state.stream_mark();
+                    w.start_file_with_options(file_options.name(&name))?;
+                    // The crate has the entry from here on, whatever happens
+                    // to the rest; later patches count on the index.
+                    let index = state.count;
+                    state.count += 1;
+                    let header_start = state.stream_seal(mark);
+                    if let Some(stream) = &mut state.stream {
+                        stream.begin_hashed(index, header_start);
+                    }
+                    if options.zipcrypto {
+                        let password = options.password.as_deref().unwrap_or_default();
+                        let mut keys = zipcrypto::Keys::new(password);
+                        // The check byte is the high byte of the DOS time the
+                        // header carries, which is what the crate wrote.
+                        let header =
+                            keys.header((options.last_modified().timepart() >> 8) as u8)?;
+                        w.write_all(&header)?;
+                        let deflate = (options.method == 8).then(|| {
+                            flate2::write::DeflateEncoder::new(Vec::new(), options.flate_level())
+                        });
+                        state.pending = Some(Pending {
+                            index,
+                            keys,
+                            method: options.method,
+                            deflate,
+                            crc: crc32fast::Hasher::new(),
+                            size: 0,
+                            csize: ZIPCRYPTO_HEADER_LEN,
+                        });
+                    }
+                    Ok(())
+                })
             })
             .map_err(|e| entry_error(ruby, &name, e))
         })
@@ -688,10 +1017,19 @@ impl Writer {
         let name = utf8_name(ruby, name)?;
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
-        rb_self.with_state(ruby, |state, w| {
+        rb_self.with_state(ruby, |state, inner| {
             maybe_without_gvl(rb_self.needs_gvl, || {
-                seal_pending(state, w)?;
-                w.add_directory(&name, file_options)
+                with_zip!(inner, |w| {
+                    seal_pending(state, w)?;
+                    let mark = state.stream_mark();
+                    w.add_directory(&name, file_options)?;
+                    let index = state.count;
+                    let header_start = state.stream_seal(mark);
+                    if let Some(stream) = &mut state.stream {
+                        stream.begin_known(index, header_start, 0, 0, 0);
+                    }
+                    Ok(())
+                })
             })
             .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
             state.count += 1;
@@ -713,10 +1051,21 @@ impl Writer {
         let target = utf8_text(ruby, "symlink target", target)?;
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
-        rb_self.with_state(ruby, |state, w| {
+        rb_self.with_state(ruby, |state, inner| {
             maybe_without_gvl(rb_self.needs_gvl, || {
-                seal_pending(state, w)?;
-                w.add_symlink(&name, &target, file_options)
+                with_zip!(inner, |w| {
+                    seal_pending(state, w)?;
+                    let mark = state.stream_mark();
+                    w.add_symlink(&name, &target, file_options)?;
+                    let index = state.count;
+                    let header_start = state.stream_seal(mark);
+                    if let Some(stream) = &mut state.stream {
+                        let bytes = target.as_bytes();
+                        let len = bytes.len() as u64;
+                        stream.begin_known(index, header_start, len, len, crc32fast::hash(bytes));
+                    }
+                    Ok(())
+                })
             })
             .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
             state.count += 1;
@@ -729,13 +1078,20 @@ impl Writer {
         // GVL (the string could be moved by compaction meanwhile).
         let bytes = unsafe { data.as_slice() }.to_vec();
         let len = bytes.len();
-        rb_self.with_state(ruby, |state, w| {
-            maybe_without_gvl(rb_self.needs_gvl, || match state.pending.as_mut() {
-                Some(pending) => {
-                    let cipher = pending.feed(bytes)?;
-                    w.write_all(&cipher)
-                }
-                None => w.write_all(&bytes),
+        rb_self.with_state(ruby, |state, inner| {
+            maybe_without_gvl(rb_self.needs_gvl, || {
+                with_zip!(inner, |w| match state.pending.as_mut() {
+                    Some(pending) => {
+                        let cipher = pending.feed(bytes)?;
+                        w.write_all(&cipher)
+                    }
+                    None => {
+                        if let Some(stream) = &mut state.stream {
+                            stream.feed(&bytes);
+                        }
+                        w.write_all(&bytes)
+                    }
+                })
             })
             .map_err(|e| io_error(ruby, e))?;
             Ok(len)
@@ -760,21 +1116,34 @@ impl Writer {
         let mut source = archive.archive(ruby)?.clone();
         let file = source.by_index_raw(index).map_err(|e| zip_error(ruby, e))?;
         let zipcrypto = file.encrypted() && file.compression() != CompressionMethod::Aes;
+        let (size, csize, crc) = (file.size(), file.compressed_size(), file.crc32());
         let touch = touch
             .map(|h| EntryOptions::from_hash(ruby, h))
             .transpose()?;
-        rb_self.with_state(ruby, |state, w| {
+        rb_self.with_state(ruby, |state, inner| {
+            if zipcrypto && state.stream.is_some() {
+                return Err(stream_error(ruby, "ZipCrypto entries"));
+            }
             maybe_without_gvl(needs_gvl, || {
-                seal_pending(state, w)?;
-                match (new_name, touch) {
-                    (Some(name), _) => w.raw_copy_file_rename(file, name),
-                    (None, Some(t)) => {
-                        let mtime = DateTime::try_from_msdos(t.dos_date, t.dos_time)
-                            .unwrap_or_else(|_| DateTime::default_for_write());
-                        w.raw_copy_file_touch(file, mtime, t.unix_perms)
+                with_zip!(inner, |w| {
+                    seal_pending(state, w)?;
+                    let mark = state.stream_mark();
+                    match (new_name, touch) {
+                        (Some(name), _) => w.raw_copy_file_rename(file, name)?,
+                        (None, Some(t)) => {
+                            let mtime = DateTime::try_from_msdos(t.dos_date, t.dos_time)
+                                .unwrap_or_else(|_| DateTime::default_for_write());
+                            w.raw_copy_file_touch(file, mtime, t.unix_perms)?
+                        }
+                        (None, None) => w.raw_copy_file(file)?,
                     }
-                    (None, None) => w.raw_copy_file(file),
-                }
+                    let index = state.count;
+                    let header_start = state.stream_seal(mark);
+                    if let Some(stream) = &mut state.stream {
+                        stream.begin_known(index, header_start, size, csize, crc);
+                    }
+                    Ok(())
+                })
             })
             .map_err(|e| zip_error(ruby, e))?;
             if zipcrypto {
@@ -811,32 +1180,37 @@ impl Writer {
         let file_options = options.to_file_options(ruby)?;
         // A clone, so the archive's borrow is released before the GVL is.
         let mut source = archive.archive(ruby)?.clone();
-        rb_self.with_state(ruby, |state, w| {
+        rb_self.with_state(ruby, |state, inner| {
+            if state.stream.is_some() {
+                return Err(stream_error(ruby, "ZipCrypto entries"));
+            }
             maybe_without_gvl(needs_gvl, || -> ZipResult<()> {
-                seal_pending(state, w)?;
-                let mut file = source.by_index_raw(index)?;
-                let (crc, size, csize) = (file.crc32(), file.size(), file.compressed_size());
-                w.start_file_with_options(file_options.name(&name))?;
-                let index = state.count;
-                state.count += 1;
-                let copied = io::copy(&mut file, w)?;
-                if copied != csize {
-                    return Err(ZipError::InvalidArchive(
-                        format!("entry has {copied} bytes of data, not the {csize} declared")
-                            .into(),
-                    ));
-                }
-                let mut flags = ENCRYPTED_FLAG;
-                if options.descriptor {
-                    w.write_all(&data_descriptor(crc, csize, size)?)?;
-                    flags |= DATA_DESCRIPTOR_FLAG;
-                }
-                state.patches.push(Patch {
-                    index,
-                    flags,
-                    fields: Some((options.method, crc, size, csize)),
-                });
-                Ok(())
+                with_zip!(inner, |w| {
+                    seal_pending(state, w)?;
+                    let mut file = source.by_index_raw(index)?;
+                    let (crc, size, csize) = (file.crc32(), file.size(), file.compressed_size());
+                    w.start_file_with_options(file_options.name(&name))?;
+                    let index = state.count;
+                    state.count += 1;
+                    let copied = io::copy(&mut file, w)?;
+                    if copied != csize {
+                        return Err(ZipError::InvalidArchive(
+                            format!("entry has {copied} bytes of data, not the {csize} declared")
+                                .into(),
+                        ));
+                    }
+                    let mut flags = ENCRYPTED_FLAG;
+                    if options.descriptor {
+                        w.write_all(&data_descriptor(crc, csize, size)?)?;
+                        flags |= DATA_DESCRIPTOR_FLAG;
+                    }
+                    state.patches.push(Patch {
+                        index,
+                        flags,
+                        fields: Some((options.method, crc, size, csize)),
+                    });
+                    Ok(())
+                })
             })
             .map_err(|e| entry_error(ruby, &name, e))
         })
@@ -844,8 +1218,8 @@ impl Writer {
 
     pub fn set_comment(ruby: &Ruby, rb_self: &Self, comment: RString) -> Result<(), Error> {
         let bytes = unsafe { comment.as_slice() }.to_vec().into_boxed_slice();
-        rb_self.with_writer(ruby, |w| {
-            w.set_raw_comment(bytes).map_err(|e| zip_error(ruby, e))
+        rb_self.with_state(ruby, |_, inner| {
+            with_zip!(inner, |w| w.set_raw_comment(bytes)).map_err(|e| zip_error(ruby, e))
         })
     }
 
@@ -864,23 +1238,44 @@ impl Writer {
             .ok_or_else(|| Error::new(ruby.exception_io_error(), "closed stream"))?;
         let mut patches = std::mem::take(&mut state.patches);
         let pending = state.pending.take();
+        let mut stream = state.stream.take();
         drop(state);
         // Finishes the last entry and writes the central directory, then
-        // reads that directory back for the stats and the header patches.
+        // (for a sink that can be read back) collects the stats and patches
+        // the headers.
         let needs_gvl = rb_self.needs_gvl;
         let (sink, stats) = maybe_without_gvl(needs_gvl, || -> ZipResult<(Sink, EntryStats)> {
-            let archive = finalize(writer, pending, &mut patches)?;
-            let mut stats = collect_stats(&archive)?;
-            let mut sink = archive.into_inner();
-            if !patches.is_empty() {
-                sink = apply_patches(sink, &patches, &mut stats)?;
+            match writer {
+                Inner::Seekable(writer) => {
+                    let archive = finalize(writer, pending, &mut patches)?;
+                    let mut stats = collect_stats(&archive)?;
+                    let mut sink = archive.into_inner();
+                    if !patches.is_empty() {
+                        sink = apply_patches(sink, &patches, &mut stats)?;
+                    }
+                    sink.flush()?;
+                    if let Sink::Ruby(w) = &mut sink {
+                        w.get_mut().truncate_to_end()?;
+                        w.get_mut().seek_to_end()?;
+                    }
+                    Ok((sink, stats))
+                }
+                Inner::Stream(writer) => {
+                    // ZipCrypto never reaches a stream, so there is nothing
+                    // pending and nothing to patch.
+                    let mark = stream.as_mut().map_or(0, StreamStats::mark);
+                    let mut sink = writer.finish()?.into_inner().sink;
+                    let stats = stream
+                        .as_mut()
+                        .map(|s| {
+                            s.seal(mark);
+                            std::mem::take(&mut s.entries)
+                        })
+                        .unwrap_or_default();
+                    sink.flush()?;
+                    Ok((sink, stats))
+                }
             }
-            sink.flush()?;
-            if let Sink::Ruby(w) = &mut sink {
-                w.get_mut().truncate_to_end()?;
-                w.get_mut().seek_to_end()?;
-            }
-            Ok((sink, stats))
         })
         .map_err(|e| zip_error(ruby, e))?;
         let bytes = match sink {
@@ -898,18 +1293,10 @@ impl Writer {
         self.inner.try_borrow().is_ok_and(|s| s.writer.is_none())
     }
 
-    fn with_writer<T>(
-        &self,
-        ruby: &Ruby,
-        f: impl FnOnce(&mut ZipWriter<Sink>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.with_state(ruby, |_, w| f(w))
-    }
-
     fn with_state<T>(
         &self,
         ruby: &Ruby,
-        f: impl FnOnce(&mut State, &mut ZipWriter<Sink>) -> Result<T, Error>,
+        f: impl FnOnce(&mut State, &mut Inner) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let mut guard = self
             .inner

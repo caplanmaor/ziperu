@@ -18,13 +18,20 @@ module Ziperu
 
     # Opens the indicated zip file. If a file with that name already exists
     # it will be overwritten. With `stream: true`, `file_name` is an IO
-    # object that receives the archive from its start, entry by entry if it
-    # is seekable (a StringIO, File or Tempfile) and all at once on
-    # `close_buffer` if it is not (a pipe).
-    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false, **opts)
+    # object that receives the archive from its start, entry by entry. A
+    # seekable IO (a StringIO, File or Tempfile) gets each entry's sizes in
+    # its header; an IO that cannot seek (a pipe, a socket, a response
+    # body) gets them in a data descriptor after the entry's data, as
+    # rubyzip writes them, and never has to hold the archive in memory.
+    # ZipCrypto entries need their headers patched once the data is
+    # written, so with a `TraditionalEncrypter` (or `memory: true`) the
+    # archive is built in memory and written out in one go at `close`.
+    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false,
+                   memory: false, **opts)
       super(**opts)
       @file_name = file_name
       @io = nil
+      @encrypter = encrypter || ::Ziperu::NullEncrypter.new
       if stream
         @io = file_name
         @io.binmode if @io.respond_to?(:binmode)
@@ -32,13 +39,19 @@ module Ziperu
           if IOExtras.seekable?(@io)
             @io.rewind if @io.respond_to?(:rewind)
             Native::Writer.open_io(@io)
-          else
+          elsif memory || @encrypter.kind_of?(TraditionalEncrypter)
+            # ZipCrypto headers are patched once the data is written, which
+            # a stream cannot take: the archive is built in memory and
+            # written out in one go at `close`.
             Native::Writer.open_memory
+          else
+            # A pipe, socket or response body: each entry goes out as it is
+            # written, with its sizes in a data descriptor after the data.
+            Native::Writer.open_stream(@io)
           end
       else
         @writer = Native::Writer.open_path(file_name.to_s)
       end
-      @encrypter = encrypter || ::Ziperu::NullEncrypter.new
       @suppress_extra_fields = suppress_extra_fields
       @comment = ''
       @closed = false
@@ -70,9 +83,11 @@ module Ziperu
         result
       end
 
-      # Same as #open but writes to an IO instead; returns the IO.
-      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false, **opts)
-        zos = new(io, stream: true, encrypter: encrypter,
+      # Same as #open but writes to an IO instead; returns the IO. A pipe,
+      # socket or response body is streamed to as the entries are written.
+      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false,
+                       memory: false, **opts)
+        zos = new(io, stream: true, encrypter: encrypter, memory: memory,
                       suppress_extra_fields: suppress_extra_fields, **opts)
         begin
           yield zos

@@ -402,7 +402,11 @@ module Ziperu
       initialize_cdir(@name)
     end
 
-    # Writes the archive, with any changes, to `io` and returns it.
+    # Writes the archive, with any changes, to `io` and returns it. `io`
+    # may be a pipe, socket or response body: entries are streamed to it
+    # as they are written, unless the archive holds ZipCrypto entries,
+    # whose headers are patched at the end; such an archive is built in
+    # memory first.
     def write_buffer(io = ::StringIO.new)
       return io unless commit_required?
 
@@ -416,7 +420,11 @@ module Ziperu
         return io
       end
 
-      ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields) do |zos|
+      # ZipCrypto entries are copied with patched headers, which a stream
+      # (a pipe, say) cannot take: such an archive is built in memory first.
+      memory = @cdir.any? { |e| !@cdir.shadowed?(e) && e.zipcrypto? }
+      ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields,
+                                              memory: memory) do |zos|
         @cdir.each { |e| e.write_to_zip_output_stream(zos) unless @cdir.shadowed?(e) }
         zos.comment = comment
       end

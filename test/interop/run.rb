@@ -214,6 +214,53 @@ Dir.mktmpdir("interop") do |dir|
     r.empty? ? true : r.join("; ")
   end
 
+  # write_buffer to an IO that cannot seek: entries go out as written, the
+  # sizes follow the data in descriptors (zip64 ones, the sizes being
+  # unknown up front), AES included
+  check("ziperu streams to a write-only IO, unzip/7z/python read") do
+    path = "z_pipe.zip"
+    sink = Object.new
+    def sink.write(d) = (@out ||= +"".b) << d
+    def sink.out = @out
+    Zip::OutputStream.write_buffer(sink) do |z|
+      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
+      z.put_next_entry("sub/")
+      z.put_next_entry("random.bin"); z.write(File.binread("src/random.bin"))
+      z.put_next_entry("stored.bin", "", Zip::ExtraField.new, Zip::Entry::STORED); z.write("S" * 5000)
+      z.put_next_entry("empty.txt")
+    end
+    File.binwrite(path, sink.out)
+    aes = "z_pipe_aes.zip"
+    sink = Object.new
+    def sink.write(d) = (@out ||= +"".b) << d
+    def sink.out = @out
+    Zip::OutputStream.write_buffer(sink, encrypter: Zip::AESEncrypter.new("s3cret")) do |z|
+      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
+    end
+    File.binwrite(aes, sink.out)
+    r = []
+    if have?("unzip") then ok, out = sh("unzip", "-t", path); r << "unzip: #{out}" unless ok end
+    if SEVEN
+      ok, out = sh(SEVEN, "t", path); r << "7z: #{out}" unless ok
+      ok, out = sh(SEVEN, "t", "-ps3cret", aes); r << "7z aes: #{out}" unless ok
+    end
+    if have?("python3")
+      ok, out = sh("python3", "-I", "-c", <<~PY, path)
+        import sys, zipfile
+        z = zipfile.ZipFile(sys.argv[1])
+        assert z.testzip() is None
+        assert z.read('hello.txt') == b'hello world\\n' * 100
+        assert len(z.read('random.bin')) == 300000
+        assert z.read('stored.bin') == b'S' * 5000 and z.getinfo('stored.bin').compress_type == zipfile.ZIP_STORED
+        assert z.read('empty.txt') == b''
+        print('ok')
+      PY
+      r << "python: #{out}" unless ok
+    end
+    Zip::File.open(aes, password: "s3cret") { |zf| r << "ziperu aes: #{zf.verify}" unless zf.verify.empty? }
+    r.empty? ? true : r.join("; ")
+  end
+
   # ---- others write, ziperu reads ---------------------------------------
   read_check = lambda do |path, pw: nil, expect_link: false|
     r = []

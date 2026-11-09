@@ -65,9 +65,9 @@ Ziperu::File.open("new.zip", create: true) do |zf|
   zf.get_output_stream("notes.txt") { |io| io.puts "written at #{Time.now}" }
 end
 
-Ziperu::OutputStream.write_buffer do |zos|   # a StringIO, for a response body
-  zos.put_next_entry("hello.txt")
-  zos.write("hello")
+Ziperu::OutputStream.write_buffer(socket) do |zos|   # any IO; a pipe, socket or
+  zos.put_next_entry("hello.txt")                    # response body is streamed,
+  zos.write("hello")                                 # nothing buffered to the end
 end
 
 Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
