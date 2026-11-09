@@ -1,8 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+First release, as far as rubygems.org is concerned: 0.1.0 was tagged but
+its precompiled gems were built for Ruby 3.3 and later only, so it was
+never published. The native gems now cover every Ruby the gemspec
+promises (3.1 through 4.0).
+
 ## 0.1.0
 
-First release.
+Not published.
 
 - rubyzip 3.x API (`Ziperu::File`, `Entry`, `InputStream`, `OutputStream`,
   `FileSystem`) on a Rust core; `require "zip"` aliases `Zip = Ziperu`.
