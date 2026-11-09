@@ -42,8 +42,7 @@ module Ziperu
     # ziperu's own version and take their 2.x path, so both forms work.
     CREATE = true
 
-    def initialize(path_or_io, legacy_create = nil, legacy_buffer = nil, legacy_options = nil,
-                   create: false, buffer: false,
+    def initialize(path_or_io, *legacy, create: false, buffer: false,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
@@ -57,21 +56,23 @@ module Ziperu
       # decrypter on `InputStream`; `decrypter:` is accepted here too.
       @password = password || decrypter&.password
 
-      @name    = if path_or_io.respond_to?(:to_path) && !path_or_io.respond_to?(:seek)
-                   path_or_io.to_path # a Pathname
+      @name    = if IOExtras.path_like?(path_or_io)
+                   IOExtras.path_of(path_or_io)
                  elsif path_or_io.respond_to?(:path)
                    path_or_io.path
                  else
                    path_or_io
                  end
-      # rubyzip 2.x's positional form: `new(path, create, buffer, options)`.
-      create = legacy_create unless legacy_create.nil?
-      buffer = legacy_buffer unless legacy_buffer.nil?
-      if legacy_options
-        restore_ownership   = legacy_options.fetch(:restore_ownership, restore_ownership)
-        restore_permissions = legacy_options.fetch(:restore_permissions, restore_permissions)
-        restore_times       = legacy_options.fetch(:restore_times, restore_times)
-        compression_level   = legacy_options.fetch(:compression_level, compression_level)
+      # rubyzip 2.x's positional form: `new(path, create, buffer, options)`,
+      # the options being the restore_* and compression_level keywords.
+      given = Compat.positional(legacy, %i[create buffer options], create: create, buffer: buffer)
+      create = given[:create]
+      buffer = given[:buffer]
+      if (options = given[:options])
+        restore_ownership   = options.fetch(:restore_ownership, restore_ownership)
+        restore_permissions = options.fetch(:restore_permissions, restore_permissions)
+        restore_times       = options.fetch(:restore_times, restore_times)
+        compression_level   = options.fetch(:compression_level, compression_level)
       end
       @create  = create ? true : false # allow any truthy value to mean true
 
@@ -87,25 +88,15 @@ module Ziperu
     class << self
       include FileSplit
 
-      # Similar to ::new. If a block is passed the Ziperu::File object is passed
-      # to the block and is automatically closed afterwards.
-      def open(file_name, legacy_create = nil, legacy_options = nil, create: false,
-               restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
-               restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
-               restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-               compression_level: ::Ziperu.default_compression,
-               suppress_extra_fields: false, password: nil, decrypter: nil)
+      # Same as ::new (same keywords: `create:`, `restore_ownership:`,
+      # `restore_permissions:`, `restore_times:`, `compression_level:`,
+      # `suppress_extra_fields:`, `password:`, `decrypter:`). If a block is
+      # passed the Ziperu::File object is passed to the block and is
+      # automatically closed afterwards.
+      def open(file_name, *legacy, **options)
         # rubyzip 2.x's `open(path, create, options)`.
-        create = legacy_create unless legacy_create.nil?
-        zf = ::Ziperu::File.new(file_name, nil, nil, legacy_options,
-                                        create:                create,
-                                        restore_ownership:     restore_ownership,
-                                        restore_permissions:   restore_permissions,
-                                        restore_times:         restore_times,
-                                        compression_level:     compression_level,
-                                        suppress_extra_fields: suppress_extra_fields,
-                                        password:              password,
-                                        decrypter:             decrypter)
+        legacy.insert(1, nil) if legacy.size == 2 # no positional `buffer` here
+        zf = ::Ziperu::File.new(file_name, *legacy, **options)
 
         return zf unless block_given?
 
@@ -127,15 +118,10 @@ module Ziperu
         zf.write_buffer(io)
       end
 
-      # Like #open, but reads zip archive contents from a String or open IO
-      # stream, and outputs data to a buffer.
-      def open_buffer(io = ::StringIO.new, create: false,
-                      restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
-                      restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
-                      restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-                      compression_level: ::Ziperu.default_compression,
-                      suppress_extra_fields: false, password: nil, decrypter: nil)
-        unless IO_METHODS.map { |method| io.respond_to?(method) }.all? || io.kind_of?(String)
+      # Like #open (same keywords), but reads zip archive contents from a
+      # String or open IO stream, and outputs data to a buffer.
+      def open_buffer(io = ::StringIO.new, **options)
+        unless IO_METHODS.all? { |method| io.respond_to?(method) } || io.kind_of?(String)
           raise 'Ziperu::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
         end
@@ -147,14 +133,7 @@ module Ziperu
           raise ArgumentError, 'Ziperu::File.open_buffer needs a seekable IO; '                                'use Ziperu::InputStream for a pipe or socket'
         end
 
-        zf = ::Ziperu::File.new(io, create: create, buffer: true,
-                                 restore_ownership:     restore_ownership,
-                                 restore_permissions:   restore_permissions,
-                                 restore_times:         restore_times,
-                                 compression_level:     compression_level,
-                                 suppress_extra_fields: suppress_extra_fields,
-                                 password:              password,
-                                 decrypter:             decrypter)
+        zf = ::Ziperu::File.new(io, buffer: true, **options)
 
         return zf unless block_given?
 
@@ -223,32 +202,19 @@ module Ziperu
     # instance of Ziperu::Entry, a new Ziperu::Entry will be initialized using the
     # arguments specified. If a block is passed the stream object is passed
     # to the block and closed afterwards.
-    def get_output_stream(entry, *legacy, permissions: nil, comment: nil,
-                          extra: nil, compressed_size: nil, crc: nil,
-                          compression_method: nil, compression_level: nil,
-                          size: nil, time: nil, &a_proc)
-      unless legacy.empty? # rubyzip 2.x's positional form, `(name, 0o644)` mostly
-        given = %i[permissions comment extra compressed_size crc compression_method size time]
-                .zip(legacy).to_h
-        permissions        = given.fetch(:permissions, permissions)
-        comment            = given.fetch(:comment, comment)
-        extra              = given.fetch(:extra, extra)
-        compressed_size    = given.fetch(:compressed_size, compressed_size)
-        crc                = given.fetch(:crc, crc)
-        compression_method = given.fetch(:compression_method, compression_method)
-        size               = given.fetch(:size, size)
-        time               = given.fetch(:time, time)
-      end
+    def get_output_stream(entry, *legacy, permissions: nil, compression_level: nil, **entry_opts,
+                          &a_proc)
+      # rubyzip 2.x's positional form, `(name, 0o644)` mostly.
+      given = Compat.positional(
+        legacy, %i[permissions comment extra compressed_size crc compression_method size time],
+        entry_opts.merge(permissions: permissions)
+      )
+      permissions = given.delete(:permissions)
       new_entry =
         if entry.kind_of?(Entry)
           entry
         else
-          Entry.new(
-            @name, entry.to_s, comment: comment, extra: extra,
-            compressed_size: compressed_size, crc: crc, size: size,
-            compression_method: compression_method,
-            compression_level: compression_level, time: time
-          )
+          Entry.new(@name, entry.to_s, compression_level: compression_level, **given)
         end
       if new_entry.directory?
         raise ArgumentError,
@@ -684,7 +650,7 @@ module Ziperu
     end
 
     def read_archive(path_or_io)
-      path_or_io.binmode if path_or_io.respond_to?(:binmode)
+      IOExtras.binmode(path_or_io)
       @native = InputStream.open_archive(path_or_io)
       @comment = @native.comment # the stored bytes, as rubyzip reads them
       @native.each_entry { |meta| @cdir.push_record(Entry.from_meta(@native, meta, self)) }

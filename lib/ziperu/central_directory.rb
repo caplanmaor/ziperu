@@ -31,7 +31,7 @@ module Ziperu
     # `Zip::File` (roo reads spreadsheets from a stream this way): the
     # entries are read, and each can be read or extracted afterwards.
     def read_from_stream(io)
-      io.binmode if io.respond_to?(:binmode)
+      IOExtras.binmode(io)
       @native = InputStream.open_archive(io)
       @comment = @native.comment
       @entry_set = EntrySet.new
@@ -59,9 +59,8 @@ module Ziperu
     end
 
     def count_entries(io)
-      if io.kind_of?(::String) || (io.respond_to?(:to_path) && !io.respond_to?(:seek))
-        path = io.respond_to?(:to_path) ? io.to_path : io
-        return ::File.open(path, 'rb') { |f| count_entries(f) }
+      if IOExtras.path_like?(io)
+        return ::File.open(IOExtras.path_of(io), 'rb') { |f| count_entries(f) }
       end
 
       read_eocds(io)
@@ -143,7 +142,7 @@ module Ziperu
     end
 
     def eocd_data(io)
-      io.binmode if io.respond_to?(:binmode)
+      IOExtras.binmode(io)
       begin
         io.seek(-MAX_END_OF_CD_SIZE, IO::SEEK_END)
       rescue Errno::EINVAL

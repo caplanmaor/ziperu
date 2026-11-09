@@ -15,6 +15,7 @@ require 'tempfile'
 require 'zlib'
 
 require_relative "ziperu/version"
+require_relative "ziperu/compat"
 require_relative "ziperu/errors"
 
 # Prefer the precompiled, Ruby-version-specific binary shipped in native gems;

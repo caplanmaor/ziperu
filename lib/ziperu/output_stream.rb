@@ -26,13 +26,13 @@ module Ziperu
     # ZipCrypto entries need their headers patched once the data is
     # written, so with a `TraditionalEncrypter` (or `memory: true`) the
     # archive is built in memory and written out in one go at `close`.
-    def initialize(file_name, legacy_stream = nil, legacy_encrypter = nil,
-                   stream: false, encrypter: nil, suppress_extra_fields: false,
+    def initialize(file_name, *legacy, stream: false, encrypter: nil, suppress_extra_fields: false,
                    memory: false, append: false, **opts)
       super(**opts)
       # rubyzip 2.x's `new(io, stream, encrypter)`.
-      stream = legacy_stream unless legacy_stream.nil?
-      encrypter ||= legacy_encrypter
+      stream, encrypter = Compat.positional(legacy, %i[stream encrypter],
+                                            stream: stream, encrypter: encrypter)
+                                .values_at(:stream, :encrypter)
       @file_name = file_name
       @io = nil
       @append = append
@@ -45,7 +45,7 @@ module Ziperu
         @writer = Native::Writer.open_append(file_name.to_s)
       elsif stream
         @io = file_name
-        @io.binmode if @io.respond_to?(:binmode)
+        IOExtras.binmode(@io)
         @writer =
           if IOExtras.seekable?(@io)
             @io.rewind if @io.respond_to?(:rewind)
@@ -71,17 +71,15 @@ module Ziperu
     end
 
     class << self
-      # Same as #initialize but if a block is passed the opened stream is
-      # passed to the block and closed when the block returns.
-      def open(file_name, legacy_encrypter = nil, encrypter: nil, suppress_extra_fields: false, **opts)
-        encrypter ||= legacy_encrypter # rubyzip 2.x's `open(path, encrypter)`
-        unless block_given?
-          return new(file_name, encrypter: encrypter,
-                                suppress_extra_fields: suppress_extra_fields, **opts)
-        end
+      # Same as #initialize (same keywords) but if a block is passed the
+      # opened stream is passed to the block and closed when the block
+      # returns.
+      def open(file_name, *legacy, **opts)
+        # rubyzip 2.x's `open(path, encrypter)`.
+        opts = Compat.positional(legacy, %i[encrypter], opts)
+        return new(file_name, **opts) unless block_given?
 
-        zos = new(file_name, stream: false, encrypter: encrypter,
-                             suppress_extra_fields: suppress_extra_fields, **opts)
+        zos = new(file_name, stream: false, **opts)
         result =
           begin
             yield zos
@@ -97,11 +95,10 @@ module Ziperu
 
       # Same as #open but writes to an IO instead; returns the IO. A pipe,
       # socket or response body is streamed to as the entries are written.
-      def write_buffer(io = ::StringIO.new, legacy_encrypter = nil, encrypter: nil,
-                       suppress_extra_fields: false, memory: false, **opts)
-        encrypter ||= legacy_encrypter # rubyzip 2.x's `write_buffer(io, encrypter)`
-        zos = new(io, stream: true, encrypter: encrypter, memory: memory,
-                      suppress_extra_fields: suppress_extra_fields, **opts)
+      def write_buffer(io = ::StringIO.new, *legacy, **opts)
+        # rubyzip 2.x's `write_buffer(io, encrypter)`.
+        opts = Compat.positional(legacy, %i[encrypter], opts)
+        zos = new(io, stream: true, **opts)
         begin
           yield zos
         rescue Exception # rubocop:disable Lint/RescueException
@@ -126,13 +123,10 @@ module Ziperu
       # the hood, as with any Enumerator); `body.each { |chunk| ... }` is
       # the direct path. Writing the entries inside the block is the same
       # as with #open and #write_buffer.
-      def body(encrypter: nil, suppress_extra_fields: false, **opts, &block)
+      def body(**opts, &block)
         raise ArgumentError, "a block that writes the entries is required" unless block
 
-        Enumerator.new do |yielder|
-          write_buffer(Yielder.new(yielder), encrypter: encrypter,
-                                             suppress_extra_fields: suppress_extra_fields, **opts, &block)
-        end
+        Enumerator.new { |yielder| write_buffer(Yielder.new(yielder), **opts, &block) }
       end
     end
 
@@ -193,7 +187,7 @@ module Ziperu
       entry_name, comment = '', extra = ExtraField.new,
       compression_method = Entry::DEFLATED, level = Ziperu.default_compression
     )
-      raise Error, 'zip stream is closed' if @closed
+      check_open!
 
       new_entry =
         if entry_name.kind_of?(Entry) || entry_name.kind_of?(StreamableStream)
@@ -216,13 +210,9 @@ module Ziperu
     # not both, and carries nothing else over from the entry object;
     # `Entry#write_to_zip_output_stream` re-streams edited entries instead.
     def copy_raw_entry(entry, new_name = nil, touch: false) # :nodoc:
-      raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
-      raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
-      if entry.index.nil?
-        raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
-      end
 
+      check_copyable!(entry)
       return copy_encrypted_entry(entry, new_name) if entry.zipcrypto?
 
       touch_opts =
@@ -242,12 +232,7 @@ module Ziperu
     # own headers: name, time, permissions, extra fields and comment are
     # all taken from the entry, so a rename or chmod is carried too.
     def copy_encrypted_entry(entry, new_name = nil) # :nodoc:
-      raise Error, 'zip stream is closed' if @closed
-      raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
-      if entry.index.nil?
-        raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
-      end
-
+      check_copyable!(entry)
       opts = native_entry_options(entry).merge(
         zipcrypto: true, descriptor: entry.gp_flags & 8 != 0 # bit 3: data descriptor follows
       )
@@ -316,6 +301,21 @@ module Ziperu
     rescue Native::DuplicateEntryError
       raise EntryExistsError.new('put_next_entry', entry.name)
     end
+
+    def check_open!
+      raise Error, 'zip stream is closed' if @closed
+    end
+
+    # An entry can be copied raw when it is in an archive and the native
+    # core can address it by index (not one of several under one name).
+    def check_copyable!(entry)
+      check_open!
+      raise Error, "entry '#{entry.name}' is not in an archive" if entry.archive.nil?
+      return unless entry.index.nil?
+
+      raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
+    end
+    private :check_open!, :check_copyable!
 
     # Translate a Ziperu::Entry into the Hash the native writer takes.
     def native_entry_options(entry)

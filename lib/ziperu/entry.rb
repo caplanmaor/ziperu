@@ -129,17 +129,14 @@ module Ziperu
       time: ::Ziperu::DOSTime.now, extra: ::Ziperu::ExtraField.new
     )
       super()
-      unless legacy.empty? # rubyzip 2.x's positional form
-        given = %i[comment extra compressed_size crc compression_method size time]
-                .zip(legacy).to_h
-        comment            = given.fetch(:comment, comment)
-        extra              = given.fetch(:extra, extra)
-        compressed_size    = given.fetch(:compressed_size, compressed_size)
-        crc                = given.fetch(:crc, crc)
-        compression_method = given.fetch(:compression_method, compression_method)
-        size               = given.fetch(:size, size)
-        time               = given.fetch(:time, time)
-      end
+      # rubyzip 2.x's positional form.
+      given = Compat.positional(
+        legacy, %i[comment extra compressed_size crc compression_method size time],
+        comment: comment, extra: extra, compressed_size: compressed_size, crc: crc,
+        compression_method: compression_method, size: size, time: time
+      )
+      comment, extra, compressed_size, crc, compression_method, size, time =
+        given.values_at(:comment, :extra, :compressed_size, :crc, :compression_method, :size, :time)
       @name = name
       check_name(@name)
 
@@ -581,6 +578,12 @@ module Ziperu
       slash_index ? entry_name.slice(0, slash_index + 1) : nil
     end
 
+    # Raises unless `owner` (the archive or zipfile this operation needs)
+    # is there.
+    def check_in_archive!(owner) # :nodoc:
+      raise Error, "entry '#{@name}' is not in an archive" if owner.nil?
+    end
+
     def clean_up # :nodoc:
       @dirty = false # Any changes are written at this point.
       @dirty_fields = []
@@ -610,7 +613,7 @@ module Ziperu
     # as rubyzip does: a fresh File for an archive on disk, the buffer
     # itself (rewound) for one in memory.
     def get_raw_input_stream(&block)
-      raise Error, "entry '#{@name}' is not in an archive" if @zipfile.nil?
+      check_in_archive!(@zipfile)
 
       io = @zipfile.kind_of?(::Ziperu::File) ? @zipfile.name : @zipfile
       return ::File.open(io, 'rb', &block) if io.kind_of?(::String)
@@ -645,7 +648,7 @@ module Ziperu
 
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
-      raise Error, "entry '#{@name}' is not in an archive" if archive.nil?
+      check_in_archive!(archive)
       # A record without an index is read through the stream.
       return open_input_stream(enforce_size: true, &:read) if @index.nil?
 
@@ -681,7 +684,7 @@ module Ziperu
         return ::Ziperu::NullInputStream
       end
 
-      raise Error, "entry '#{@name}' is not in an archive" if @archive.nil?
+      check_in_archive!(@archive)
 
       # No offset: get_next_stream_entry positions by index, and resolving
       # an offset would walk the whole central directory on every read.

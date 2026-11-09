@@ -25,17 +25,27 @@ module Ziperu
         false
       end
 
-      def copy_stream(ostream, istream)
-        ostream.write(istream.read(CHUNK_SIZE, +'')) until istream.eof?
+      # A path (a String, a Pathname, anything with `to_path` that is not
+      # an IO), as opposed to an IO-like object.
+      def path_like?(obj)
+        obj.kind_of?(::String) ||
+          (obj.respond_to?(:to_path) && !obj.respond_to?(:seek)) ||
+          !obj.respond_to?(:read)
       end
 
-      def copy_stream_n(ostream, istream, nbytes)
-        toread = nbytes
-        while toread > 0 && !istream.eof?
-          tr = [toread, CHUNK_SIZE].min
-          ostream.write(istream.read(tr, +''))
-          toread -= tr
-        end
+      # The path a path-like object names.
+      def path_of(obj)
+        obj.respond_to?(:to_path) ? obj.to_path : obj.to_s
+      end
+
+      # Puts an IO in binary mode when it has one (a StringIO does not).
+      def binmode(io)
+        io.binmode if io.respond_to?(:binmode)
+        io
+      end
+
+      def copy_stream(ostream, istream)
+        ostream.write(istream.read(CHUNK_SIZE, +'')) until istream.eof?
       end
     end
   end

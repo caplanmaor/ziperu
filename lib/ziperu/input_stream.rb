@@ -25,12 +25,12 @@ module Ziperu
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, legacy_offset = nil, legacy_decrypter = nil,
-                   offset: 0, decrypter: nil, password: nil,
+    def initialize(context, *legacy, offset: 0, decrypter: nil, password: nil,
                    enforce_size: ::Ziperu.validate_entry_sizes, **opts)
       # rubyzip 2.x's `new(io, offset, decrypter)`.
-      offset = legacy_offset unless legacy_offset.nil?
-      decrypter ||= legacy_decrypter
+      offset, decrypter = Compat.positional(legacy, %i[offset decrypter],
+                                            offset: offset, decrypter: decrypter)
+                                .values_at(:offset, :decrypter)
       # `password:` is the plain form of `decrypter:`; the native core tells
       # AES from ZipCrypto by the entry, so one password serves both.
       decrypter ||= TraditionalDecrypter.new(password) if password
@@ -88,7 +88,7 @@ module Ziperu
     # the entry data. Returns nil when there are no more entries.
     def get_next_entry
       raise SplitArchiveError if @split
-      raise IOError, 'closed stream' if closed?
+      check_open!
       return @current_entry = nil if @archive.nil? || @next_index.nil?
       if @next_index >= (@records ? @records.size : @archive.entry_count)
         # Past the last entry there is nothing to read, not the previous
@@ -104,6 +104,11 @@ module Ziperu
       open_entry
       @current_entry
     end
+
+    def check_open!
+      raise IOError, 'closed stream' if closed?
+    end
+    private :check_open!
 
     # Entries are fetched from the archive a batch at a time: opening the
     # source once per entry is most of the cost of walking a large archive.
@@ -126,7 +131,7 @@ module Ziperu
     #
     # @api private
     def get_next_stream_entry(entry)
-      raise IOError, 'closed stream' if closed?
+      check_open!
 
       @current_entry = entry
       @next_index =
@@ -142,7 +147,7 @@ module Ziperu
 
     # Rewinds the stream to the beginning of the current entry.
     def rewind
-      raise IOError, 'closed stream' if closed?
+      check_open!
       return if @current_entry.nil?
 
       @lineno = 0
@@ -177,10 +182,8 @@ module Ziperu
     class << self
       # Same as #initialize but if a block is passed the opened stream is
       # passed to the block and closed when the block returns.
-      def open(filename_or_io, legacy_offset = nil, legacy_decrypter = nil,
-               offset: 0, decrypter: nil, password: nil, **opts)
-        zio = new(filename_or_io, legacy_offset, legacy_decrypter,
-                  offset: offset, decrypter: decrypter, password: password, **opts)
+      def open(filename_or_io, *legacy, **opts)
+        zio = new(filename_or_io, *legacy, **opts)
         return zio unless block_given?
 
         begin
@@ -215,14 +218,9 @@ module Ziperu
         raise
       end
 
-      # A path (String, Pathname or anything else with `to_path` that is
-      # not an IO), as opposed to an IO-like object.
-      #
       # @api private
       def path_like?(context)
-        context.kind_of?(::String) ||
-          (context.respond_to?(:to_path) && !context.respond_to?(:seek)) ||
-          !context.respond_to?(:read)
+        IOExtras.path_like?(context)
       end
 
       # Whether what `context` holds begins with a local file header, the
@@ -245,7 +243,7 @@ module Ziperu
       end
 
       def path_of(context)
-        context.respond_to?(:to_path) ? context.to_path : context.to_s
+        IOExtras.path_of(context)
       end
 
       def open_native(context)
@@ -255,7 +253,7 @@ module Ziperu
         # than paying a method call per chunk (12x faster per entry).
         return Native::Archive.open_bytes(context.string) if context.kind_of?(::StringIO)
 
-        context.binmode if context.respond_to?(:binmode)
+        IOExtras.binmode(context)
         if IOExtras.seekable?(context)
           # Driven lazily through seek/read; nothing is copied up front.
           Native::Archive.open_io(context)
@@ -318,7 +316,7 @@ module Ziperu
     end
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
-      raise IOError, 'closed stream' if closed?
+      check_open!
       unless maxlen.nil? || maxlen.kind_of?(::Integer)
         raise TypeError, "no implicit conversion of #{maxlen.class} into Integer"
       end
