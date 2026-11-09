@@ -124,6 +124,12 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **Extract policies.** `extract_all(dir, on_exists: :overwrite | :skip |
+  :raise, exclude: ["*.log"], junk_paths: true, sanitize: :windows)`: what
+  `unzip -o`, `-n`, `-x` and `-j` do, where rubyzip only offers a block
+  per entry; `sanitize: :windows` rewrites names Windows refuses (`:`,
+  `?`, `con`, a trailing dot) so an archive made elsewhere extracts there.
+  `extract` takes `on_exists:` too.
 - **Threads.** `extract_all(dir, threads: 8)` inflates and writes the
   files on eight threads (the archive is read through one handle per
   thread, with the GVL released); `OutputStream#add_files(files, threads:

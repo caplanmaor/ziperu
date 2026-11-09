@@ -109,15 +109,38 @@ enum Notice {
 /// GVL), the directories are made first, in order, and the files are
 /// then shared out among that many threads, each reading through its own
 /// handle on the archive.
+/// How an extraction is to be done, as Ruby asks for it.
+pub struct Options {
+    pub enforce_size: bool,
+    pub threads: usize,
+    /// 0 raise, 1 overwrite, 2 skip (see `OnExists`).
+    pub on_exists: u8,
+}
+
 pub fn extract_entries(
     ruby: &Ruby,
     archive: ZipArchive<Source>,
     needs_gvl: bool,
     dest: String,
     specs: RArray,
-    enforce_size: bool,
-    threads: usize,
+    options: Options,
 ) -> Result<RArray, Error> {
+    let Options {
+        enforce_size,
+        threads,
+        on_exists,
+    } = options;
+    let on_exists = match on_exists {
+        0 => OnExists::Raise,
+        1 => OnExists::Overwrite,
+        2 => OnExists::Skip,
+        other => {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("on_exists code {other} is not 0, 1 or 2"),
+            ))
+        }
+    };
     let mut entries = Vec::with_capacity(specs.len());
     let mut parsed = Vec::with_capacity(specs.len());
     for spec in specs.into_iter() {
@@ -149,7 +172,7 @@ pub fn extract_entries(
 
     let threads = if needs_gvl { 1 } else { threads.max(1) };
     let outcome = maybe_without_gvl(needs_gvl, || {
-        extract_all(archive, &dest, enforce_size, &parsed, threads)
+        extract_all(archive, &dest, enforce_size, on_exists, &parsed, threads)
     });
 
     let mut notices = match outcome {
@@ -181,6 +204,7 @@ fn extract_all(
     archive: ZipArchive<Source>,
     dest: &str,
     enforce_size: bool,
+    on_exists: OnExists,
     specs: &[Spec],
     threads: usize,
 ) -> Outcome {
@@ -189,7 +213,7 @@ fn extract_all(
         .position(|s| !s.directory)
         .unwrap_or(specs.len());
     let (dirs, files) = specs.split_at(files_from);
-    let mut extractor = Extractor::new(archive, dest, enforce_size);
+    let mut extractor = Extractor::new(archive, dest, enforce_size, on_exists);
     extractor.extract_each(dirs, 0)?;
     if threads <= 1 || files.len() <= 1 {
         extractor.extract_each(files, files_from)?;
@@ -202,7 +226,8 @@ fn extract_all(
     let results: Vec<Outcome> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|t| {
-                let mut worker = Extractor::new(extractor.archive.clone(), dest, enforce_size);
+                let mut worker =
+                    Extractor::new(extractor.archive.clone(), dest, enforce_size, on_exists);
                 worker.made.clone_from(&extractor.made);
                 scope.spawn(move || {
                     for (i, spec) in files.iter().enumerate().skip(t).step_by(threads) {
@@ -260,10 +285,19 @@ fn exception<A: magnus::ArgList>(ruby: &Ruby, class: &Lazy<ExceptionClass>, args
     }
 }
 
+/// What to do about a file or directory already at an entry's path.
+#[derive(Clone, Copy)]
+enum OnExists {
+    Raise,
+    Overwrite,
+    Skip,
+}
+
 struct Extractor<'a> {
     archive: ZipArchive<Source>,
     dest: &'a str,
     enforce_size: bool,
+    on_exists: OnExists,
     /// Directories known to exist, so each parent is created once.
     made: HashSet<PathBuf>,
     buf: Vec<u8>,
@@ -271,11 +305,17 @@ struct Extractor<'a> {
 }
 
 impl<'a> Extractor<'a> {
-    fn new(archive: ZipArchive<Source>, dest: &'a str, enforce_size: bool) -> Self {
+    fn new(
+        archive: ZipArchive<Source>,
+        dest: &'a str,
+        enforce_size: bool,
+        on_exists: OnExists,
+    ) -> Self {
         Self {
             archive,
             dest,
             enforce_size,
+            on_exists,
             made: HashSet::new(),
             buf: vec![0; CHUNK],
             notices: Vec::new(),
@@ -314,7 +354,11 @@ impl<'a> Extractor<'a> {
                 self.made.insert(path.to_path_buf());
                 return Ok(());
             }
-            Ok(_) => return Err(Failure::Exists(path_string(path))),
+            Ok(_) => match self.on_exists {
+                OnExists::Raise => return Err(Failure::Exists(path_string(path))),
+                OnExists::Skip => return Ok(()),
+                OnExists::Overwrite => fs::remove_file(path).map_err(at(path))?,
+            },
             Err(_) => {}
         }
         fs::create_dir_all(path).map_err(at(path))?;
@@ -334,11 +378,31 @@ impl<'a> Extractor<'a> {
     fn create_file(&mut self, path: &Path, spec: &Spec) -> Result<(), Failure> {
         if let Some(parent) = path.parent() {
             if !self.made.contains(parent) {
+                // A file where the parent directory should be: the entry
+                // cannot go there. Skipped under `:skip`, an error
+                // otherwise (a directory entry, when there is one, has
+                // already had its say under `:overwrite`).
+                if fs::metadata(parent).is_ok_and(|m| !m.is_dir()) {
+                    return match self.on_exists {
+                        OnExists::Skip => Ok(()),
+                        _ => Err(Failure::Exists(path_string(parent))),
+                    };
+                }
                 fs::create_dir_all(parent).map_err(at(parent))?;
                 self.made.insert(parent.to_path_buf());
             }
         }
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        let mut options = OpenOptions::new();
+        options.write(true);
+        match self.on_exists {
+            OnExists::Raise => options.create_new(true),
+            OnExists::Skip if path.exists() => return Ok(()),
+            OnExists::Skip => options.create_new(true),
+            // A directory in the way is not overwritten by a file.
+            OnExists::Overwrite if path.is_dir() => return Err(Failure::Exists(path_string(path))),
+            OnExists::Overwrite => options.create(true).truncate(true),
+        };
+        let mut file = match options.open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {
                 return Err(Failure::Exists(path_string(path)));

@@ -420,17 +420,15 @@ impl Archive {
         specs: RArray,
         enforce_size: bool,
         threads: usize,
+        on_exists: u8,
     ) -> Result<RArray, Error> {
         let archive = rb_self.archive(ruby)?.clone();
-        crate::extract::extract_entries(
-            ruby,
-            archive,
-            rb_self.needs_gvl,
-            dest,
-            specs,
+        let options = crate::extract::Options {
             enforce_size,
             threads,
-        )
+            on_exists,
+        };
+        crate::extract::extract_entries(ruby, archive, rb_self.needs_gvl, dest, specs, options)
     }
 }
 

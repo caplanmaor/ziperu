@@ -98,6 +98,7 @@ Ziperu::File.add_recursive("site.zip", "public", threads: 8)   # what is under p
                                                                # compressed on 8 threads
 Ziperu::File.open("site.zip") do |zf|
   zf.extract_all("restored/", threads: 8)   # never writes outside restored/
+  zf.extract_all("restored/", on_exists: :overwrite, exclude: ["*.log"])
 end
 ```
 

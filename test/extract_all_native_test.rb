@@ -174,10 +174,12 @@ class ExtractAllNativeTest < Minitest::Test
     assert_equal "short\n", File.binread(out("short.txt"))
   end
 
-  def test_on_exists_proc_takes_the_ruby_path
+  def test_on_exists_proc_overwrites_on_the_native_path
     Ziperu.on_exists_proc = true
+    FileUtils.mkdir_p(@dest)
+    File.write(out("short.txt"), "in the way")
     Ziperu::File.open(fixture("text.zip")) { |zf| zf.extract_all(@dest) }
-    assert_equal 0, Spy.calls
+    assert_equal 1, Spy.calls, "the global overwrite policy is passed to the native core"
     assert_equal "short\n", File.binread(out("short.txt"))
   end
 

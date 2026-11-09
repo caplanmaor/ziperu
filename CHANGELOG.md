@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `extract_all` takes the policies `unzip` has: `on_exists: :raise |
+  :overwrite | :skip` (also on `extract`), `exclude: ["*.log", /re/]`,
+  `junk_paths: true`, and `sanitize: :windows` for names Windows refuses.
+  `Ziperu.on_exists_proc = true` now also takes the native fast path.
 - Parallel compression and extraction. `OutputStream#add_files(files,
   threads: n)` compresses files from disk on `n` threads (the crate's
   rayon-backed append; entries come out in the order given);

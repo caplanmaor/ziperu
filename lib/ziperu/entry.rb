@@ -395,8 +395,13 @@ module Ziperu
     # A symlink entry is skipped with a warning unless `symlinks: :create`,
     # which creates it only when its target resolves to a path inside
     # `destination_directory`.
+    #
+    # `on_exists:` says what to do with a file already at the path:
+    # `:raise` (`Ziperu::DestinationExistsError`), `:overwrite` or `:skip`.
+    # Without it the block decides, as in rubyzip (true to overwrite), and
+    # without a block `Ziperu.on_exists_proc` does.
     def extract(entry_path = @name, destination_directory: '.',
-                create_parent_directories: false, symlinks: :skip, &block)
+                create_parent_directories: false, symlinks: :skip, on_exists: nil, &block)
       dest_dir = ::File.absolute_path(destination_directory || '.')
       extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
 
@@ -405,7 +410,7 @@ module Ziperu
         return self
       end
 
-      block ||= proc { ::Ziperu.on_exists_proc }
+      block ||= Entry.on_exists_block(on_exists)
 
       raise "unknown file type #{inspect}" unless directory? || file? || symlink?
 
@@ -417,6 +422,26 @@ module Ziperu
         __send__(:"create_#{ftype}", extract_path, &block)
       end
       self
+    end
+
+    # The block `extract` consults about a path already taken, for an
+    # `on_exists:` policy: it returns true to overwrite, false to raise,
+    # `:skip` to leave the path alone.
+    def self.on_exists_block(policy) # :nodoc:
+      case policy
+      when nil then proc { ::Ziperu.on_exists_proc }
+      when :raise then proc { false }
+      when :overwrite then proc { true }
+      when :skip then proc { :skip }
+      else raise ArgumentError, "on_exists: takes :raise, :overwrite or :skip, not #{policy.inspect}"
+      end
+    end
+
+    # The native extractor's code for the policy; nil when a block decides.
+    def self.on_exists_code(policy) # :nodoc:
+      { raise: 0, overwrite: 1, skip: 2 }.fetch(policy) do
+        raise ArgumentError, "on_exists: takes :raise, :overwrite or :skip, not #{policy.inspect}"
+      end
     end
 
     # Where a symlink entry points: the link on disk for one being added,
@@ -742,8 +767,10 @@ module Ziperu
     end
 
     def create_file(dest_path, _continue_on_exists_proc = proc { Ziperu.continue_on_exists_proc })
-      if ::File.exist?(dest_path) && !yield(self, dest_path)
-        raise DestinationExistsError, dest_path
+      if ::File.exist?(dest_path)
+        decision = yield(self, dest_path)
+        return if decision == :skip
+        raise DestinationExistsError, dest_path unless decision
       end
 
       ::File.open(dest_path, 'wb') do |os|
@@ -772,7 +799,9 @@ module Ziperu
       return if ::File.directory?(dest_path)
 
       if ::File.exist?(dest_path)
-        raise ::Ziperu::DestinationExistsError, dest_path unless block_given? && yield(self, dest_path)
+        decision = block_given? && yield(self, dest_path)
+        return if decision == :skip
+        raise ::Ziperu::DestinationExistsError, dest_path unless decision
 
         ::FileUtils.rm_f dest_path
       end
@@ -797,7 +826,9 @@ module Ziperu
       end
 
       if ::File.symlink?(dest_path) || ::File.exist?(dest_path)
-        raise DestinationExistsError, dest_path unless yield(self, dest_path)
+        decision = yield(self, dest_path)
+        return if decision == :skip
+        raise DestinationExistsError, dest_path unless decision
 
         ::File.unlink(dest_path)
       end

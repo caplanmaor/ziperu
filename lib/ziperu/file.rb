@@ -354,12 +354,12 @@ module Ziperu
     # Extracts `entry` to a file at `entry_path`, with
     # `destination_directory` as the base. The block (or Ziperu.on_exists_proc)
     # decides whether an existing file is overwritten.
-    def extract(entry, entry_path = nil, destination_directory: '.', symlinks: :skip, &block)
-      block ||= proc { ::Ziperu.on_exists_proc }
+    def extract(entry, entry_path = nil, destination_directory: '.', symlinks: :skip, on_exists: nil,
+                &block)
       found_entry = get_entry(entry)
       entry_path ||= found_entry.name
       found_entry.extract(entry_path, destination_directory: destination_directory,
-                                      symlinks: symlinks, &block)
+                                      symlinks: symlinks, on_exists: on_exists, &block)
     end
 
     # Extracts every entry in the archive into `destination_directory`,
@@ -376,38 +376,92 @@ module Ziperu
     # since an IO is driven from Ruby. Directories are made first, links
     # last, as before. An error is raised for the first entry (in archive
     # order) that failed, once every thread has stopped.
-    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, threads: 1, &block)
+    #
+    # The policies `unzip` has: `on_exists:` is `:raise` (the default),
+    # `:overwrite` (`unzip -o`) or `:skip` (`unzip -n`) for a path already
+    # taken, where rubyzip only offers a block; `exclude:` lists globs (or
+    # Regexps) of entry names to leave out (`unzip -x`), matched against
+    # the whole name, so `"*.log"` matches at any depth; `junk_paths: true`
+    # drops the directories and puts every file in `destination_directory`
+    # itself (`unzip -j`); `sanitize: :windows` rewrites names that Windows
+    # refuses (`<>:"|?*`, control characters, a trailing dot or space,
+    # `CON`, `NUL` and the like) so the archive extracts there at all.
+    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, threads: 1,
+                    on_exists: nil, exclude: nil, junk_paths: false, sanitize: nil, &block)
       # Directories first, so files have somewhere to go; links last, so
       # nothing is written through one. Of several records under one name
       # only the last is extracted, which is the one rubyzip would know.
       dirs, rest = @cdir.writable_entries.partition(&:directory?)
       links, others = rest.partition(&:symlink?)
       ordered = dirs + others + links
-      total = ordered.size
+      ordered = ordered.reject { |e| excluded?(e.name, exclude) } if exclude
+      ordered = ordered.reject(&:directory?) if junk_paths
+      targets = ordered.map { |e| [e, extract_target(e.name, junk_paths, sanitize)] }
+      total = targets.size
       done = 0
       report = ->(entry) { done += 1; progress&.call(entry, done, total) }
 
-      # With no overwrite decision to make (no block, and Ziperu.on_exists_proc
-      # left at its default of raising) the native core extracts every
+      # With no block to consult about paths already taken (the policy
+      # says, or Ziperu.on_exists_proc), the native core extracts every
       # qualifying entry in one call; the rest take the per-entry path.
-      slow = if block.nil? && !::Ziperu.on_exists_proc && !@restore_ownership
-               extract_all_native(ordered, destination_directory, report, threads)
+      policy = on_exists || (::Ziperu.on_exists_proc ? :overwrite : :raise)
+      slow = if block.nil? && !@restore_ownership
+               extract_all_native(targets, destination_directory, report, threads, policy)
              else
-               ordered
+               targets
              end
 
-      slow.each do |entry|
+      slow.each do |entry, target|
         if entry.symlink? && symlinks != :create
           warn "WARNING: skipped symlink '#{entry.name}' during extract_all."
         else
-          entry.extract(entry.name, destination_directory:     destination_directory,
-                                    create_parent_directories: true,
-                                    symlinks:                  symlinks, &block)
+          entry.extract(target, destination_directory:     destination_directory,
+                                create_parent_directories: true,
+                                symlinks:                  symlinks,
+                                on_exists:                 on_exists, &block)
         end
         report.call(entry)
       end
 
       self
+    end
+
+    # Whether `name` matches one of `patterns`: a glob (`File.fnmatch`
+    # with `*` crossing `/`, as `unzip -x` has it) or a Regexp.
+    def excluded?(name, patterns)
+      Array(patterns).any? do |pattern|
+        case pattern
+        when ::Regexp then pattern.match?(name)
+        else ::File.fnmatch?(pattern.to_s, name, ::File::FNM_EXTGLOB | ::File::FNM_DOTMATCH)
+        end
+      end
+    end
+    private :excluded?
+
+    # The path under the destination an entry goes to.
+    def extract_target(name, junk_paths, sanitize)
+      name = ::File.basename(name) if junk_paths
+      case sanitize
+      when nil, false then name
+      when :windows then self.class.sanitize_windows_name(name)
+      else raise ArgumentError, "sanitize: takes :windows, not #{sanitize.inspect}"
+      end
+    end
+    private :extract_target
+
+    WINDOWS_RESERVED_NAMES = /\A(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|\z)/i # :nodoc:
+
+    # `name` as Windows will take it: in each component the characters it
+    # refuses (`<>:"|?*` and controls) become `_`, a trailing dot or space
+    # goes, and a reserved device name gets a leading `_`.
+    def self.sanitize_windows_name(name)
+      trailing = name.end_with?('/') ? '/' : ''
+      parts = name.split('/').map do |part|
+        part = part.gsub(/[<>:"|?*\x00-\x1f]/, '_').sub(/[. ]+\z/, '')
+        part = "_#{part}" if part.match?(WINDOWS_RESERVED_NAMES)
+        part.empty? ? '_' : part
+      end
+      parts.join('/') + trailing
     end
 
     # Inflates every entry (without writing anything) so that the CRC of
@@ -598,17 +652,18 @@ module Ziperu
     # Entries the native core cannot take are returned for the Ruby loop:
     # symlinks (skipped there with a warning), encrypted entries, entries
     # not read from this archive, and names it cannot represent.
-    def extract_all_native(ordered, destination_directory, report, threads)
+    def extract_all_native(targets, destination_directory, report, threads, on_exists)
       native = native_archive
       dest = ::File.absolute_path(destination_directory || '.')
+      code = Entry.on_exists_code(on_exists)
       slow = []
       specs = []
       by_index = {}
-      ordered.each do |entry|
+      targets.each do |entry, target|
         if entry.symlink? || entry.encrypted? || !native_extractable?(entry, native)
-          slow << entry
+          slow << [entry, target]
         else
-          specs << native_extract_spec(entry)
+          specs << native_extract_spec(entry, target)
           by_index[entry.index] = entry
         end
       end
@@ -616,7 +671,7 @@ module Ziperu
       # A few hundred entries per call, so an interrupt is noticed between
       # calls rather than after the whole archive.
       specs.each_slice(NATIVE_EXTRACT_BATCH) do |batch|
-        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes, threads).each do |index, kind, path|
+        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes, threads, code).each do |index, kind, path|
           entry = by_index[index]
           case kind
           when :unsafe
@@ -645,10 +700,10 @@ module Ziperu
 
     # What `Entry#extract` would do for the entry, as plain values:
     # [entry, index, name, mtime seconds, mtime nanoseconds, unix mode, directory?].
-    def native_extract_spec(entry)
+    def native_extract_spec(entry, target = entry.name)
       mtime = entry.time if @restore_times
       mode = entry.unix_perms & 0o1777 if @restore_permissions && entry.fstype == FSTYPE_UNIX && entry.unix_perms
-      [entry, entry.index, entry.name, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
+      [entry, entry.index, target, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
     end
 
     def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc, report)
