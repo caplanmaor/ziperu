@@ -637,6 +637,16 @@ impl Writer {
         self.inner.try_borrow().is_ok_and(|s| s.zip.is_none())
     }
 
+    /// Bytes handed to the sink so far, for a stream (where it is what a
+    /// consumer has been given); nil for a seekable sink.
+    pub fn bytes_written(ruby: &Ruby, rb_self: &Self) -> Result<Option<u64>, Error> {
+        let state = rb_self.borrow(ruby)?;
+        Ok(match &state.zip {
+            Some(Zip::Stream(_, stats)) => Some(stats.position()),
+            _ => None,
+        })
+    }
+
     /// One crate action that ends the entry in progress and begins entry
     /// number `index`: seals a pending ZipCrypto entry first, then runs
     /// `begin` (which makes the crate call and says how the new entry's

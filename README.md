@@ -125,8 +125,12 @@ body = Ziperu::OutputStream.body do |zos|
     att.download { |chunk| zos.write(chunk) }
   end
 end
-[200, { "content-type" => "application/zip",
-        "content-disposition" => 'attachment; filename="attachments.zip"' }, body]
+[200, Ziperu::RailsStreaming.headers("attachments.zip"), body]   # require "ziperu/rails_streaming"
+
+class ExportsController < ApplicationController           # in Rails: headers, body, no Live
+  include Ziperu::RailsStreaming
+  def show = zip_stream("export.zip") { |zos| zos.put_next_entry("a.csv"); zos.write(csv) }
+end
 ```
 
 Add files to an archive you already have (appended in place, the rest is

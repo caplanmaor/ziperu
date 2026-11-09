@@ -207,7 +207,8 @@ struct Current {
 }
 
 impl StreamStats {
-    fn position(&self) -> u64 {
+    /// Bytes that have reached the sink so far.
+    pub(crate) fn position(&self) -> u64 {
         self.written.load(Ordering::Relaxed)
     }
 

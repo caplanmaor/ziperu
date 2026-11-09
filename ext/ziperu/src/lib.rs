@@ -78,6 +78,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_singleton_method("open_stream", function!(writer::Writer::open_stream, 1))?;
     writer.define_singleton_method("open_append", function!(writer::Writer::open_append, 1))?;
     writer.define_method("abort", method!(writer::Writer::abort, 0))?;
+    writer.define_method("bytes_written", method!(writer::Writer::bytes_written, 0))?;
     writer.define_method(
         "add_files_parallel",
         method!(writer::Writer::add_files_parallel, 2),

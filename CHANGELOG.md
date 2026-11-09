@@ -2,6 +2,13 @@
 
 ## 0.2.0 (unreleased)
 
+- Streamed downloads: `Ziperu::OutputStream.estimated_size { |e| ... }`
+  works out, to the byte, how large a streamed archive of stored (or
+  deflated-with-known-size) entries will be, for a `Content-Length`;
+  `OutputStream#bytes_written` reports progress on a stream;
+  `require "ziperu/rails_streaming"` gives controllers `zip_stream(name,
+  size:) { |zos| ... }` (headers plus an Enumerator body, no
+  `ActionController::Live`) and Rack apps `Ziperu::RailsStreaming.headers`.
 - `extract_all` takes the policies `unzip` has: `on_exists: :raise |
   :overwrite | :skip` (also on `extract`), `exclude: ["*.log", /re/]`,
   `junk_paths: true`, and `sanitize: :windows` for names Windows refuses.

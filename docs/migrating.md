@@ -199,6 +199,12 @@ Everything here is additive: code that does not use it behaves as above.
 - **A streaming HTTP response body.** `Ziperu::OutputStream.body { |zos| ... }`
   is an Enumerator of the archive's bytes in chunks, produced as they are
   consumed: hand it to Rack (or anything with `each`) as the body and the
-  download starts with the first entry, with no temp file and no
-  `Content-Length`. In Rails, `write_buffer(response.stream)` inside
-  `ActionController::Live` does the same.
+  download starts with the first entry, with no temp file.
+  `Ziperu::OutputStream.estimated_size { |e| e.add_stored(name, size) }`
+  gives the exact length of such a stream of stored entries, for a
+  `Content-Length`; `OutputStream#bytes_written` says how far it got.
+  `require "ziperu/rails_streaming"` and `include Ziperu::RailsStreaming`
+  in a controller for `zip_stream("export.zip", size: n) { |zos| ... }`,
+  which sets the headers and the body with no `ActionController::Live`;
+  `Ziperu::RailsStreaming.headers(name, size:)` is the Hash for a Rack
+  app. What zip_kit offers, on the same core as the rest.

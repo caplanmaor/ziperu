@@ -213,6 +213,14 @@ module Ziperu
       @current_entry = new_entry
     end
 
+    # Bytes handed to the IO so far, for a stream to an IO that cannot
+    # seek (`write_buffer` to a pipe or socket, `body`): what the consumer
+    # has been given, for a progress report alongside
+    # `OutputStream.estimated_size`. Nil for a file or a seekable IO.
+    def bytes_written
+      @writer.bytes_written
+    end
+
     # Adds files from disk, compressed on `threads` threads: `files` maps
     # entry names to paths (a Hash, or pairs). The entries come out in the
     # order given, each compressed in memory on the pool and appended as
