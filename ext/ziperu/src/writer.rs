@@ -303,7 +303,15 @@ impl Writer {
             let _ = state;
             Ok(Begun::Hashed)
         })?;
+        let extra_flags = if options.efs {
+            zipcrypto::LANGUAGE_ENCODING_FLAG
+        } else {
+            0
+        };
         if !options.zipcrypto {
+            if extra_flags != 0 {
+                rb_self.flag_entry(ruby, index, extra_flags)?;
+            }
             return Ok(());
         }
         // The crate has the entry; what follows is this writer's own
@@ -319,6 +327,7 @@ impl Writer {
                 options.method,
                 options.flate_level(),
                 check,
+                extra_flags,
             )
             .rb(ruby)?;
             maybe_without_gvl(rb_self.needs_gvl(), || {
@@ -340,19 +349,37 @@ impl Writer {
         let name = utf8_name(ruby, name)?;
         let options = EntryOptions::from_hash(ruby, opts)?;
         let file_options = options.to_file_options(ruby)?;
-        rb_self
-            .add_entry(ruby, rb_self.needs_gvl(), name.as_bytes(), |_, zip| {
-                maybe_without_gvl(rb_self.needs_gvl(), || {
-                    with_zip!(zip, |w| w.add_directory(&name, file_options))
-                })
-                .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
-                Ok(Begun::Known {
-                    size: 0,
-                    csize: 0,
-                    crc: 0,
-                })
+        let index = rb_self.add_entry(ruby, rb_self.needs_gvl(), name.as_bytes(), |_, zip| {
+            maybe_without_gvl(rb_self.needs_gvl(), || {
+                with_zip!(zip, |w| w.add_directory(&name, file_options))
             })
-            .map(drop)
+            .map_err(|e| entry_error(ruby, name.as_bytes(), e))?;
+            Ok(Begun::Known {
+                size: 0,
+                csize: 0,
+                crc: 0,
+            })
+        })?;
+        if options.efs {
+            rb_self.flag_entry(ruby, index, zipcrypto::LANGUAGE_ENCODING_FLAG)?;
+        }
+        Ok(())
+    }
+
+    /// Sets general purpose flag bits on entry `index` once the archive is
+    /// written (see `zipcrypto::Patch`). A stream cannot be patched, so
+    /// the bits are dropped there.
+    fn flag_entry(&self, ruby: &Ruby, index: usize, flags: u16) -> Result<(), Error> {
+        self.with_state(ruby, |state, zip| {
+            if !zip.is_stream() {
+                state.crypto.patches.push(Patch {
+                    index,
+                    flags,
+                    fields: None,
+                });
+            }
+            Ok(())
+        })
     }
 
     /// Finishes the previous entry and adds a symlink entry pointing at

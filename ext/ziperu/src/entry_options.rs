@@ -32,6 +32,10 @@ pub(crate) struct EntryOptions {
     pub descriptor: bool,
     /// Encrypt with ZipCrypto (using `password`) rather than AES.
     pub zipcrypto: bool,
+    /// Set general purpose bit 11 (the name and comment are UTF-8). The
+    /// crate offers no way to ask for it, so the headers are patched once
+    /// the archive is written; a stream cannot be, and drops it.
+    pub efs: bool,
 }
 
 impl EntryOptions {
@@ -59,6 +63,7 @@ impl EntryOptions {
             aes_mode: field(ruby, h, "aes_mode")?,
             zipcrypto: field(ruby, h, "zipcrypto")?.unwrap_or(false),
             descriptor: field(ruby, h, "descriptor")?.unwrap_or(false),
+            efs: field(ruby, h, "efs")?.unwrap_or(false),
         })
     }
 

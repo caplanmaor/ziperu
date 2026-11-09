@@ -108,6 +108,31 @@ class FeaturesTest < Minitest::Test
     assert_equal "real", File.read(File.join(out, "link.txt"))
   end
 
+  def test_a_symlink_entry_with_fields_the_raw_copy_loses_is_rewritten_as_a_link
+    skip "needs symlink support" unless symlinks_supported?
+    target = File.join(@tmp, "real.txt")
+    File.write(target, "real")
+    link = File.join(@tmp, "link.txt")
+    File.symlink("real.txt", link)
+    archive = File.join(@tmp, "links.zip")
+    # An extended timestamp, as Info-ZIP writes: the raw copy would drop
+    # it, so the entry is written afresh on the next rewrite.
+    Ziperu.write_extended_timestamps = true
+    Ziperu::File.open(archive, create: true) do |zf|
+      zf.add("real.txt", target)
+      zf.add("link.txt", link)
+    end
+    Ziperu.write_extended_timestamps = false
+    Ziperu::File.open(archive) { |zf| zf.get_entry("real.txt").comment = "edited" }
+    Ziperu::File.open(archive) do |zf|
+      entry = zf.get_entry("link.txt")
+      assert_predicate entry, :symlink?
+      assert_equal "real.txt", zf.read("link.txt")
+      assert entry.extra[:universaltime]
+      assert_empty zf.verify
+    end
+  end
+
   def test_a_symlink_entry_pointing_outside_the_destination_is_refused
     skip "needs symlink support" unless symlinks_supported?
     outside = File.join(@tmp, "outside")

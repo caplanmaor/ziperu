@@ -2,6 +2,20 @@
 
 ## 0.2.0 (unreleased)
 
+- Names in other encodings. `Ziperu.unicode_names = true` now really
+  sets the language encoding flag on every entry (the native writer had
+  no way to, so the setting was lost; a non-ASCII UTF-8 name is flagged
+  regardless). Info-ZIP's Unicode Path extra field, which Info-ZIP on
+  Windows writes beside a code-page name, is honoured on read.
+  `Ziperu::File.open(path, metadata_encoding: "Shift_JIS")` (also on
+  `open_buffer`, `foreach` and `InputStream.open`) transcodes names and
+  comments stored in another encoding to UTF-8. Comments come back as
+  the stored bytes (the native core used to decode them as CP437).
+  `Ziperu.write_extended_timestamps = true` gives every new entry
+  Info-ZIP's extended timestamp (UTC, to the second), as Info-ZIP and
+  7-Zip write it; off by default, since an extra field changes the bytes
+  (an EPUB's first entry must have none). An entry rewritten from an
+  archive keeps exactly the fields it had.
 - Streamed downloads: `Ziperu::OutputStream.estimated_size { |e| ... }`
   works out, to the byte, how large a streamed archive of stored (or
   deflated-with-known-size) entries will be, for a `Content-Length`;

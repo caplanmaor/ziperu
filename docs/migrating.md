@@ -124,6 +124,18 @@ until it goes. Exception classes follow the namespace, so rescue
 
 Everything here is additive: code that does not use it behaves as above.
 
+- **Names in other encodings.** A non-ASCII UTF-8 name is written with
+  the language encoding flag whatever `Ziperu.unicode_names` says (the
+  native core sets it), so 7-Zip, Info-ZIP and Explorer show it right
+  where rubyzip's bytes-only name comes out garbled; `unicode_names =
+  true` flags every entry, as in rubyzip. Info-ZIP's Unicode Path field
+  (what Info-ZIP on Windows writes beside a code-page name) is honoured
+  on read. `metadata_encoding: "Shift_JIS"` on `File.open`, `open_buffer`,
+  `foreach` and `InputStream.open` transcodes names and comments stored
+  in another encoding to UTF-8, where rubyzip has only the global
+  `force_entry_names_encoding`. `Ziperu.write_extended_timestamps = true`
+  gives every new entry an extended timestamp (UTC, to the second)
+  alongside the DOS time; rubyzip writes one only after `time=`.
 - **Extract policies.** `extract_all(dir, on_exists: :overwrite | :skip |
   :raise, exclude: ["*.log"], junk_paths: true, sanitize: :windows)`: what
   `unzip -o`, `-n`, `-x` and `-j` do, where rubyzip only offers a block

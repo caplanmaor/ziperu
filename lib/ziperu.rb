@@ -100,7 +100,8 @@ module Ziperu
                 :max_entries,
                 :max_total_size,
                 :max_compression_ratio,
-                :append_in_place
+                :append_in_place,
+                :write_extended_timestamps
 
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
@@ -139,6 +140,13 @@ module Ziperu
     # failure in the middle puts the archive back as it was; a crash in
     # the middle may not. Set to false to always rewrite.
     @append_in_place = true
+    # With this on, every new entry gets Info-ZIP's extended timestamp
+    # field (the modification time in UTC to the second), as Info-ZIP and
+    # 7-Zip write; the DOS time in the header is local and has 2-second
+    # resolution. Off by default, as in rubyzip (which writes one only
+    # after `Entry#time=`): an extra field changes the bytes, and an EPUB's
+    # first entry, for one, must have none.
+    @write_extended_timestamps = false
   end
 
   # Set options in one block. The block runs only the first time.

@@ -48,8 +48,14 @@ module Ziperu
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Ziperu.default_compression,
                    suppress_extra_fields: false, password: nil, decrypter: nil,
-                   write: true, threads: 1)
+                   write: true, threads: 1, metadata_encoding: nil)
       super()
+
+      # The encoding of names and comments stored without the language
+      # encoding flag (an archive made on Windows in Japan, say:
+      # "Shift_JIS"); they are transcoded to UTF-8. Without it such names
+      # are binary Strings, as in rubyzip.
+      @metadata_encoding = metadata_encoding
 
       # On commit, runs of files added from disk are compressed on this
       # many threads (see OutputStream#add_files).
@@ -182,12 +188,14 @@ module Ziperu
       # Each entry can be read (`get_input_stream`, `extract`) while the
       # block runs; the archive is closed when `foreach` returns. Without a
       # block, returns an Enumerator.
-      def foreach(path_or_io, &block)
-        return enum_for(:foreach, path_or_io) unless block
+      def foreach(path_or_io, metadata_encoding: nil, &block)
+        return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding) unless block
 
         native = InputStream.open_archive(path_or_io)
         begin
-          native.each_entry { |meta| yield Entry.from_meta(native, meta, nil) }
+          native.each_entry do |meta|
+            yield Entry.from_meta(native, meta, nil, metadata_encoding: metadata_encoding)
+          end
         ensure
           native.close
         end
@@ -762,7 +770,9 @@ module Ziperu
       IOExtras.binmode(path_or_io)
       @native = InputStream.open_archive(path_or_io)
       @comment = @native.comment # the stored bytes, as rubyzip reads them
-      @native.each_entry { |meta| @cdir.push_record(Entry.from_meta(@native, meta, self)) }
+      @native.each_entry do |meta|
+        @cdir.push_record(Entry.from_meta(@native, meta, self, metadata_encoding: @metadata_encoding))
+      end
     end
 
     def release_native

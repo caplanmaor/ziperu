@@ -117,6 +117,8 @@ pub(crate) const DATA_DESCRIPTOR_FLAG: u16 = 8;
 pub(crate) const DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
 /// The ZipCrypto encryption header that precedes the ciphertext.
 pub(crate) const HEADER_LEN: u64 = HEADER_SIZE as u64;
+/// General purpose flag bit 11: the name and comment are UTF-8.
+pub(crate) const LANGUAGE_ENCODING_FLAG: u16 = 1 << 11;
 
 /// The method, CRC and sizes a ZipCrypto entry really has, to be written
 /// over what the crate put in its headers.
@@ -148,6 +150,8 @@ pub(crate) struct Pending {
     index: usize,
     keys: Keys,
     method: u16,
+    /// Flag bits to set besides the cipher's own.
+    extra_flags: u16,
     deflate: Option<flate2::write::DeflateEncoder<Vec<u8>>>,
     crc: crc32fast::Hasher,
     size: u64,
@@ -165,6 +169,7 @@ impl Pending {
         method: u16,
         level: flate2::Compression,
         check: u8,
+        extra_flags: u16,
     ) -> io::Result<([u8; HEADER_SIZE], Self)> {
         let mut keys = Keys::new(password);
         let header = keys.header(check)?;
@@ -173,6 +178,7 @@ impl Pending {
             index,
             keys,
             method,
+            extra_flags,
             deflate,
             crc: crc32fast::Hasher::new(),
             size: 0,
@@ -211,7 +217,7 @@ impl Pending {
         let patch = Patch {
             index: self.index,
             // Encrypted, and (bit 3) the check byte is the DOS time's.
-            flags: ENCRYPTED_FLAG | DATA_DESCRIPTOR_FLAG,
+            flags: ENCRYPTED_FLAG | DATA_DESCRIPTOR_FLAG | self.extra_flags,
             fields: Some(Fields {
                 method: self.method,
                 crc,

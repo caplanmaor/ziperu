@@ -680,10 +680,9 @@ fn entry_hash(
     h.aset(keys.version_made_by, major * 10 + minor)?;
     h.aset(keys.dos_date, raw.dos_date)?;
     h.aset(keys.dos_time, raw.dos_time)?;
-    h.aset(
-        keys.comment,
-        ruby.str_from_slice(entry.comment().as_bytes()),
-    )?;
+    // The stored bytes: the crate's `comment()` has already decoded them
+    // (as CP437 without the UTF-8 flag), which is Ruby's decision to make.
+    h.aset(keys.comment, ruby.str_from_slice(&raw.comment))?;
     h.aset(keys.extra, ruby.str_from_slice(&raw.extra))?;
     h.aset(keys.header_offset, entry.header_start())?;
     Ok(h)

@@ -408,6 +408,7 @@ module Ziperu
       suppress = @suppress_extra_fields
       zip64_suppressed = suppress == true || [*suppress].include?(:zip64)
       extra = entry.extra.dup
+      add_default_fields(entry, extra)
       extra.suppress_fields!(suppress) if suppress
       extra.delete(:zip64) # the native writer emits its own
 
@@ -425,9 +426,25 @@ module Ziperu
         large_file: zip64_needed?(entry, zip64_suppressed),
         comment: entry.comment.to_s.b,
         extra: extra.to_local_bin.b,
-        central_extra: extra.to_c_dir_bin.b
+        central_extra: extra.to_c_dir_bin.b,
+        # The language encoding flag on every entry (`Ziperu.unicode_names`),
+        # which the native writer sets by patching the headers; a non-ASCII
+        # UTF-8 name gets it from the native core regardless.
+        efs: (entry.gp_flags & Entry::EFS) != 0
       }
     end
+
+    # The fields a new entry gets unless it has them (see
+    # `Ziperu.write_extended_timestamps`). An entry rewritten from an
+    # archive keeps exactly the fields it had.
+    def add_default_fields(entry, extra)
+      return unless entry.archive.nil? || entry.pending_data?
+      return unless ::Ziperu.write_extended_timestamps
+      return if extra.member?(:universaltime) || extra.member?(:ntfs)
+
+      extra.create(:universaltime).mtime = DOSTime.from_time(entry.time)
+    end
+    private :add_default_fields
 
     # rubyzip writes a zip64 extra for a file entry only when it has to:
     # the size is unknown up front (it may turn out huge) or is already

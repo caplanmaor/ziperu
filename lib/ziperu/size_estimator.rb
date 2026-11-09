@@ -17,9 +17,11 @@ module Ziperu
     # `Entry.new(name, size: n, compression_method: STORED)` (or
     # `put_next_entry(name, nil, nil, STORED)` with the size set), deflated
     # ones with a compressed size known from an earlier run, the names in
-    # the same encoding, no extra fields and no comments. It mirrors what
-    # the native writer emits for a stream: a data descriptor after every
-    # file's data, zip64 records only for a 4 GiB entry or 65,535 entries.
+    # the same encoding, no extra fields beyond the default extended
+    # timestamp (`Ziperu.write_extended_timestamps`, read when the
+    # estimate is made) and no comments. It mirrors what the native
+    # writer emits for a stream: a data descriptor after every file's
+    # data, zip64 records only for a 4 GiB entry or 65,535 entries.
     class SizeEstimator
       LOCAL_HEADER = 30
       CENTRAL_HEADER = 46
@@ -47,10 +49,11 @@ module Ziperu
 
       # A directory entry (`name` ends with `/`).
       def add_directory(name)
+        fields = default_fields(name)
         name = name.to_s.b
         @entries += 1
-        @data += LOCAL_HEADER + name.bytesize
-        @central += CENTRAL_HEADER + name.bytesize
+        @data += LOCAL_HEADER + name.bytesize + fields
+        @central += CENTRAL_HEADER + name.bytesize + fields
         self
       end
 
@@ -73,6 +76,7 @@ module Ziperu
       private
 
       def add_file(name, size, compressed_size)
+        fields = default_fields(name)
         name = name.to_s.b
         large = size >= ZIP64_THRESHOLD || compressed_size >= ZIP64_THRESHOLD
         offset_large = @data >= ZIP64_THRESHOLD
@@ -80,15 +84,21 @@ module Ziperu
         # The local header, with a zip64 extra (two 8-byte sizes) for a
         # large entry; the data; the descriptor, 16 bytes or 24 with
         # 64-bit sizes.
-        @data += LOCAL_HEADER + name.bytesize + (large ? 20 : 0) + compressed_size + (large ? 24 : 16)
+        @data += LOCAL_HEADER + name.bytesize + fields + (large ? 20 : 0) + compressed_size + (large ? 24 : 16)
         # The central record: a zip64 extra holds the sizes for a large
         # entry and the offset for one past 4 GiB.
         zip64_extra = 0
         zip64_extra += 16 if large
         zip64_extra += 8 if offset_large
         zip64_extra += 4 unless zip64_extra.zero?
-        @central += CENTRAL_HEADER + name.bytesize + zip64_extra
+        @central += CENTRAL_HEADER + name.bytesize + fields + zip64_extra
         self
+      end
+
+      # The extra field the writer adds by default: the extended timestamp
+      # (4 + 1 + 4 bytes).
+      def default_fields(_name)
+        ::Ziperu.write_extended_timestamps ? 9 : 0
       end
     end
 

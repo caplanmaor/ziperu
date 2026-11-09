@@ -26,7 +26,8 @@ module Ziperu
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
     def initialize(context, *legacy, offset: 0, decrypter: nil, password: nil,
-                   enforce_size: ::Ziperu.validate_entry_sizes, **opts)
+                   enforce_size: ::Ziperu.validate_entry_sizes, metadata_encoding: nil, **opts)
+      @metadata_encoding = metadata_encoding
       # rubyzip 2.x's `new(io, offset, decrypter)`.
       offset, decrypter = Compat.positional(legacy, %i[offset decrypter],
                                             offset: offset, decrypter: decrypter)
@@ -99,7 +100,7 @@ module Ziperu
         return @current_entry = nil
       end
 
-      @current_entry = Entry.from_meta(@archive, meta_at(@next_index))
+      @current_entry = Entry.from_meta(@archive, meta_at(@next_index), metadata_encoding: @metadata_encoding)
       @next_index += 1
       open_entry
       @current_entry

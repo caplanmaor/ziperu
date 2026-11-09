@@ -98,6 +98,7 @@ end
 require 'ziperu/extra_field/unknown'
 require 'ziperu/extra_field/generic'
 require 'ziperu/extra_field/universal_time'
+require 'ziperu/extra_field/unicode_path'
 require 'ziperu/extra_field/old_unix'
 require 'ziperu/extra_field/unix'
 require 'ziperu/extra_field/zip64'

@@ -189,9 +189,9 @@ module Ziperu
     # one central-directory record.
     #
     # @api private
-    def self.from_meta(archive, meta, zipfile = nil)
+    def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil)
       entry = allocate
-      entry.send(:init_from_meta, archive, meta, zipfile)
+      entry.send(:init_from_meta, archive, meta, zipfile, metadata_encoding)
       entry
     end
 
@@ -564,7 +564,10 @@ module Ziperu
     # an entry that would have to be restreamed but cannot be (encrypted,
     # or a compression method the writer lacks).
     def write_plan # :nodoc:
-      return :header if ftype == :directory || (ftype == :symlink && (@filepath || changed?))
+      # A symlink's target goes into the header call, whether the link is
+      # new or a copy that has to be written afresh (an edit, or extra
+      # fields the raw copy would lose).
+      return :header if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
       return :restream if pending_data?
 
       if changed? || @index.nil? || loses_fields_on_raw_copy?
@@ -890,7 +893,7 @@ module Ziperu
       raise EntryNameError if name.length > 65_535
     end
 
-    def init_from_meta(archive, meta, zipfile)
+    def init_from_meta(archive, meta, zipfile, metadata_encoding = nil)
       @dirty = false
       set_default_vars_values
       @zipfile = zipfile
@@ -904,7 +907,7 @@ module Ziperu
       # the archive knows the entry by.
       @gp_flags = meta[:flags]
       @original_name = meta[:name]
-      @name = decode_stored_text(@original_name.dup)
+      @name = decode_stored_text(@original_name.dup, metadata_encoding, meta[:extra])
       @name.tr!('\\', '/')
       @size = meta[:size]
       @compressed_size = meta[:compressed_size]
@@ -918,7 +921,7 @@ module Ziperu
       # Most entries have no comment and many no extra fields: those share
       # one empty String rather than carrying their own.
       comment = meta[:comment]
-      @comment = comment.empty? ? '' : decode_stored_text(comment)
+      @comment = comment.empty? ? '' : decode_stored_text(comment, metadata_encoding)
       @extra = nil
       extra = meta[:extra]
       @extra_raw = extra.empty? ? '' : extra
@@ -928,15 +931,45 @@ module Ziperu
     end
 
     # Stored bytes as a String in the encoding the entry declares.
-    def decode_stored_text(text) # :nodoc:
+    # `encoding` is the archive's `metadata_encoding:`, for a name or
+    # comment stored without the language encoding flag: the bytes are
+    # read in it and transcoded to UTF-8 (left as bytes when they do not
+    # decode). `raw_extra`, for a name, is checked for Info-ZIP's Unicode
+    # Path field first, which carries the UTF-8 name outright.
+    def decode_stored_text(text, encoding = nil, raw_extra = nil) # :nodoc:
       forced = ::Ziperu.force_entry_names_encoding
       if forced
         text.force_encoding(forced)
       elsif (@gp_flags & EFS).nonzero?
         text.force_encoding(::Encoding::UTF_8)
         text.force_encoding(::Encoding::BINARY) unless text.valid_encoding?
+      elsif raw_extra && (utf8 = unicode_path_name(raw_extra, text))
+        return utf8
+      elsif encoding
+        return transcode(text, encoding)
       end
       text
+    end
+
+    # The name the Unicode Path extra field carries for `stored`, if there
+    # is one and it is for this name (its CRC matches).
+    def unicode_path_name(raw_extra, stored)
+      return unless raw_extra.include?(ExtraField::UnicodePath::HEADER_ID)
+
+      field = parsed_extra_from(raw_extra)[:unicodepath]
+      field.name.dup if field&.for?(stored)
+    end
+
+    # Parses the central directory's extra fields now rather than on first
+    # use (the parse is needed for the name).
+    def parsed_extra_from(raw_extra)
+      @extra ||= ExtraField.new(raw_extra)
+    end
+
+    def transcode(text, encoding)
+      text.force_encoding(encoding).encode(::Encoding::UTF_8)
+    rescue ::EncodingError, ::ArgumentError
+      text.force_encoding(::Encoding::BINARY)
     end
 
     # Keeps the DOS timestamp as read; `stored_time` parses it when asked.
