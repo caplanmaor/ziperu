@@ -45,6 +45,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("total_size", method!(archive::Archive::total_size, 0))?;
     archive.define_method(
+        "max_entry_size",
+        method!(archive::Archive::max_entry_size, 0),
+    )?;
+    archive.define_method(
         "max_compression_ratio",
         method!(archive::Archive::max_compression_ratio, 0),
     )?;

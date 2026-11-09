@@ -99,6 +99,7 @@ module Ziperu
                 :validate_declared_number_of_entries,
                 :max_entries,
                 :max_total_size,
+                :max_entry_size,
                 :max_compression_ratio,
                 :append_in_place,
                 :write_extended_timestamps,
@@ -133,6 +134,8 @@ module Ziperu
     # so the total is a real bound on what can be extracted.
     @max_entries = nil
     @max_total_size = nil
+    # The largest uncompressed size any one entry may declare.
+    @max_entry_size = nil
     # The highest uncompressed-to-compressed size ratio any entry may
     # declare (the archive's overall ratio can be no higher). A zip bomb
     # runs to a million or more; ordinary data rarely passes 100, though

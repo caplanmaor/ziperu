@@ -141,6 +141,18 @@ impl Archive {
         Ok(total)
     }
 
+    /// The largest uncompressed size any entry declares, for
+    /// `Ziperu.max_entry_size`.
+    pub fn max_entry_size(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
+        let mut largest = 0;
+        for i in 0..meta.len() {
+            largest = largest.max(meta.entry(i).rb(ruby)?.size());
+        }
+        Ok(largest)
+    }
+
     /// The highest declared uncompressed-to-compressed size ratio among
     /// the entries, for `Ziperu.max_compression_ratio`. An entry declaring
     /// data but no compressed bytes is infinite. Also the bound on the

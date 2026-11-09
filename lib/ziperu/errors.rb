@@ -144,7 +144,8 @@ module Ziperu
   ZipInternalError = InternalError
 
   # Raised when an archive exceeds `Ziperu.max_entries`,
-  # `Ziperu.max_total_size` or `Ziperu.max_compression_ratio` on open.
+  # `Ziperu.max_total_size`, `Ziperu.max_entry_size` or
+  # `Ziperu.max_compression_ratio` on open.
   class LimitError < Error
     def initialize(what, actual, limit)
       super("archive has #{what} of #{actual}, over the limit of #{limit}")
