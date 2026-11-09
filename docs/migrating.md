@@ -150,3 +150,9 @@ Everything here is additive: code that does not use it behaves as above.
   entry goes out as it is written, with its sizes in a data descriptor
   after the data, which every zip reader since PKZIP 2.0 understands;
   rubyzip needs a seekable IO there.
+- **A streaming HTTP response body.** `Ziperu::OutputStream.body { |zos| ... }`
+  is an Enumerator of the archive's bytes in chunks, produced as they are
+  consumed: hand it to Rack (or anything with `each`) as the body and the
+  download starts with the first entry, with no temp file and no
+  `Content-Length`. In Rails, `write_buffer(response.stream)` inside
+  `ActionController::Live` does the same.

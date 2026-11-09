@@ -70,6 +70,12 @@ Ziperu::OutputStream.write_buffer(socket) do |zos|   # any IO; a pipe, socket or
   zos.write("hello")                                 # nothing buffered to the end
 end
 
+body = Ziperu::OutputStream.body do |zos|   # a Rack body: an Enumerator of
+  zos.put_next_entry("export.csv")          # the archive's bytes, produced
+  zos.write(csv)                            # as the server consumes them
+end
+[200, { "content-type" => "application/zip" }, body]
+
 Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
   zf.extract_all("out/")
   zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit

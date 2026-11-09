@@ -10,6 +10,9 @@
   and CRCs. ZipCrypto entries have their headers patched at the end, so an
   archive holding them is built in memory first, and copying one raw into
   a stream raises `ArgumentError`.
+- `Ziperu::OutputStream.body { |zos| ... }` returns the archive as an
+  Enumerator of chunks, produced on demand: a Rack response body for a
+  streamed download, with no temp file.
 - `Ziperu::File.open(path, password: "...")` (or `decrypter:`) decrypts
   every entry for `read`, `get_input_stream`, `extract`, `extract_all` and
   `verify`, AES and ZipCrypto alike; `InputStream.open` takes `password:`

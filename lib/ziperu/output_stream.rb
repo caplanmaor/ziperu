@@ -97,6 +97,42 @@ module Ziperu
         end
         zos.close_buffer
       end
+
+      # The archive as an Enumerator of its bytes, in chunks, produced as
+      # they are consumed: a Rack response body, or anything else that
+      # takes an `each`. The block runs when the chunks are first asked
+      # for, not here, and the whole archive is never in memory.
+      #
+      #   body = Ziperu::OutputStream.body do |zos|
+      #     zos.put_next_entry("report.csv")
+      #     zos.write(csv)
+      #   end
+      #   [200, { "content-type" => "application/zip" }, body]
+      #
+      # With `.next` the chunks can be pulled one at a time (a Fiber under
+      # the hood, as with any Enumerator); `body.each { |chunk| ... }` is
+      # the direct path. Writing the entries inside the block is the same
+      # as with #open and #write_buffer.
+      def body(encrypter: nil, suppress_extra_fields: false, **opts, &block)
+        raise ArgumentError, "a block that writes the entries is required" unless block
+
+        Enumerator.new do |yielder|
+          write_buffer(Yielder.new(yielder), encrypter: encrypter,
+                                             suppress_extra_fields: suppress_extra_fields, **opts, &block)
+        end
+      end
+    end
+
+    # A write-only IO over an Enumerator's yielder, for #body.
+    class Yielder # :nodoc:
+      def initialize(yielder)
+        @yielder = yielder
+      end
+
+      def write(chunk)
+        @yielder << chunk
+        chunk.bytesize
+      end
     end
 
     # Closes the stream and writes the central directory. A stream over an

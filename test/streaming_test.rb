@@ -201,6 +201,49 @@ class StreamingTest < Minitest::Test
     end
   end
 
+  def test_body_is_an_enumerator_of_the_archive_in_chunks
+    ran = false
+    body = Ziperu::OutputStream.body do |zos|
+      ran = true
+      write_sample(zos)
+    end
+    assert_kind_of Enumerator, body
+    refute ran, "nothing is written until the chunks are asked for"
+    chunks = []
+    body.each { |c| chunks << c }   # what Rack does
+    assert ran
+    assert_operator chunks.size, :>, 1, "the archive comes out in pieces"
+    assert_sample(chunks.join)
+  end
+
+  def test_body_chunks_can_be_pulled_one_at_a_time
+    body = Ziperu::OutputStream.body { |zos| write_sample(zos) }
+    first = body.next
+    assert_equal "PK\x03\x04".b, first.byteslice(0, 4)
+    rest = []
+    loop { rest << body.next }
+    assert_sample(first + rest.join)
+  end
+
+  def test_body_with_encryption_and_errors
+    body = Ziperu::OutputStream.body(encrypter: Ziperu::AESEncrypter.new("pw")) do |zos|
+      zos.put_next_entry("secret.txt")
+      zos.write("top secret")
+    end
+    Ziperu::File.open_buffer(body.to_a.join, password: "pw") do |zf|
+      assert_equal "top secret", zf.read("secret.txt")
+    end
+
+    boom = Class.new(StandardError)
+    body = Ziperu::OutputStream.body do |zos|
+      zos.put_next_entry("a.txt")
+      zos.write("partial")
+      raise boom, "source went away"
+    end
+    assert_raises(boom) { body.each { |_c| } }
+    assert_raises(ArgumentError) { Ziperu::OutputStream.body }
+  end
+
   def test_large_entry_streams_with_zip64_sizes_in_the_descriptor
     sink = Sink.new
     Ziperu::OutputStream.write_buffer(sink) do |zos|
