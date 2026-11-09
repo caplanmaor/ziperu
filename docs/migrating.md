@@ -177,7 +177,8 @@ Everything here is additive: code that does not use it behaves as above.
   `File.open_buffer` refuses a pipe or socket with an `ArgumentError`,
   where rubyzip blocks or writes a corrupt header.
 - **Archive limits.** `Ziperu.max_entries`, `Ziperu.max_total_size`
-  (declared uncompressed bytes) and `Ziperu.max_compression_ratio` (the
+  (declared uncompressed bytes), `Ziperu.max_entry_size` and
+  `Ziperu.max_compression_ratio` (the
   highest ratio any entry declares; a zip bomb runs to a million or
   more, a file of zeros to about a thousand) make `Ziperu::File.open` and
   `Ziperu::InputStream.open` raise `Ziperu::LimitError` before any entry is
@@ -198,8 +199,13 @@ Everything here is additive: code that does not use it behaves as above.
 - **Progress.** `extract_all(dir, progress: ->(entry, done, total) {})` and
   `add_recursive(dir, progress: ->(entry, done, nil) {})` report after each
   entry; `extract_all` keeps its native fast path and reports per batch.
-- **More compression methods.** bzip2 and zstd on write; LZMA, XZ, PPMd,
-  Deflate64 and the PKZIP 1.x methods on read (see above).
+- **More compression methods.** bzip2, zstd, XZ and PPMd on write
+  (`Entry::BZIP2`, `ZSTD`, `XZ`, `PPMD`); LZMA, Deflate64 and the PKZIP
+  1.x methods on read as well (see above). 7-Zip reads all of them;
+  rubyzip, Explorer and Java read Stored and Deflate only.
+- **Symlinks in a tree.** `add_recursive(dir, symlinks: :store)` adds
+  each link as a link entry, as `zip -y` does, where rubyzip (and the
+  default) skips them with a warning.
 - **Streaming reads and writes through any IO.** `open_buffer(io)` reads an
   IO lazily and `write_buffer(io)` writes entry by entry, so neither holds
   the archive in memory. `write_buffer` takes an IO that cannot seek (a

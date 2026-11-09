@@ -90,6 +90,8 @@ impl EntryOptions {
             8 => CompressionMethod::Deflated,
             12 => CompressionMethod::Bzip2,
             93 => CompressionMethod::Zstd,
+            95 => CompressionMethod::Xz,
+            98 => CompressionMethod::Ppmd,
             other => {
                 return Err(Error::new(
                     ruby.exception_arg_error(),

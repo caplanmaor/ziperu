@@ -133,6 +133,30 @@ class FeaturesTest < Minitest::Test
     end
   end
 
+  def test_add_recursive_stores_symlinks_when_asked
+    skip "needs symlink support" unless symlinks_supported?
+    src = File.join(@tmp, "tree")
+    FileUtils.mkdir_p(File.join(src, "sub"))
+    File.write(File.join(src, "sub", "real.txt"), "real")
+    File.symlink("sub/real.txt", File.join(src, "link.txt"))
+    File.symlink("sub", File.join(src, "linkdir"))
+
+    skipped = File.join(@tmp, "skipped.zip")
+    _out, err = capture_io { Ziperu::File.add_recursive(skipped, src) }
+    assert_match(/skipped symlink/, err)
+    Ziperu::File.open(skipped) { |zf| assert_equal %w[sub/ sub/real.txt], zf.entries.map(&:name) }
+
+    stored = File.join(@tmp, "stored.zip")
+    assert_silent { Ziperu::File.add_recursive(stored, src, symlinks: :store) }
+    Ziperu::File.open(stored) do |zf|
+      assert_equal %w[link.txt linkdir sub/ sub/real.txt], zf.entries.map(&:name)
+      assert_predicate zf.get_entry("link.txt"), :symlink?
+      assert_equal "sub/real.txt", zf.read("link.txt")
+      assert_predicate zf.get_entry("linkdir"), :symlink?, "a link to a directory is a link, not descended into"
+    end
+    assert_raises(ArgumentError) { Ziperu::File.add_recursive(stored, src, symlinks: :follow) }
+  end
+
   def test_a_symlink_entry_pointing_outside_the_destination_is_refused
     skip "needs symlink support" unless symlinks_supported?
     outside = File.join(@tmp, "outside")

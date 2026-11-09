@@ -415,10 +415,14 @@ module Ziperu
       level = entry.compression_level
       # An extra field may hand back a plain Time.
       time = DOSTime.from_time(entry.time)
+      method = entry.compression_method
+      # An empty XZ or PPMd entry is a stream with no blocks, which 7-Zip
+      # refuses ("data after the end of the payload"); an empty file is
+      # stored, as Info-ZIP stores every empty file.
+      method = Entry::STORED if entry.size_known? && entry.size.zero? && [Entry::XZ, Entry::PPMD].include?(method)
       {
-        method: entry.compression_method,
-        level: (level if entry.compression_method != Entry::STORED && level &&
-                         level != Zlib::DEFAULT_COMPRESSION),
+        method: method,
+        level: (level if method != Entry::STORED && level && level != Zlib::DEFAULT_COMPRESSION),
         dos_date: time.to_binary_dos_date,
         dos_time: time.to_binary_dos_time,
         unix_perms: entry.unix_perms,

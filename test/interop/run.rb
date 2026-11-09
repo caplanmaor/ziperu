@@ -80,12 +80,13 @@ Dir.mktmpdir("interop") do |dir|
     end
   end
 
-  %i[deflate stored bzip2 zstd].each do |m|
+  %i[deflate stored bzip2 zstd xz ppmd].each do |m|
     path = "z_#{m}.zip"
     check("ziperu writes #{m}") do
       Zip.default_compression = Zlib::DEFAULT_COMPRESSION
       File.delete(path) if File.exist?(path)
-      method = { deflate: Zip::Entry::DEFLATED, stored: Zip::Entry::STORED, bzip2: Zip::Entry::BZIP2, zstd: Zip::Entry::ZSTD }[m]
+      method = { deflate: Zip::Entry::DEFLATED, stored: Zip::Entry::STORED, bzip2: Zip::Entry::BZIP2,
+                 zstd: Zip::Entry::ZSTD, xz: Zip::Entry::XZ, ppmd: Zip::Entry::PPMD }[m]
       Zip::File.open(path, create: true) do |zf|
         Dir.glob("src/**/*").sort.each do |f|
           next if File.symlink?(f)

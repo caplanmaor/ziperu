@@ -16,11 +16,13 @@ module Ziperu
     # Constant used to specify that the entry is deflated (i.e., compressed).
     DEFLATED = ::Ziperu::COMPRESSION_METHOD_DEFLATE
 
-    # Two more methods the native writer can produce. rubyzip cannot read
-    # either, nor can Windows Explorer or Java; 7-Zip, Info-ZIP and
-    # libarchive can.
+    # More methods the native writer can produce. rubyzip cannot read any
+    # of them, nor can Windows Explorer or Java; 7-Zip can read all four,
+    # Info-ZIP and libarchive bzip2 (and libarchive zstd and xz).
     BZIP2 = ::Ziperu::COMPRESSION_METHOD_BZIP2
     ZSTD = ::Ziperu::COMPRESSION_METHOD_ZSTD
+    XZ = ::Ziperu::COMPRESSION_METHOD_XZ
+    PPMD = ::Ziperu::COMPRESSION_METHOD_PPMD
 
     # Language encoding flag (EFS) bit
     EFS = 0b100000000000 # :nodoc:

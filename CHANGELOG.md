@@ -2,6 +2,15 @@
 
 ## 0.2.0 (unreleased)
 
+- XZ and PPMd on write (`Entry::XZ`, `Entry::PPMD`), alongside bzip2 and
+  zstd; 7-Zip reads all four. `add_recursive(dir, symlinks: :store)`
+  adds symlinks as link entries (`zip -y`) instead of skipping them.
+- `Ziperu.max_entry_size`, alongside the other limits; a SECURITY.md
+  stating what is guarded against and what is not; and tests for the
+  hostile shapes the zip crate's 9.1.x hardening is for (a Unicode Path
+  field renaming an entry out of the destination, a name that differs
+  between the headers, a file through a symlink, duplicate names, a
+  declared size smaller than the data).
 - Zip64 per entry: `put_next_entry(name, zip64: true | false)`,
   `get_output_stream(name, zip64: ...)` and `Entry.new(..., zip64: ...)`
   decide for one entry, where before only the global

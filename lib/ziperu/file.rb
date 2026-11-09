@@ -209,9 +209,11 @@ module Ziperu
 
       # Recursively adds the contents of `src_dir` to the new archive
       # `zip_file_name`, nested under `prefix` if given.
-      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, threads: 1, &continue_on_exists_proc)
+      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, threads: 1, symlinks: :skip,
+                        &continue_on_exists_proc)
         Ziperu::File.open(zip_file_name, create: true, threads: threads) do |zf|
-          zf.add_recursive(src_dir, prefix: prefix, max_depth: max_depth, &continue_on_exists_proc)
+          zf.add_recursive(src_dir, prefix: prefix, max_depth: max_depth, symlinks: symlinks,
+                                    &continue_on_exists_proc)
         end
       end
 
@@ -316,16 +318,24 @@ module Ziperu
     #
     # `progress:` is called with `(entry, done, nil)` after each file or
     # directory is added; the total is not known up front.
-    def add_recursive(src_dir, prefix: '', max_depth: 16, progress: nil, &continue_on_exists_proc)
+    # `symlinks:` is `:skip` (the default, with a warning per link, as
+    # rubyzip has it) or `:store`, which adds each link as a symlink
+    # entry (its target as the content, `S_IFLNK` in the attributes), as
+    # `zip -y` does; the tree behind a link is never descended into.
+    def add_recursive(src_dir, prefix: '', max_depth: 16, progress: nil, symlinks: :skip,
+                      &continue_on_exists_proc)
       raise Errno::ENOENT, src_dir unless ::File.directory?(src_dir)
       raise ArgumentError, 'max_depth must be at least 1' if max_depth < 1
+      unless %i[skip store].include?(symlinks)
+        raise ArgumentError, "symlinks: takes :skip or :store, not #{symlinks.inspect}"
+      end
 
       prefix = prefix.to_s
       prefix += '/' unless prefix.empty? || prefix.end_with?('/')
 
       done = 0
       report = ->(entry) { done += 1; progress&.call(entry, done, nil) }
-      add_recursive_dir(prefix, src_dir, 1, max_depth, continue_on_exists_proc, report)
+      add_recursive_dir(prefix, src_dir, 1, max_depth, continue_on_exists_proc, report, symlinks)
       self
     end
 
@@ -714,18 +724,23 @@ module Ziperu
       [entry, entry.index, target, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
     end
 
-    def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc, report)
+    def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc, report, symlinks)
       ::Dir.children(src_dir).sort.each do |child|
         src_path = ::File.join(src_dir, child)
 
         if ::File.symlink?(src_path)
-          warn "WARNING: skipped symlink '#{src_path}' while adding directory contents."
+          if symlinks == :store
+            report.call(add("#{entry_prefix}#{child}", src_path, &continue_on_exists_proc))
+          else
+            warn "WARNING: skipped symlink '#{src_path}' while adding directory contents."
+          end
         elsif ::File.directory?(src_path)
           entry_name = "#{entry_prefix}#{child}/"
           report.call(add(entry_name, src_path, &continue_on_exists_proc))
 
           if depth < max_depth
-            add_recursive_dir(entry_name, src_path, depth + 1, max_depth, continue_on_exists_proc, report)
+            add_recursive_dir(entry_name, src_path, depth + 1, max_depth, continue_on_exists_proc, report,
+                              symlinks)
           else
             warn "WARNING: max_depth (#{max_depth}) reached, not descending into '#{src_path}'."
           end
