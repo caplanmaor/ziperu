@@ -28,6 +28,8 @@ exception!(DECOMPRESSION_ERROR, "Ziperu::DecompressionError");
 exception!(NATIVE_SIZE_LIMIT_ERROR, "Ziperu::Native::SizeLimitError");
 exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
 exception!(NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
+exception!(pub DESTINATION_EXISTS_ERROR, "Ziperu::DestinationExistsError");
+exception!(pub ENTRY_SIZE_ERROR, "Ziperu::EntrySizeError");
 exception!(pub NATIVE_DUPLICATE_ENTRY_ERROR, "Ziperu::Native::DuplicateEntryError");
 exception!(ENOENT, "Errno::ENOENT");
 exception!(EACCES, "Errno::EACCES");
@@ -51,6 +53,24 @@ impl<T> IntoRuby<T> for io::Result<T> {
     fn rb(self, ruby: &Ruby) -> Result<T, Error> {
         self.map_err(|e| io_error(ruby, e))
     }
+}
+
+/// `zip_error`, except that an io error inside (how the crate reports a
+/// failure while reading an entry's data) goes through `read_error`.
+pub fn zip_read_error(ruby: &Ruby, err: ZipError) -> Error {
+    match err {
+        ZipError::Io(io) => read_error(ruby, io),
+        other => zip_error(ruby, other),
+    }
+}
+
+/// The crate's size check reports as plain InvalidData (crc32.rs); this
+/// is how it is told apart.
+pub fn is_size_limit(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::InvalidData
+        && err
+            .to_string()
+            .contains("larger than its declared uncompressed size")
 }
 
 pub fn zip_error(ruby: &Ruby, err: ZipError) -> Error {
@@ -114,14 +134,7 @@ pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
         io::ErrorKind::AlreadyExists => Error::new(ruby.get_inner(&EEXIST), err.to_string()),
         io::ErrorKind::IsADirectory => Error::new(ruby.get_inner(&EISDIR), err.to_string()),
         io::ErrorKind::NotADirectory => Error::new(ruby.get_inner(&ENOTDIR), err.to_string()),
-        // The crate's size check reports as plain InvalidData (crc32.rs).
-        io::ErrorKind::InvalidData
-            if err
-                .to_string()
-                .contains("larger than its declared uncompressed size") =>
-        {
-            size_limit_error(ruby)
-        }
+        _ if is_size_limit(&err) => size_limit_error(ruby),
         io::ErrorKind::InvalidData => decompression_error(ruby, &err.to_string()),
         _ => Error::new(ruby.exception_io_error(), err.to_string()),
     }

@@ -13,13 +13,14 @@ use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
     Symbol, TypedData, Value,
 };
-use zip::read::{read_zipfile_from_stream_with_options, ZipFileEntry, ZipReadOptions};
+use zip::read::{ZipFileEntry, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
-use crate::errors::{busy_error, io_error, read_error, zip_error};
+use crate::errors::{busy_error, read_error, zip_read_error, IntoRuby};
 use crate::gvl::maybe_without_gvl;
-use crate::reader::{EntryInfo, EntryReader};
+use crate::rb::bytes_of;
+use crate::reader::{open_local_entry, EntryInfo, EntryReader};
 use crate::source::Source;
 
 /// Never pre-allocate more than this on the strength of a header field.
@@ -50,14 +51,12 @@ impl DataTypeFunctions for Archive {
 
 impl Archive {
     pub fn open_path(ruby: &Ruby, path: String) -> Result<Self, Error> {
-        let file = fs::File::open(&path).map_err(|e| io_error(ruby, e))?;
+        let file = fs::File::open(&path).rb(ruby)?;
         Self::from_source(ruby, Source::file(file))
     }
 
     pub fn open_bytes(ruby: &Ruby, bytes: RString) -> Result<Self, Error> {
-        // Copy once; the Ruby string may be mutated or GC'd after this call.
-        let vec = unsafe { bytes.as_slice() }.to_vec();
-        Self::from_source(ruby, Source::memory(vec))
+        Self::from_source(ruby, Source::memory(bytes_of(bytes)))
     }
 
     /// Any seekable IO-like Ruby object; read lazily, never copied.
@@ -68,8 +67,7 @@ impl Archive {
     fn from_source(ruby: &Ruby, source: Source) -> Result<Self, Error> {
         let needs_gvl = source.needs_gvl();
         let io = source.ruby_io();
-        let archive = maybe_without_gvl(needs_gvl, || ZipArchive::new(source))
-            .map_err(|e| zip_error(ruby, e))?;
+        let archive = maybe_without_gvl(needs_gvl, || ZipArchive::new(source)).rb(ruby)?;
         Ok(Self {
             inner: RefCell::new(Some(archive)),
             io,
@@ -79,6 +77,17 @@ impl Archive {
 
     pub(crate) fn needs_gvl(&self) -> bool {
         self.needs_gvl
+    }
+
+    /// A source of its own over the archive's bytes, for work that must
+    /// not hold the archive borrowed (anything that releases the GVL).
+    fn source(&self, ruby: &Ruby) -> Result<Source, Error> {
+        Ok(self.archive(ruby)?.clone().into_inner())
+    }
+
+    /// `source` with a small read buffer, for a few header bytes.
+    fn small_source(&self, ruby: &Ruby) -> Result<Source, Error> {
+        Ok(small_source(&*self.archive(ruby)?))
     }
 
     /// The open archive, or an IOError once closed.
@@ -127,7 +136,7 @@ impl Archive {
         let meta = archive.metadata();
         let mut total: u64 = 0;
         for i in 0..meta.len() {
-            total = total.saturating_add(meta.entry(i).map_err(|e| zip_error(ruby, e))?.size());
+            total = total.saturating_add(meta.entry(i).rb(ruby)?.size());
         }
         Ok(total)
     }
@@ -142,7 +151,7 @@ impl Archive {
         let meta = archive.metadata();
         let mut worst: f64 = 0.0;
         for i in 0..meta.len() {
-            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+            let entry = meta.entry(i).rb(ruby)?;
             let (size, csize) = (entry.size(), entry.compressed_size());
             if size == 0 {
                 continue;
@@ -163,7 +172,7 @@ impl Archive {
         index: usize,
         password: Option<RString>,
     ) -> Result<(), Error> {
-        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let password = password.map(bytes_of);
         let mut archive = rb_self.archive(ruby)?.clone();
         maybe_without_gvl(rb_self.needs_gvl, || {
             let options = ZipReadOptions::new().password(password.as_deref());
@@ -171,10 +180,7 @@ impl Archive {
             io::copy(&mut entry, &mut io::sink())?;
             Ok::<_, ZipError>(())
         })
-        .map_err(|e| match e {
-            ZipError::Io(io) => read_error(ruby, io),
-            other => zip_error(ruby, other),
-        })
+        .map_err(|e| zip_read_error(ruby, e))
     }
 
     /// `verify_entry` for a record the crate cannot address by index (one
@@ -190,25 +196,21 @@ impl Archive {
         crc: u32,
         password: Option<RString>,
     ) -> Result<(), Error> {
-        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
-        let mut source = rb_self.archive(ruby)?.clone().into_inner();
+        let password = password.map(bytes_of);
+        let mut source = rb_self.source(ruby)?;
+        let info = EntryInfo {
+            index: None,
+            header_start: header_offset,
+            size,
+            compressed_size,
+            crc32: crc,
+        };
         maybe_without_gvl(rb_self.needs_gvl, || {
-            source.seek(SeekFrom::Start(header_offset))?;
-            let options = ZipReadOptions::new()
-                .password(password.as_deref())
-                .override_compressed_size(compressed_size)
-                .override_uncompressed_size(size)
-                .override_crc(crc);
-            let mut entry = read_zipfile_from_stream_with_options(&mut source, options)?.ok_or(
-                ZipError::InvalidArchive("expected a local file header".into()),
-            )?;
+            let mut entry = open_local_entry(&mut source, &info, password.as_deref(), size)?;
             io::copy(&mut entry, &mut io::sink())?;
             Ok::<_, ZipError>(())
         })
-        .map_err(|e| match e {
-            ZipError::Io(io) => read_error(ruby, io),
-            other => zip_error(ruby, other),
-        })
+        .map_err(|e| zip_read_error(ruby, e))
     }
 
     /// One Hash per entry, in central-directory order.
@@ -253,10 +255,10 @@ impl Archive {
             let records = maybe_without_gvl(rb_self.needs_gvl, || {
                 walk_central_directory(&mut raw, dir_start)
             })
-            .map_err(|e| io_error(ruby, e))?;
+            .rb(ruby)?;
             let mut by_offset = HashMap::with_capacity(meta.len());
             for i in 0..meta.len() {
-                let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+                let entry = meta.entry(i).rb(ruby)?;
                 by_offset.insert(entry.central_header_start(), i);
             }
             for record in &records {
@@ -274,9 +276,9 @@ impl Archive {
                 })
                 .collect::<ZipResult<Vec<_>>>()
         })
-        .map_err(|e| zip_error(ruby, e))?;
+        .rb(ruby)?;
         for (i, record) in records.iter().enumerate() {
-            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+            let entry = meta.entry(i).rb(ruby)?;
             emit(entry_hash(ruby, &keys, i, &entry, record)?)?;
         }
         Ok(())
@@ -286,11 +288,10 @@ impl Archive {
     pub fn entry_meta(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RHash, Error> {
         let archive = rb_self.archive(ruby)?;
         let meta = archive.metadata();
-        let mut raw = archive.clone().into_inner().clone_small();
+        let mut raw = small_source(&archive);
         drop(archive);
-        let entry = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
-        let record = raw_central_record(&mut raw, entry.central_header_start())
-            .map_err(|e| io_error(ruby, e))?;
+        let entry = meta.entry(index).rb(ruby)?;
+        let record = raw_central_record(&mut raw, entry.central_header_start()).rb(ruby)?;
         entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &record)
     }
 
@@ -305,15 +306,14 @@ impl Archive {
     ) -> Result<RArray, Error> {
         let archive = rb_self.archive(ruby)?;
         let meta = archive.metadata();
-        let mut raw = archive.clone().into_inner().clone_small();
+        let mut raw = small_source(&archive);
         drop(archive);
         let end = index.saturating_add(count).min(meta.len());
         let keys = MetaKeys::new(ruby);
         let out = ruby.ary_new_capa(end.saturating_sub(index));
         for i in index..end {
-            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
-            let record = raw_central_record(&mut raw, entry.central_header_start())
-                .map_err(|e| io_error(ruby, e))?;
+            let entry = meta.entry(i).rb(ruby)?;
+            let record = raw_central_record(&mut raw, entry.central_header_start()).rb(ruby)?;
             out.push(entry_hash(ruby, &keys, i, &entry, &record)?)?;
         }
         Ok(out)
@@ -324,14 +324,10 @@ impl Archive {
     /// carry their data there; Ruby merges them lazily.
     pub fn local_extra(ruby: &Ruby, rb_self: &Self, index: usize) -> Result<RString, Error> {
         let archive = rb_self.archive(ruby)?;
-        let header_start = archive
-            .metadata()
-            .entry(index)
-            .map_err(|e| zip_error(ruby, e))?
-            .header_start();
-        let mut raw = archive.clone().into_inner().clone_small();
+        let header_start = archive.metadata().entry(index).rb(ruby)?.header_start();
+        let mut raw = small_source(&archive);
         drop(archive);
-        let extra = raw_local_extra(&mut raw, header_start).map_err(|e| io_error(ruby, e))?;
+        let extra = raw_local_extra(&mut raw, header_start).rb(ruby)?;
         Ok(ruby.str_from_slice(&extra))
     }
 
@@ -341,8 +337,8 @@ impl Archive {
         rb_self: &Self,
         header_offset: u64,
     ) -> Result<RString, Error> {
-        let mut raw = rb_self.archive(ruby)?.clone().into_inner().clone_small();
-        let extra = raw_local_extra(&mut raw, header_offset).map_err(|e| io_error(ruby, e))?;
+        let mut raw = rb_self.small_source(ruby)?;
+        let extra = raw_local_extra(&mut raw, header_offset).rb(ruby)?;
         Ok(ruby.str_from_slice(&extra))
     }
 
@@ -356,7 +352,7 @@ impl Archive {
         password: Option<RString>,
         enforce_size: bool,
     ) -> Result<EntryReader, Error> {
-        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let password = password.map(bytes_of);
         let archive = rb_self.archive(ruby)?.clone();
         EntryReader::open(
             ruby,
@@ -383,7 +379,7 @@ impl Archive {
         password: Option<RString>,
         enforce_size: bool,
     ) -> Result<EntryReader, Error> {
-        let password = password.map(|p| unsafe { p.as_slice() }.to_vec());
+        let password = password.map(bytes_of);
         let archive = rb_self.archive(ruby)?.clone();
         let info = EntryInfo {
             index: None,
@@ -408,7 +404,7 @@ impl Archive {
         // A clone (the central directory is shared behind an Arc) so the
         // borrow is released before the GVL is.
         let mut archive = rb_self.archive(ruby)?.clone();
-        let mut entry = archive.by_index(index).map_err(|e| zip_error(ruby, e))?;
+        let mut entry = archive.by_index(index).rb(ruby)?;
         // A hint only: the declared size is untrusted and may be a lie.
         let mut buf = Vec::with_capacity(entry.size().min(CAPACITY_HINT_MAX) as usize);
         maybe_without_gvl(rb_self.needs_gvl, || entry.read_to_end(&mut buf))
@@ -643,6 +639,12 @@ impl MetaKeys {
             header_offset: ruby.to_symbol("header_offset"),
         }
     }
+}
+
+/// A source with a small read buffer over `archive`'s bytes, for reading
+/// a few header bytes.
+fn small_source(archive: &ZipArchive<Source>) -> Source {
+    archive.clone().into_inner().clone_small()
 }
 
 fn entry_hash(

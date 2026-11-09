@@ -19,7 +19,7 @@ use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
-use crate::errors::{busy_error, read_error, size_limit_error, zip_error};
+use crate::errors::{busy_error, read_error, size_limit_error, zip_error, IntoRuby};
 use crate::gvl::maybe_without_gvl;
 use crate::source::Source;
 
@@ -58,6 +58,28 @@ pub(crate) struct EntryInfo {
     pub(crate) size: u64,
     pub(crate) compressed_size: u64,
     pub(crate) crc32: u32,
+}
+
+/// Opens the entry `info` describes by seeking to its local header, with
+/// the central directory's compressed size and CRC (so an entry whose
+/// local header defers to a data descriptor still reads) and `size_cap`
+/// as the uncompressed size the crate enforces: the declared size, or
+/// `u64::MAX` to read past it to the true end of the data.
+pub(crate) fn open_local_entry<'a>(
+    source: &'a mut Source,
+    info: &EntryInfo,
+    password: Option<&'a [u8]>,
+    size_cap: u64,
+) -> ZipResult<ZipFile<'a, Source>> {
+    source.seek(SeekFrom::Start(info.header_start))?;
+    let options = ZipReadOptions::new()
+        .password(password)
+        .override_compressed_size(info.compressed_size)
+        .override_uncompressed_size(size_cap)
+        .override_crc(info.crc32);
+    read_zipfile_from_stream_with_options(source, options)?.ok_or(ZipError::InvalidArchive(
+        "expected a local file header".into(),
+    ))
 }
 
 impl OwnedEntry {
@@ -100,17 +122,7 @@ impl OwnedEntry {
             }
             Owner::Source(source) => {
                 let source: &'static mut Source = unsafe { &mut *source };
-                source.seek(SeekFrom::Start(info.header_start))?;
-                // Sizes and CRC from the central directory, so entries whose
-                // local header defers to a data descriptor still read; the
-                // uncompressed size is set absurdly high to lift the limit.
-                let options = options
-                    .override_compressed_size(info.compressed_size)
-                    .override_uncompressed_size(u64::MAX)
-                    .override_crc(info.crc32);
-                read_zipfile_from_stream_with_options(source, options)?.ok_or(
-                    ZipError::InvalidArchive("expected a local file header".into()),
-                )?
+                open_local_entry(source, info, password, u64::MAX)?
             }
         };
         self.file = Some(file);
@@ -180,7 +192,7 @@ impl EntryReader {
             // From the parsed central directory: no seek to the local
             // header, which the reader is about to do anyway.
             let meta = archive.metadata();
-            let raw = meta.entry(index).map_err(|e| zip_error(ruby, e))?;
+            let raw = meta.entry(index).rb(ruby)?;
             EntryInfo {
                 index: Some(index),
                 header_start: raw.header_start(),
@@ -203,8 +215,7 @@ impl EntryReader {
         needs_gvl: bool,
         io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
-        let entry = OwnedEntry::open(archive, enforce_size, password, &info)
-            .map_err(|e| zip_error(ruby, e))?;
+        let entry = OwnedEntry::open(archive, enforce_size, password, &info).rb(ruby)?;
         let size = enforce_size.then_some(info.size);
         // Nothing to read only when there is no data either: an entry
         // declared empty but holding data is a lie the crate's size check

@@ -21,24 +21,15 @@ use std::time::{Duration, SystemTime};
 use magnus::{
     prelude::*, value::Lazy, Error, ExceptionClass, RArray, RString, Ruby, Symbol, Value,
 };
-use zip::read::{read_zipfile_from_stream_with_options, ZipReadOptions};
 use zip::result::ZipError;
 use zip::ZipArchive;
 
-use crate::errors::{io_error, read_error, zip_error};
+use crate::errors::{io_error, read_error, zip_error, DESTINATION_EXISTS_ERROR, ENTRY_SIZE_ERROR};
 use crate::gvl::maybe_without_gvl;
+use crate::reader::{open_local_entry, EntryInfo};
 use crate::source::Source;
 
 const CHUNK: usize = 64 * 1024;
-
-static DESTINATION_EXISTS_ERROR: Lazy<ExceptionClass> = Lazy::new(|ruby| {
-    ruby.eval::<ExceptionClass>("Ziperu::DestinationExistsError")
-        .expect("Ziperu::DestinationExistsError must be defined in lib/ziperu/errors.rb")
-});
-static ENTRY_SIZE_ERROR: Lazy<ExceptionClass> = Lazy::new(|ruby| {
-    ruby.eval::<ExceptionClass>("Ziperu::EntrySizeError")
-        .expect("Ziperu::EntrySizeError must be defined in lib/ziperu/errors.rb")
-});
 
 /// One entry to extract, as Ruby describes it:
 /// `[entry, index, name, mtime_sec, mtime_nsec, mode, directory?]`.
@@ -332,20 +323,19 @@ impl Extractor<'_> {
         } else {
             // Past the declared size to the true end of the data, the way
             // `EntryReader` does without enforcement.
-            let (header_start, compressed_size, crc32) = {
+            let info = {
                 let meta = self.archive.metadata();
                 let raw = meta.entry(index)?;
-                (raw.header_start(), raw.compressed_size(), raw.crc32())
+                EntryInfo {
+                    index: Some(index),
+                    header_start: raw.header_start(),
+                    size: raw.size(),
+                    compressed_size: raw.compressed_size(),
+                    crc32: raw.crc32(),
+                }
             };
             let mut source = self.archive.clone().into_inner();
-            source.seek_to(header_start)?;
-            let options = ZipReadOptions::new()
-                .override_compressed_size(compressed_size)
-                .override_uncompressed_size(u64::MAX)
-                .override_crc(crc32);
-            let mut entry = read_zipfile_from_stream_with_options(&mut source, options)?.ok_or(
-                ZipError::InvalidArchive("expected a local file header".into()),
-            )?;
+            let mut entry = open_local_entry(&mut source, &info, None, u64::MAX)?;
             copy(&mut entry)?;
         }
         Ok(written)
