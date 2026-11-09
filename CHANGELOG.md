@@ -24,6 +24,10 @@
   faster. An entry's invalid DOS timestamp is parsed when its `time` is
   first asked for, unless `Ziperu.warn_invalid_date` is set, in which
   case the warning still comes when the archive is opened.
+- `Ziperu.max_compression_ratio`: an archive declaring an entry with a
+  higher uncompressed-to-compressed ratio raises `Ziperu::LimitError` on
+  open, like the other limits; the zip bomb check that `max_total_size`
+  alone does not give.
 - The rest of rubyzip 2.x's call forms, for libraries that take their
   2.x path because `Zip::VERSION` is ziperu's: `Zip::File.new(path,
   create, buffer, options)` and `Zip::File.open(path, create, options)`,

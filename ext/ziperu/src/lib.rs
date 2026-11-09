@@ -40,6 +40,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
     archive.define_method("total_size", method!(archive::Archive::total_size, 0))?;
+    archive.define_method(
+        "max_compression_ratio",
+        method!(archive::Archive::max_compression_ratio, 0),
+    )?;
     archive.define_method("verify_entry", method!(archive::Archive::verify_entry, 2))?;
     archive.define_method(
         "verify_entry_at",

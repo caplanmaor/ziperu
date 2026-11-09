@@ -22,7 +22,7 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 - **Precompiled** for Linux (glibc and musl), macOS and Windows, Ruby 3.1 to 4.0. No toolchain, no runtime dependencies.
 - **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, and unchanged entries are copied byte for byte on commit.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, AES and ZipCrypto.
-- **Safe by default**: no entry inflates past its declared size, extraction never escapes the destination, symlinks are opt-in, and archive limits can be set up front.
+- **Safe by default**: no entry inflates past its declared size, extraction never escapes the destination, symlinks are opt-in, and limits on entry count, total size and compression ratio can be set up front.
 - **Friendlier than rubyzip where it costs nothing**: a password on the archive (`File.open(path, password: ...)`), `add` from an IO, Pathname arguments, `File#verify`, progress callbacks, and errors that fail at the call site.
 - **Checked against the field**: rubyzip's own test suite, differential fuzzing against Python's `zipfile` and rubyzip, interoperability runs with Info-ZIP, 7-Zip and Python, and the test suites of gems built on rubyzip (roo, caxlsx, rubyXL, docx, write_xlsx, sablon, gepub) run with ziperu in its place.
 

@@ -96,7 +96,8 @@ module Ziperu
                 :validate_entry_sizes,
                 :validate_declared_number_of_entries,
                 :max_entries,
-                :max_total_size
+                :max_total_size,
+                :max_compression_ratio
 
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
@@ -123,6 +124,11 @@ module Ziperu
     # so the total is a real bound on what can be extracted.
     @max_entries = nil
     @max_total_size = nil
+    # The highest uncompressed-to-compressed size ratio any entry may
+    # declare (the archive's overall ratio can be no higher). A zip bomb
+    # runs to a million or more; ordinary data rarely passes 100, though
+    # a file of zeros deflates about 1000:1, so pick with that in mind.
+    @max_compression_ratio = nil
   end
 
   # Set options in one block. The block runs only the first time.

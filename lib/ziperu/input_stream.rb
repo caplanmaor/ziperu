@@ -204,6 +204,10 @@ module Ziperu
         if (limit = ::Ziperu.max_total_size) && (total = native.total_size) > limit
           raise LimitError.new('a declared total size', total, limit)
         end
+        if (limit = ::Ziperu.max_compression_ratio) &&
+           (ratio = native.max_compression_ratio) > limit
+          raise LimitError.new('an entry with a compression ratio', ratio.round(1), limit)
+        end
 
         native
       rescue LimitError

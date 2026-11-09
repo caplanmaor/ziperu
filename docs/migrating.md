@@ -33,6 +33,15 @@ until it goes. Exception classes follow the namespace, so rescue
   that cannot seek builds such an archive in memory first, and
   `copy_raw_entry` of a ZipCrypto entry into one raises `ArgumentError`.
   `AESEncrypter` is the better choice wherever the consumer can open AES.
+- Zip64 is on by default, as in rubyzip 3: an entry whose size is not
+  known when it is written (a `put_next_entry` without a size) or is
+  4 GiB or more gets a zip64 extra field, version 4.5, and 64-bit sizes
+  in its data descriptor; `Ziperu.write_zip64_support = false` or
+  `suppress_extra_fields: :zip64` turns that off (`suppress_extra_fields:
+  true` drops every extra field), and an entry that then grows past
+  4 GiB raises `Ziperu::Error`. The central directory's own zip64 records
+  are written whenever the archive needs them (over 4 GiB, or 65,535
+  entries), whatever the setting; everything reads either way.
 - Archives compressed with bzip2, Deflate64, zstd, LZMA, XZ, PPMd or the
   PKZIP 1.x methods (Shrink, Reduce, Implode) read normally; rubyzip raises
   `Ziperu::CompressionMethodError` for anything but Stored and Deflate.
@@ -127,8 +136,10 @@ Everything here is additive: code that does not use it behaves as above.
   (leading `/`, more than 65,535 bytes) when called, and
   `File.open_buffer` refuses a pipe or socket with an `ArgumentError`,
   where rubyzip blocks or writes a corrupt header.
-- **Archive limits.** `Ziperu.max_entries` and `Ziperu.max_total_size`
-  (declared uncompressed bytes) make `Ziperu::File.open` and
+- **Archive limits.** `Ziperu.max_entries`, `Ziperu.max_total_size`
+  (declared uncompressed bytes) and `Ziperu.max_compression_ratio` (the
+  highest ratio any entry declares; a zip bomb runs to a million or
+  more, a file of zeros to about a thousand) make `Ziperu::File.open` and
   `Ziperu::InputStream.open` raise `Ziperu::LimitError` before any entry is
   read. With `validate_entry_sizes` on (the default) no entry inflates past
   its declared size, so the total is a real bound on what an extraction can

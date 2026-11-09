@@ -132,6 +132,29 @@ impl Archive {
         Ok(total)
     }
 
+    /// The highest declared uncompressed-to-compressed size ratio among
+    /// the entries, for `Ziperu.max_compression_ratio`. An entry declaring
+    /// data but no compressed bytes is infinite. Also the bound on the
+    /// archive's overall ratio, which can be no higher than its highest
+    /// entry's.
+    pub fn max_compression_ratio(ruby: &Ruby, rb_self: &Self) -> Result<f64, Error> {
+        let archive = rb_self.archive(ruby)?;
+        let meta = archive.metadata();
+        let mut worst: f64 = 0.0;
+        for i in 0..meta.len() {
+            let entry = meta.entry(i).map_err(|e| zip_error(ruby, e))?;
+            let (size, csize) = (entry.size(), entry.compressed_size());
+            if size == 0 {
+                continue;
+            }
+            if csize == 0 {
+                return Ok(f64::INFINITY);
+            }
+            worst = worst.max(size as f64 / csize as f64);
+        }
+        Ok(worst)
+    }
+
     /// Inflates entry `index` to nowhere so the crate checks its CRC (and
     /// its declared size), with the GVL released when the source allows.
     pub fn verify_entry(
