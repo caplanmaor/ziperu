@@ -87,6 +87,7 @@ module Ziperu
 
   extend self
 
+  # rubyzip's settings, with rubyzip's defaults.
   attr_accessor :unicode_names,
                 :on_exists_proc,
                 :continue_on_exists_proc,
@@ -97,8 +98,12 @@ module Ziperu
                 :case_insensitive_match,
                 :force_entry_names_encoding,
                 :validate_entry_sizes,
-                :validate_declared_number_of_entries,
-                :max_entries,
+                :validate_declared_number_of_entries
+
+  # ziperu's own settings; each is described where `reset!` gives it its
+  # default.
+  # Not in rubyzip.
+  attr_accessor :max_entries,
                 :max_total_size,
                 :max_entry_size,
                 :max_compression_ratio,
@@ -169,6 +174,7 @@ module Ziperu
   # The time a new entry gets by default: `source_date_epoch` when set,
   # the clock otherwise. `mtime` is the source file's own, which wins
   # when it is earlier (the SOURCE_DATE_EPOCH convention).
+  # Not in rubyzip.
   def default_entry_time(mtime = nil)
     entry_time(source_date_epoch, mtime)
   end

@@ -135,9 +135,7 @@ module Ziperu
 
     # Position the stream at an entry that already exists as an object
     # (used by Entry#get_input_stream to avoid rebuilding it).
-    #
-    # @api private
-    def get_next_stream_entry(entry)
+    def get_next_stream_entry(entry) # :nodoc:
       check_open!
 
       @current_entry = entry
@@ -200,8 +198,7 @@ module Ziperu
         end
       end
 
-      # @api private
-      def open_archive(context, settings = ::Ziperu)
+      def open_archive(context, settings = ::Ziperu) # :nodoc:
         check_limits(open_native(context), settings)
       end
 
@@ -228,16 +225,13 @@ module Ziperu
         raise
       end
 
-      # @api private
-      def path_like?(context)
+      def path_like?(context) # :nodoc:
         IOExtras.path_like?(context)
       end
 
       # Whether what `context` holds begins with a local file header, the
       # one thing rubyzip's `InputStream` needs to yield entries.
-      #
-      # @api private
-      def archive_like?(context)
+      def archive_like?(context) # :nodoc:
         head =
           if path_like?(context)
             ::File.binread(path_of(context), 4)
@@ -279,9 +273,7 @@ module Ziperu
 
       # The first part of a multi-part archive starts with a split-file
       # signature.
-      #
-      # @api private
-      def split_archive?(context)
+      def split_archive?(context) # :nodoc:
         head =
           if path_like?(context)
             path = path_of(context)

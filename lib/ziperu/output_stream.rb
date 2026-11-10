@@ -137,6 +137,7 @@ module Ziperu
       # the hood, as with any Enumerator); `body.each { |chunk| ... }` is
       # the direct path. Writing the entries inside the block is the same
       # as with #open and #write_buffer.
+      # Not in rubyzip.
       def body(**opts, &block)
         raise ArgumentError, "a block that writes the entries is required" unless block
 
@@ -223,6 +224,7 @@ module Ziperu
     # seek (`write_buffer` to a pipe or socket, `body`): what the consumer
     # has been given, for a progress report alongside
     # `OutputStream.estimated_size`. Nil for a file or a seekable IO.
+    # Not in rubyzip.
     def bytes_written
       @writer.bytes_written
     end
@@ -239,6 +241,7 @@ module Ziperu
     #
     # Encrypted streams and streams to an IO that cannot seek add the files
     # one by one instead.
+    # Not in rubyzip.
     def add_files(files, threads: 4)
       check_open!
       entries = files.map do |name, path|

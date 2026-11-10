@@ -18,8 +18,6 @@ module Ziperu
     # Every source answers the same questions, so `Entry` asks instead of
     # branching on which instance variables happen to be set. A new kind of
     # source (a remote object, say) is one more class here.
-    #
-    # @api private
     module Source # :nodoc: all
       # What a source without the thing asked for answers.
       module Defaults

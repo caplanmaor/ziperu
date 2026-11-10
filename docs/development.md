@@ -100,6 +100,24 @@ the right gem on Linux, macOS and Windows without a Rust toolchain, and a
 draft GitHub release with the gems attached. Pushing to rubygems.org is a
 manual `gem push` from that draft.
 
+## API conventions
+
+Three kinds of method, told apart in the source:
+
+- **rubyzip's API.** A public method with no marker has rubyzip's name,
+  arguments and behaviour; `docs/migrating.md` lists the deliberate
+  differences. It changes only when rubyzip's does.
+- **ziperu's additions.** A public method, class or setting rubyzip does
+  not have carries the line `Not in rubyzip.` at the end of its comment
+  (`grep -rn "Not in rubyzip" lib` lists them). Keywords added to a
+  rubyzip method (`password:`, `write:`, `threads:`, `progress:`,
+  `on_exists:` and so on) are described in that method's comment. These
+  follow semantic versioning like the rest.
+- **Internals.** Anything marked `# :nodoc:` (and everything under
+  `Ziperu::Native` and `Entry::Source`) is for the library's own classes
+  to call each other with, even where Ruby leaves it public. It can
+  change in any release.
+
 ## Layout
 
 - `ext/ziperu/` — the Rust extension (`Ziperu::Native::*`): a few primitive,

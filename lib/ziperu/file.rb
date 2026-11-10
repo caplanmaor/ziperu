@@ -112,19 +112,23 @@ module Ziperu
     end
 
     # Threads a commit compresses files added from disk on.
+    # Not in rubyzip.
     attr_accessor :threads
 
     # The settings this archive consults: its own where given as keywords
     # to `new` / `open`, the `Ziperu.*` globals otherwise.
+    # Not in rubyzip.
     attr_reader :settings
 
     # Opened with `write: false`: nothing can be changed.
+    # Not in rubyzip.
     def read_only?
       @read_only
     end
 
     # The path changes are written to on commit (`write: path`), or nil
     # when they go back into the archive opened.
+    # Not in rubyzip.
     attr_reader :write_to
 
     class << self
@@ -483,6 +487,7 @@ module Ziperu
     # `name` as Windows will take it: in each component the characters it
     # refuses (`<>:"|?*` and controls) become `_`, a trailing dot or space
     # goes, and a reserved device name gets a leading `_`.
+    # Not in rubyzip.
     def self.sanitize_windows_name(name)
       trailing = name.end_with?('/') ? '/' : ''
       parts = name.split('/').map do |part|
@@ -497,6 +502,7 @@ module Ziperu
     # each is checked. Returns a Hash of the entries that failed to the
     # exception raised for them; empty when the archive is sound. Encrypted
     # entries are checked when a `decrypter` is given and skipped otherwise.
+    # Not in rubyzip.
     def verify(decrypter: nil)
       native = native_archive
       password = (decrypter&.password || @password)&.b
@@ -610,17 +616,14 @@ module Ziperu
 
     # The open native archive behind this file, reopening it after `close`
     # so entries can still be read, as rubyzip allows.
-    #
-    # @api private
-    def native_archive
+    def native_archive # :nodoc:
       @native = InputStream.open_archive(@name, @settings) if @native.nil? || @native.closed?
       @native
     end
 
-    # Returns true if any changes has been made to this archive since the
-    # previous commit
     # The archive's password, if one was given to `open`.
-    def password # :nodoc:
+    # Not in rubyzip.
+    def password
       @password
     end
 
@@ -630,6 +633,8 @@ module Ziperu
     end
     private :check_writable!
 
+    # Returns true if any changes has been made to this archive since the
+    # previous commit
     def commit_required?
       return true if @create || @dirty
 

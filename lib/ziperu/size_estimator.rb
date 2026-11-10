@@ -105,6 +105,7 @@ module Ziperu
     class << self
       # The size an archive streamed with `body` or `write_buffer` will
       # come to; see SizeEstimator.
+      # Not in rubyzip.
       def estimated_size
         estimator = SizeEstimator.new
         yield estimator

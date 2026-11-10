@@ -12,6 +12,7 @@ module Ziperu
   #
   # With no setting given the archive consults `Ziperu` itself, which
   # answers to the same names.
+  # Not in rubyzip.
   class Settings
     NAMES = %i[
       unicode_names on_exists_proc continue_on_exists_proc sort_entries

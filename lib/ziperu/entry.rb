@@ -58,6 +58,7 @@ module Ziperu
 
     # The per-entry zip64 choice given to `Entry.new`, `put_next_entry` or
     # `get_output_stream`: true, false, or nil for the default.
+    # Not in rubyzip.
     attr_accessor :zip64
 
     # Whether the data is still outside the archive: a file on disk or an
@@ -205,9 +206,7 @@ module Ziperu
 
     # Build an entry from the metadata Hash the native core produces for
     # one central-directory record.
-    #
-    # @api private
-    def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu)
+    def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu) # :nodoc:
       entry = allocate
       entry.send(:init_from_meta, archive, meta, zipfile, metadata_encoding, settings)
       entry

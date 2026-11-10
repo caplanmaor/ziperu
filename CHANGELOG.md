@@ -11,8 +11,12 @@
   `Ziperu::OutputStream`. One given that way holds for that archive
   alone, so two archives in one process can differ; the others keep
   following the globals. `Ziperu::File#settings` shows what an archive
-  consults. An unknown keyword to `Ziperu::File.new` is now an
-  `ArgumentError` naming it.
+  consults.
+- Docs: one convention for the API's edges. Internals are `# :nodoc:`
+  (the eight `@api private` tags became that) and may change in any
+  release; what ziperu adds to rubyzip's API carries the line `Not in
+  rubyzip.` in its comment, so `grep -rn "Not in rubyzip" lib` lists
+  the additions.
 - Internal: an entry's data source (none, an archive record, a path, an
   IO) is one `Entry::Source` object instead of four instance variables;
   no change in behaviour.
