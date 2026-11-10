@@ -1,5 +1,6 @@
 # ziperu against rubyzip (bench/bench.rb) on the three CI platforms, on
-# demand. Each run's table lands in the job summary and as an artifact;
+# demand: run it from the Actions tab, or add the label `bench` to a pull
+# request. Each run's table lands in the job summary and as an artifact;
 # docs/benchmarks.md is updated from them by hand, so the published
 # numbers say which run they came from.
 
@@ -11,12 +12,15 @@ on:
       runs:
         description: Runs per scenario (the median is reported)
         default: "5"
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
 
 jobs:
   bench:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'bench'
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -37,7 +41,7 @@ jobs:
           {
             echo "### ${{ matrix.os }} ($(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores)"
             echo
-            RUNS="${{ inputs.runs }}" bundle exec rake bench | grep -v "^preparing"
+            RUNS="${{ inputs.runs || 5 }}" bundle exec rake bench | grep -v "^preparing"
           } | tee bench-${{ matrix.os }}.md
           cat bench-${{ matrix.os }}.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
