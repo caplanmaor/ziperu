@@ -156,9 +156,12 @@ module Ziperu
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
       compression_level: ::Ziperu.default_compression,
-      time: nil, extra: ::Ziperu::ExtraField.new, zip64: nil
+      time: nil, extra: ::Ziperu::ExtraField.new, zip64: nil, settings: ::Ziperu
     )
       super()
+      # The settings of the archive the entry is made for (see
+      # Ziperu::Settings); the globals unless that archive has its own.
+      @settings = settings
       # Whether to write the entry zip64-ready (64-bit size fields and a
       # 64-bit data descriptor): true, false, or nil to decide by the size
       # and `Ziperu.write_zip64_support`, as rubyzip does.
@@ -175,7 +178,7 @@ module Ziperu
       check_name(@name)
 
       set_default_vars_values
-      @fstype = ::Ziperu::RUNNING_ON_WINDOWS && !::Ziperu.source_date_epoch ? ::Ziperu::FSTYPE_FAT : ::Ziperu::FSTYPE_UNIX
+      @fstype = ::Ziperu::RUNNING_ON_WINDOWS && !@settings.source_date_epoch ? ::Ziperu::FSTYPE_FAT : ::Ziperu::FSTYPE_UNIX
 
       @zipfile            = zipfile
       @source             = Source::NONE
@@ -192,7 +195,7 @@ module Ziperu
                             when Time
                               ::Ziperu::DOSTime.from_time(time)
                             else
-                              ::Ziperu.default_entry_time
+                              @settings.default_entry_time
                             end
       @extra              =
         extra.kind_of?(ExtraField) ? extra : ExtraField.new(extra.to_s)
@@ -204,9 +207,9 @@ module Ziperu
     # one central-directory record.
     #
     # @api private
-    def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil)
+    def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu)
       entry = allocate
-      entry.send(:init_from_meta, archive, meta, zipfile, metadata_encoding)
+      entry.send(:init_from_meta, archive, meta, zipfile, metadata_encoding, settings)
       entry
     end
 
@@ -259,7 +262,7 @@ module Ziperu
 
       @time = ::Ziperu::DOSTime.parse_binary_dos_format(@dos_date, @dos_time)
     rescue ArgumentError
-      warn 'WARNING: invalid date/time in zip entry.' if ::Ziperu.warn_invalid_date
+      warn 'WARNING: invalid date/time in zip entry.' if @settings.warn_invalid_date
       @time = ::Ziperu::DOSTime.now
     end
     private :stored_time
@@ -366,6 +369,7 @@ module Ziperu
     def marshal_dump # :nodoc:
       instance_variables.each_with_object({}) do |ivar, h|
         next if ivar == :@zipfile && @zipfile.kind_of?(::Ziperu::File)
+        next if ivar == :@settings
 
         h[ivar] = ivar == :@source ? @source.detached : instance_variable_get(ivar)
       end
@@ -374,6 +378,7 @@ module Ziperu
     def marshal_load(ivars) # :nodoc:
       ivars.each { |ivar, value| instance_variable_set(ivar, value) }
       @source ||= Source::NONE
+      @settings = ::Ziperu
       @zipfile = nil unless instance_variable_defined?(:@zipfile)
     end
 
@@ -424,7 +429,7 @@ module Ziperu
         return self
       end
 
-      block ||= Entry.on_exists_block(on_exists)
+      block ||= Entry.on_exists_block(on_exists, @settings)
 
       raise "unknown file type #{inspect}" unless directory? || file? || symlink?
 
@@ -441,9 +446,9 @@ module Ziperu
     # The block `extract` consults about a path already taken, for an
     # `on_exists:` policy: it returns true to overwrite, false to raise,
     # `:skip` to leave the path alone.
-    def self.on_exists_block(policy) # :nodoc:
+    def self.on_exists_block(policy, settings = ::Ziperu) # :nodoc:
       case policy
-      when nil then proc { ::Ziperu.on_exists_proc }
+      when nil then proc { settings.on_exists_proc }
       when :raise then proc { false }
       when :overwrite then proc { true }
       when :skip then proc { :skip }
@@ -516,7 +521,7 @@ module Ziperu
       @ftype = :file
       @source = Source::IO.new(io, @source.stored)
       @size = io.size if io.respond_to?(:size) && !io.size.nil?
-      @time = ::Ziperu.default_entry_time
+      @time = @settings.default_entry_time
     end
 
     # The decrypter for this entry when the owning `Ziperu::File` was
@@ -658,7 +663,7 @@ module Ziperu
 
     def get_extra_attributes_from_path(path) # :nodoc:
       stat = file_stat(path)
-      @time = ::Ziperu.default_entry_time(stat.mtime)
+      @time = @settings.default_entry_time(stat.mtime)
       return if ::Ziperu::RUNNING_ON_WINDOWS
 
       @unix_uid   = stat.uid
@@ -719,7 +724,7 @@ module Ziperu
     # one: in a single native call when the entry is in an archive and its
     # declared size is to be trusted, through a stream otherwise.
     def read_all # :nodoc:
-      if !pending_data? && @source.stored? && !encrypted? && ::Ziperu.validate_entry_sizes
+      if !pending_data? && @source.stored? && !encrypted? && @settings.validate_entry_sizes
         get_raw_input_string
       else
         get_input_stream(&:read)
@@ -735,7 +740,7 @@ module Ziperu
     # Like get_input_stream, with `enforce_size: false` reading past a
     # declared size that is too small (what rubyzip does when
     # Ziperu.validate_entry_sizes is off) instead of stopping at it.
-    def open_input_stream(decrypter: nil, enforce_size: ::Ziperu.validate_entry_sizes)
+    def open_input_stream(decrypter: nil, enforce_size: @settings.validate_entry_sizes)
       if ftype == :directory
         return yield(::Ziperu::NullInputStream) if block_given?
 
@@ -770,7 +775,7 @@ module Ziperu
           # the data is that source's, not the archive's.
           get_input_stream { |is| ::IO.copy_stream(is, os) }
         else
-          open_input_stream(enforce_size: Ziperu.validate_entry_sizes, decrypter: default_decrypter) do |is|
+          open_input_stream(decrypter: default_decrypter) do |is|
             bytes_written = 0
             while (buf = is.sysread(IOExtras::CHUNK_SIZE))
               os << buf
@@ -860,7 +865,7 @@ module Ziperu
 
       @ftype           = nil
       @gp_flags        = 0
-      if ::Ziperu.unicode_names
+      if @settings.unicode_names
         @gp_flags |= EFS
         @version = 63
       end
@@ -879,7 +884,8 @@ module Ziperu
       raise EntryNameError if name.length > 65_535
     end
 
-    def init_from_meta(archive, meta, zipfile, metadata_encoding = nil)
+    def init_from_meta(archive, meta, zipfile, metadata_encoding = nil, settings = ::Ziperu)
+      @settings = settings
       @dirty = false
       @zip64 = nil
       set_default_vars_values
@@ -923,7 +929,7 @@ module Ziperu
     # decode). `raw_extra`, for a name, is checked for Info-ZIP's Unicode
     # Path field first, which carries the UTF-8 name outright.
     def decode_stored_text(text, encoding = nil, raw_extra = nil) # :nodoc:
-      forced = ::Ziperu.force_entry_names_encoding
+      forced = @settings.force_entry_names_encoding
       if forced
         text.force_encoding(forced)
       elsif (@gp_flags & EFS).nonzero?
@@ -966,7 +972,7 @@ module Ziperu
       @time = nil
       @dos_date = binary_dos_date
       @dos_time = binary_dos_time
-      return unless ::Ziperu.warn_invalid_date
+      return unless @settings.warn_invalid_date
 
       stored_time unless dos_fields_in_range?(binary_dos_date, binary_dos_time)
     end

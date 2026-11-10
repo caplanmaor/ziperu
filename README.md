@@ -178,6 +178,15 @@ Ziperu.max_total_size = 2 << 30          # 2 GiB uncompressed
 Ziperu.max_compression_ratio = 1_000     # a zip bomb runs to a million
 ```
 
+Or for one archive only, leaving the globals alone; every `Ziperu.*`
+setting is a keyword of the same name on `File`, `InputStream` and
+`OutputStream`:
+
+```ruby
+Ziperu::File.open(upload, max_entries: 1_000, max_total_size: 1 << 30) { |zip| ... }
+Ziperu::OutputStream.open("out.zip", write_extended_timestamps: true) { |zos| ... }
+```
+
 ## Migrating from rubyzip
 
 Change the Gemfile line and keep `require "zip"`: the `Zip` constant and

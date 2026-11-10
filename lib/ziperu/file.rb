@@ -48,8 +48,14 @@ module Ziperu
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Ziperu.default_compression,
                    suppress_extra_fields: false, password: nil, decrypter: nil,
-                   write: true, threads: 1, metadata_encoding: nil)
+                   write: true, threads: 1, metadata_encoding: nil, **settings)
       super()
+
+      # Any `Ziperu.*` setting, by its name, for this archive alone: the
+      # limits, `validate_entry_sizes:`, `sort_entries:`,
+      # `write_zip64_support:` and the rest (see Ziperu::Settings).
+      @settings = Settings.take!(settings)
+      raise ArgumentError, "unknown keyword: #{settings.keys.map(&:inspect).join(', ')}" unless settings.empty?
 
       # The encoding of names and comments stored without the language
       # encoding flag (an archive made on Windows in Japan, say:
@@ -107,6 +113,10 @@ module Ziperu
 
     # Threads a commit compresses files added from disk on.
     attr_accessor :threads
+
+    # The settings this archive consults: its own where given as keywords
+    # to `new` / `open`, the `Ziperu.*` globals otherwise.
+    attr_reader :settings
 
     # Opened with `write: false`: nothing can be changed.
     def read_only?
@@ -188,13 +198,14 @@ module Ziperu
       # Each entry can be read (`get_input_stream`, `extract`) while the
       # block runs; the archive is closed when `foreach` returns. Without a
       # block, returns an Enumerator.
-      def foreach(path_or_io, metadata_encoding: nil, &block)
-        return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding) unless block
+      def foreach(path_or_io, metadata_encoding: nil, **settings, &block)
+        return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding, **settings) unless block
 
-        native = InputStream.open_archive(path_or_io)
+        settings = Settings.take!(settings.dup)
+        native = InputStream.open_archive(path_or_io, settings)
         begin
           native.each_entry do |meta|
-            yield Entry.from_meta(native, meta, nil, metadata_encoding: metadata_encoding)
+            yield Entry.from_meta(native, meta, nil, metadata_encoding: metadata_encoding, settings: settings)
           end
         ensure
           native.close
@@ -256,7 +267,7 @@ module Ziperu
         if entry.kind_of?(Entry)
           entry
         else
-          Entry.new(@name, entry.to_s, compression_level: compression_level, **given)
+          Entry.new(@name, entry.to_s, compression_level: compression_level, settings: @settings, **given)
         end
       if new_entry.directory?
         raise ArgumentError,
@@ -282,14 +293,14 @@ module Ziperu
     # Convenience method for adding the contents of a file to the archive
     def add(entry, src_path, &continue_on_exists_proc)
       check_writable!
-      continue_on_exists_proc ||= proc { ::Ziperu.continue_on_exists_proc }
+      continue_on_exists_proc ||= proc { @settings.continue_on_exists_proc }
       check_entry_exists(entry, continue_on_exists_proc, 'add')
       new_entry = if entry.kind_of?(::Ziperu::Entry)
                     entry
                   else
                     ::Ziperu::Entry.new(
                       @name, entry.to_s,
-                      compression_level: @compression_level
+                      compression_level: @compression_level, settings: @settings
                     )
                   end
       if src_path.respond_to?(:read)
@@ -307,7 +318,7 @@ module Ziperu
     # in Stored format (uncompressed)
     def add_stored(entry, src_path, &continue_on_exists_proc)
       entry = ::Ziperu::Entry.new(
-        @name, entry.to_s, compression_method: ::Ziperu::Entry::STORED
+        @name, entry.to_s, compression_method: ::Ziperu::Entry::STORED, settings: @settings
       )
       add(entry, src_path, &continue_on_exists_proc)
     end
@@ -422,7 +433,7 @@ module Ziperu
       # With no block to consult about paths already taken (the policy
       # says, or Ziperu.on_exists_proc), the native core extracts every
       # qualifying entry in one call; the rest take the per-entry path.
-      policy = on_exists || (::Ziperu.on_exists_proc ? :overwrite : :raise)
+      policy = on_exists || (@settings.on_exists_proc ? :overwrite : :raise)
       slow = if block.nil? && !@restore_ownership
                extract_all_native(targets, destination_directory, report, threads, policy)
              else
@@ -517,7 +528,7 @@ module Ziperu
       if @write_to
         # The changes go to a new archive; the one opened is not touched,
         # and keeps being what this object reads.
-        ::Ziperu::OutputStream.open(@write_to, suppress_extra_fields: @suppress_extra_fields) do |zos|
+        ::Ziperu::OutputStream.open(@write_to, **stream_options) do |zos|
           zos.put_entries(@cdir.writable_entries, threads: @threads)
           zos.comment = comment
         end
@@ -525,13 +536,12 @@ module Ziperu
         # Only additions: they go after the entries already there, which
         # are left untouched (see Ziperu.append_in_place). A failure puts
         # the archive back as it was.
-        ::Ziperu::OutputStream.open(@name, append: true,
-                                           suppress_extra_fields: @suppress_extra_fields) do |zos|
+        ::Ziperu::OutputStream.open(@name, append: true, **stream_options) do |zos|
           zos.put_entries(appended, threads: @threads)
         end
       else
         on_success_replace do |tmp_file|
-          ::Ziperu::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
+          ::Ziperu::OutputStream.open(tmp_file, **stream_options) do |zos|
             zos.put_entries(@cdir.writable_entries, threads: @threads)
             zos.comment = comment
           end
@@ -549,8 +559,8 @@ module Ziperu
     # place, unchanged, and the comment is as it was. Nil otherwise, and
     # the archive is rewritten.
     def appended_entries
-      return nil if @create || @buffer || @native.nil? || @comment_changed || ::Ziperu.sort_entries
-      return nil unless ::Ziperu.append_in_place
+      return nil if @create || @buffer || @native.nil? || @comment_changed || @settings.sort_entries
+      return nil unless @settings.append_in_place
 
       all = @cdir.entries
       held = @native.entry_count
@@ -584,8 +594,7 @@ module Ziperu
       # ZipCrypto entries are copied with patched headers, which a stream
       # (a pipe, say) cannot take: such an archive is built in memory first.
       memory = @cdir.writable_entries.any?(&:zipcrypto?)
-      ::Ziperu::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields,
-                                              memory: memory) do |zos|
+      ::Ziperu::OutputStream.write_buffer(io, memory: memory, **stream_options) do |zos|
         @cdir.each_writable { |e| e.write_to_zip_output_stream(zos) }
         zos.comment = comment
       end
@@ -604,7 +613,7 @@ module Ziperu
     #
     # @api private
     def native_archive
-      @native = InputStream.open_archive(@name) if @native.nil? || @native.closed?
+      @native = InputStream.open_archive(@name, @settings) if @native.nil? || @native.closed?
       @native
     end
 
@@ -689,7 +698,7 @@ module Ziperu
       # A few hundred entries per call, so an interrupt is noticed between
       # calls rather than after the whole archive.
       specs.each_slice(NATIVE_EXTRACT_BATCH) do |batch|
-        native.extract_entries(dest, batch, ::Ziperu.validate_entry_sizes, threads, code).each do |index, kind, path|
+        native.extract_entries(dest, batch, @settings.validate_entry_sizes, threads, code).each do |index, kind, path|
           entry = by_index[index]
           case kind
           when :unsafe
@@ -758,7 +767,7 @@ module Ziperu
       release_native
       @buffer = buffer
       @io = (path_or_io if buffer)
-      @cdir = ::Ziperu::EntrySet.new
+      @cdir = ::Ziperu::EntrySet.new([], @settings)
       @comment = ''
       @dirty = false
       @comment_changed = false
@@ -783,10 +792,11 @@ module Ziperu
 
     def read_archive(path_or_io)
       IOExtras.binmode(path_or_io)
-      @native = InputStream.open_archive(path_or_io)
+      @native = InputStream.open_archive(path_or_io, @settings)
       @comment = @native.comment # the stored bytes, as rubyzip reads them
       @native.each_entry do |meta|
-        @cdir.push_record(Entry.from_meta(@native, meta, self, metadata_encoding: @metadata_encoding))
+        @cdir.push_record(Entry.from_meta(@native, meta, self, metadata_encoding: @metadata_encoding,
+                                                               settings: @settings))
       end
     end
 
@@ -822,10 +832,15 @@ module Ziperu
       end
     end
 
+    # What every stream this archive is written through is opened with.
+    def stream_options
+      { suppress_extra_fields: @suppress_extra_fields, **Settings.overrides(@settings) }
+    end
+
     def check_entry_exists(entry_name, continue_on_exists_proc, proc_name)
       return unless @cdir.include?(entry_name)
 
-      continue_on_exists_proc ||= proc { Ziperu.continue_on_exists_proc }
+      continue_on_exists_proc ||= proc { @settings.continue_on_exists_proc }
       raise ::Ziperu::EntryExistsError.new proc_name, entry_name unless continue_on_exists_proc.call
 
       remove get_entry(entry_name)

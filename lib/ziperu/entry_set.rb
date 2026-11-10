@@ -9,8 +9,11 @@ module Ziperu
     attr_reader :entry_set
     protected   :entry_set
 
-    def initialize(an_enumerable = [])
+    def initialize(an_enumerable = [], settings = ::Ziperu)
       super()
+      # `sort_entries` and `case_insensitive_match`, as the archive the
+      # set belongs to has them (see Ziperu::Settings).
+      @settings = settings
       # Keyed by name for lookup, as in rubyzip; `@all` keeps every entry
       # in order, which only differs when an archive holds several records
       # under one name (see `push_record`).
@@ -115,7 +118,7 @@ module Ziperu
 
     # deep clone
     def dup
-      copy = EntrySet.new
+      copy = EntrySet.new([], @settings)
       @all.each { |e| copy.push_record(e.dup) }
       copy
     end
@@ -143,7 +146,7 @@ module Ziperu
 
     # A copy: callers rename or remove entries while iterating.
     def sorted_entries
-      ::Ziperu.sort_entries ? @all.sort_by { |e| to_key(e) } : @all.dup
+      @settings.sort_entries ? @all.sort_by { |e| to_key(e) } : @all.dup
     end
 
     private
@@ -161,7 +164,7 @@ module Ziperu
       k = entry.to_s
       k = k.b unless k.encoding == ::Encoding::BINARY
       k = k.chomp('/') if k.end_with?('/')
-      k = k.downcase if ::Ziperu.case_insensitive_match
+      k = k.downcase if @settings.case_insensitive_match
       k
     end
   end

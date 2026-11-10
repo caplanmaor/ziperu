@@ -24,9 +24,14 @@ module Ziperu
     # @param context [String||IO||StringIO] file path or IO/StringIO object
     # @param offset [Integer] byte offset of the local header to start at
     # This method also accepts the standard IO encoding options:
-    # `external_encoding:`, `internal_encoding:` and `encoding:`.
+    # `external_encoding:`, `internal_encoding:` and `encoding:`, and any
+    # `Ziperu.*` setting by its name, for this stream alone (the limits,
+    # `validate_entry_sizes:`, `force_entry_names_encoding:`; see
+    # Ziperu::Settings).
     def initialize(context, *legacy, offset: 0, decrypter: nil, password: nil,
-                   enforce_size: ::Ziperu.validate_entry_sizes, metadata_encoding: nil, **opts)
+                   enforce_size: nil, metadata_encoding: nil, **opts)
+      @settings = Settings.take!(opts)
+      enforce_size = @settings.validate_entry_sizes if enforce_size.nil?
       @metadata_encoding = metadata_encoding
       # rubyzip 2.x's `new(io, offset, decrypter)`.
       offset, decrypter = Compat.positional(legacy, %i[offset decrypter],
@@ -47,7 +52,7 @@ module Ziperu
           context
         elsif !@split
           begin
-            self.class.open_archive(context)
+            self.class.open_archive(context, @settings)
           rescue LimitError
             raise
           rescue Error => e
@@ -100,7 +105,8 @@ module Ziperu
         return @current_entry = nil
       end
 
-      @current_entry = Entry.from_meta(@archive, meta_at(@next_index), metadata_encoding: @metadata_encoding)
+      @current_entry = Entry.from_meta(@archive, meta_at(@next_index),
+                                       metadata_encoding: @metadata_encoding, settings: @settings)
       @next_index += 1
       open_entry
       @current_entry
@@ -195,23 +201,23 @@ module Ziperu
       end
 
       # @api private
-      def open_archive(context)
-        check_limits(open_native(context))
+      def open_archive(context, settings = ::Ziperu)
+        check_limits(open_native(context), settings)
       end
 
       # Ziperu.max_entries / max_total_size, checked before any entry is
       # read. An archive that fails is closed again.
-      def check_limits(native)
-        if (limit = ::Ziperu.max_entries) && native.entry_count > limit
+      def check_limits(native, settings = ::Ziperu)
+        if (limit = settings.max_entries) && native.entry_count > limit
           raise LimitError.new('an entry count', native.entry_count, limit)
         end
-        if (limit = ::Ziperu.max_total_size) && (total = native.total_size) > limit
+        if (limit = settings.max_total_size) && (total = native.total_size) > limit
           raise LimitError.new('a declared total size', total, limit)
         end
-        if (limit = ::Ziperu.max_entry_size) && (largest = native.max_entry_size) > limit
+        if (limit = settings.max_entry_size) && (largest = native.max_entry_size) > limit
           raise LimitError.new('an entry with a declared size', largest, limit)
         end
-        if (limit = ::Ziperu.max_compression_ratio) &&
+        if (limit = settings.max_compression_ratio) &&
            (ratio = native.max_compression_ratio) > limit
           raise LimitError.new('an entry with a compression ratio', ratio.round(1), limit)
         end

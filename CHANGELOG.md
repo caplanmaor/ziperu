@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Per-archive settings: every `Ziperu.*` setting (the limits,
+  `validate_entry_sizes`, `sort_entries`, `case_insensitive_match`,
+  `write_zip64_support`, `write_extended_timestamps`, `unicode_names`,
+  `source_date_epoch`, `append_in_place`, `on_exists_proc` and the rest)
+  is also a keyword of the same name on `Ziperu::File.new` / `open` /
+  `open_buffer` / `foreach`, `Ziperu::InputStream` and
+  `Ziperu::OutputStream`. One given that way holds for that archive
+  alone, so two archives in one process can differ; the others keep
+  following the globals. `Ziperu::File#settings` shows what an archive
+  consults. An unknown keyword to `Ziperu::File.new` is now an
+  `ArgumentError` naming it.
+- Internal: an entry's data source (none, an archive record, a path, an
+  IO) is one `Entry::Source` object instead of four instance variables;
+  no change in behaviour.
+
 ## 0.2.0 (2026-11-09)
 
 - XZ and PPMd on write (`Entry::XZ`, `Entry::PPMD`), alongside bzip2 and

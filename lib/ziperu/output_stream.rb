@@ -31,8 +31,13 @@ module Ziperu
     # ZipCrypto entries need their headers patched once the data is
     # written, so with a `TraditionalEncrypter` (or `memory: true`) the
     # archive is built in memory and written out in one go at `close`.
+    #
+    # Any `Ziperu.*` setting is taken by its name too, for this archive
+    # alone (`write_zip64_support:`, `write_extended_timestamps:`,
+    # `unicode_names:`, `source_date_epoch:`; see Ziperu::Settings).
     def initialize(file_name, *legacy, stream: false, encrypter: nil, suppress_extra_fields: false,
                    memory: false, append: false, **opts)
+      @settings = Settings.take!(opts)
       super(**opts)
       # rubyzip 2.x's `new(io, stream, encrypter)`.
       stream, encrypter = Compat.positional(legacy, %i[stream encrypter],
@@ -204,7 +209,8 @@ module Ziperu
         else
           Entry.new(
             @file_name, entry_name.to_s, comment: comment, extra: extra,
-            compression_method: compression_method, compression_level: level, zip64: zip64
+            compression_method: compression_method, compression_level: level, zip64: zip64,
+            settings: @settings
           )
         end
 
@@ -236,7 +242,7 @@ module Ziperu
     def add_files(files, threads: 4)
       check_open!
       entries = files.map do |name, path|
-        entry = Entry.new(@file_name, name.to_s)
+        entry = Entry.new(@file_name, name.to_s, settings: @settings)
         entry.gather_fileinfo_from_srcpath(path)
         entry
       end
@@ -443,7 +449,7 @@ module Ziperu
     # archive keeps exactly the fields it had.
     def add_default_fields(entry, extra)
       return unless entry.archive.nil? || entry.pending_data?
-      return unless ::Ziperu.write_extended_timestamps
+      return unless @settings.write_extended_timestamps
       return if extra.member?(:universaltime) || extra.member?(:ntfs)
 
       extra.create(:universaltime).mtime = DOSTime.from_time(entry.time)
@@ -461,8 +467,8 @@ module Ziperu
       return true if entry.size >= 0xFFFFFFFF || entry.compressed_size >= 0xFFFFFFFF
       return false unless entry.file?
       return entry.zip64 unless entry.zip64.nil?
-      return true if Ziperu.write_zip64_support == :always && !suppressed
-      return false if suppressed || !Ziperu.write_zip64_support
+      return true if @settings.write_zip64_support == :always && !suppressed
+      return false if suppressed || !@settings.write_zip64_support
 
       entry.zip64? || !entry.size_known?
     end

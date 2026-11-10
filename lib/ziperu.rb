@@ -46,6 +46,7 @@ rescue LoadError => e
 end
 
 require_relative "ziperu/constants"
+require_relative "ziperu/settings"
 require_relative "ziperu/dos_time"
 require_relative "ziperu/central_directory"
 require_relative "ziperu/ioextras"
@@ -169,7 +170,10 @@ module Ziperu
   # the clock otherwise. `mtime` is the source file's own, which wins
   # when it is earlier (the SOURCE_DATE_EPOCH convention).
   def default_entry_time(mtime = nil)
-    epoch = source_date_epoch
+    entry_time(source_date_epoch, mtime)
+  end
+
+  def entry_time(epoch, mtime) # :nodoc:
     return DOSTime.from_time(mtime || Time.now) unless epoch
 
     clamped = Time.at(epoch).utc
