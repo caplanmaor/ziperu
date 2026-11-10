@@ -160,4 +160,4 @@ jobs:
       - run: bundle exec rake mem:check
       - run: bundle exec rake mem:growth
         env:
-          ITERATIONS: "300"
+          ITERATIONS: "600"

@@ -15,7 +15,7 @@ require "stringio"
 require "fileutils"
 
 ITERATIONS = Integer(ENV.fetch("ITERATIONS", 200))
-# Growth tolerated between the early and the late samples, in MiB: the
+# Growth tolerated between the middle and the last samples, in MiB: the
 # heap fragments a little, and the first samples include lazily loaded
 # code and buffers. Medians, not single samples, because RSS after a GC
 # still jumps by 10-20 MiB from one sample to the next.
@@ -93,11 +93,17 @@ Dir.mktmpdir("ziperu-growth") do |dir|
     samples << rss_mib.round(1)
     puts format("iteration %4d: rss %7.1f MiB", i, samples.last)
   end
+  # The first third is warm-up: the allocator keeps taking memory for a
+  # while before it settles, and on a busy CI machine that can run well
+  # past the first few samples (one run rose from 74 to 103 MiB and came
+  # back to 89). A leak grows steadily, so it shows as the middle third's
+  # median against the last third's; a plateau does not.
   median = ->(xs) { xs.sort[xs.size / 2] }
-  warmed = samples.drop(2)
-  warmed = samples if warmed.size < 4
-  quarter = [warmed.size / 4, 1].max
-  growth = median.call(warmed.last(quarter)) - median.call(warmed.first(quarter))
-  puts format("growth (late median - early median): %.1f MiB over %d iterations (allowed %.1f)", growth, ITERATIONS, ALLOWED_MIB)
+  third = [samples.size / 3, 1].max
+  middle = samples[third, third]
+  last = samples.last(third)
+  growth = median.call(last) - median.call(middle)
+  puts format("growth (last third - middle third, medians): %.1f MiB over %d iterations (allowed %.1f)",
+              growth, ITERATIONS, ALLOWED_MIB)
   abort "memory keeps growing" if growth > ALLOWED_MIB
 end
