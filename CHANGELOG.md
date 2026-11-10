@@ -17,6 +17,10 @@
   release; what ziperu adds to rubyzip's API carries the line `Not in
   rubyzip.` in its comment, so `grep -rn "Not in rubyzip" lib` lists
   the additions.
+- A stated Ruby policy (README): 3.3 to 4.0 supported and tested on
+  every platform, 3.1 and 3.2 best effort, ruby-head watched by a
+  nightly, non-blocking CI job. CI now runs the suite on 4.0 too.
+- Every Ruby example in the README runs as a test.
 - Releases build a committed snapshot of platforms and Rubies
   (`.github/release-matrix.json`) rather than upstream's list on the day
   of the tag, so a patch release cannot silently gain or lose one; a

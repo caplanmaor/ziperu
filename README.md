@@ -49,6 +49,14 @@ Ruby 3.1 through 4.0. The glibc gems need RubyGems 3.3.22 or later (Ruby
 the `ruby:3.2-alpine` and later images). Anywhere else the source gem
 builds with Rust 1.88+.
 
+Which Rubies, and how firmly:
+
+| Ruby | Status |
+| --- | --- |
+| 3.3, 3.4, 4.0 | Supported. The suite runs on Linux, macOS and Windows on every change; binaries ship. |
+| 3.1, 3.2 | Best effort. Past end of life upstream; binaries still ship and the suite runs on 3.1, but a fix that needs a newer Ruby may drop them, in a minor release and with a changelog entry. |
+| ruby-head | Watched. A non-blocking CI job runs the suite nightly, so a new Ruby gets binaries the day it is released. |
+
 JRuby and TruffleRuby are not supported: the core is a native extension
 against the CRuby API. rubyzip remains the library for those.
 
