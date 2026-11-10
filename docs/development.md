@@ -97,8 +97,24 @@ gem plus one precompiled gem per platform (built with
 [oxidize-rb/actions/cross-gem](https://github.com/oxidize-rb/actions), each
 holding the extension for every stable Ruby), a smoke test that installs
 the right gem on Linux, macOS and Windows without a Rust toolchain, and a
-draft GitHub release with the gems attached. Pushing to rubygems.org is a
-manual `gem push` from that draft.
+draft GitHub release with the gems attached. With trusted publishing
+set up (below) the `publish` job then pushes them to rubygems.org, native
+gems first and the source gem last; without it, pushing is a manual
+`gem push` of each gem in the draft. Either way, publish the draft
+release afterwards.
+
+Setting up trusted publishing, once:
+
+1. On rubygems.org, ziperu's **Trusted publishers** page: add a GitHub
+   Actions publisher for `caplanmaor/ziperu`, workflow `release.yml`,
+   environment `rubygems`.
+2. In the GitHub repository's settings, **Environments**: create
+   `rubygems` (optionally with yourself as a required reviewer, so each
+   push waits for a click), and under **Variables** set
+   `RUBYGEMS_TRUSTED_PUBLISHING` to `true`.
+
+After that, no API key is needed, and the one in
+`~/.local/share/gem/credentials` can be revoked.
 
 Which platforms and Rubies a release builds is a committed snapshot,
 [.github/release-matrix.json](../.github/release-matrix.json), so a

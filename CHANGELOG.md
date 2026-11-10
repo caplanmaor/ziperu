@@ -21,6 +21,10 @@
   every platform, 3.1 and 3.2 best effort, ruby-head watched by a
   nightly, non-blocking CI job. CI now runs the suite on 4.0 too.
 - Every Ruby example in the README runs as a test.
+- The release workflow can push to rubygems.org itself through trusted
+  publishing (OIDC, no API key), native gems before the source gem; it
+  is off until the repository variable `RUBYGEMS_TRUSTED_PUBLISHING` is
+  set (see docs/development.md).
 - Releases build a committed snapshot of platforms and Rubies
   (`.github/release-matrix.json`) rather than upstream's list on the day
   of the tag, so a patch release cannot silently gain or lose one; a

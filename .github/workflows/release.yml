@@ -4,8 +4,11 @@
 # .github/release-matrix.json, not whatever upstream lists on the day: a
 # release gains or loses one only when that file is changed
 # (release-matrix.yml says when it has fallen behind).
-# The gems are attached to a GitHub release as a draft; pushing them to
-# rubygems.org is a manual `gem push` from there, on purpose.
+# The gems are attached to a GitHub release as a draft. Pushing them to
+# rubygems.org is the `publish` job, through trusted publishing (no API
+# key anywhere), once the repository variable RUBYGEMS_TRUSTED_PUBLISHING
+# is "true"; until then it is a manual `gem push` from the draft. See
+# docs/development.md.
 
 name: Release
 
@@ -131,3 +134,36 @@ jobs:
         with:
           draft: true
           files: gems/*.gem
+
+  # rubygems.org through OIDC: rubygems.org trusts this workflow, in the
+  # `rubygems` environment, to push ziperu, and hands it a short-lived
+  # token. The native gems go first and the source gem last, so nobody
+  # installs the version and gets a 30-minute Rust build because the
+  # binary for their platform was not up yet.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') && vars.RUBYGEMS_TRUSTED_PUBLISHING == 'true'
+    needs: release
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: gems
+          merge-multiple: true
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+      - name: Push the native gems, then the source gem
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          source="gems/ziperu-${version}.gem"
+          test -f "$source"
+          for gem in gems/ziperu-"${version}"-*.gem; do
+            gem push "$gem"
+          done
+          gem push "$source"
