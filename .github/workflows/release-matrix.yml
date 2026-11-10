@@ -1,0 +1,33 @@
+# Releases build the committed snapshot in .github/release-matrix.json
+# (see release.yml). This checks, weekly and on demand, whether upstream
+# now offers a Ruby or a platform the snapshot lacks, or has dropped one
+# it has; a failure here is the reminder to update the snapshot on
+# purpose. It gates nothing.
+
+name: Release matrix
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/fetch-ci-data@v1
+        id: fetch
+        with:
+          # 32-bit ARM Linux and the legacy mingw32 toolchain are not worth
+          # a build each; the Rust `zip` crate's deps are untested there.
+          supported-ruby-platforms: |
+            exclude: [arm-linux, x86-linux, x86-mingw32, x64-mingw32]
+          stable-ruby-versions: |
+            exclude: [head]
+      - run: ruby .github/scripts/release_matrix.rb
+        env:
+          CI_DATA: ${{ steps.fetch.outputs.result }}

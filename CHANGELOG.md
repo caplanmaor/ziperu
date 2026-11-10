@@ -17,6 +17,10 @@
   release; what ziperu adds to rubyzip's API carries the line `Not in
   rubyzip.` in its comment, so `grep -rn "Not in rubyzip" lib` lists
   the additions.
+- Releases build a committed snapshot of platforms and Rubies
+  (`.github/release-matrix.json`) rather than upstream's list on the day
+  of the tag, so a patch release cannot silently gain or lose one; a
+  weekly check says when the snapshot has fallen behind.
 - Internal: an entry's data source (none, an archive record, a path, an
   IO) is one `Entry::Source` object instead of four instance variables;
   no change in behaviour.

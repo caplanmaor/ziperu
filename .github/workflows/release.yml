@@ -1,5 +1,9 @@
 # Builds the precompiled native gems (one per platform, each holding the
-# extension for every stable Ruby) plus the source gem, on a version tag.
+# extension for every Ruby in the snapshot) plus the source gem, on a
+# version tag. Which platforms and Rubies is the committed snapshot in
+# .github/release-matrix.json, not whatever upstream lists on the day: a
+# release gains or loses one only when that file is changed
+# (release-matrix.yml says when it has fallen behind).
 # The gems are attached to a GitHub release as a draft; pushing them to
 # rubygems.org is a manual `gem push` from there, on purpose.
 
@@ -11,20 +15,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  ci-data:
+  matrix:
     runs-on: ubuntu-latest
     outputs:
-      result: ${{ steps.fetch.outputs.result }}
+      platforms: ${{ steps.read.outputs.platforms }}
+      rubies: ${{ steps.read.outputs.rubies }}
     steps:
-      - uses: oxidize-rb/actions/fetch-ci-data@v1
-        id: fetch
-        with:
-          # 32-bit ARM Linux and the legacy mingw32 toolchain are not worth
-          # a build each; the Rust `zip` crate's deps are untested there.
-          supported-ruby-platforms: |
-            exclude: [arm-linux, x86-linux, x86-mingw32, x64-mingw32]
-          stable-ruby-versions: |
-            exclude: [head]
+      - uses: actions/checkout@v4
+      - name: Read the release matrix snapshot
+        id: read
+        run: |
+          echo "platforms=$(jq -c '.platforms' .github/release-matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "rubies=$(jq -r '.rubies | join(",")' .github/release-matrix.json)" >> "$GITHUB_OUTPUT"
 
   source-gem:
     runs-on: ubuntu-latest
@@ -43,11 +45,11 @@ jobs:
   cross-gem:
     name: native gem for ${{ matrix.platform }}
     runs-on: ubuntu-latest
-    needs: ci-data
+    needs: matrix
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON(needs.ci-data.outputs.result).supported-ruby-platforms }}
+        platform: ${{ fromJSON(needs.matrix.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -58,9 +60,7 @@ jobs:
         id: cross-gem
         with:
           platform: ${{ matrix.platform }}
-          # The stable set starts at the oldest Ruby still maintained; the
-          # gemspec promises 3.1 and up, so build the two EOL minors too.
-          ruby-versions: ${{ format('3.1,3.2,{0}', join(fromJSON(needs.ci-data.outputs.result).stable-ruby-versions, ',')) }}
+          ruby-versions: ${{ needs.matrix.outputs.rubies }}
       # RubyGems treats a bare `x86_64-linux` platform as any libc and
       # installs it on Alpine too, where it cannot load; name the libc.
       - name: Name the libc in the glibc gem's platform

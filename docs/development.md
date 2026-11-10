@@ -100,6 +100,17 @@ the right gem on Linux, macOS and Windows without a Rust toolchain, and a
 draft GitHub release with the gems attached. Pushing to rubygems.org is a
 manual `gem push` from that draft.
 
+Which platforms and Rubies a release builds is a committed snapshot,
+[.github/release-matrix.json](../.github/release-matrix.json), so a
+patch release ships exactly what the release before it did. The weekly
+[release-matrix.yml](../.github/workflows/release-matrix.yml) run fails
+when upstream offers something the snapshot lacks (a new Ruby, say) or
+has dropped something it has. To adopt the change, in a minor release:
+
+    CI_DATA='<the fetch-ci-data JSON from that run>' ruby .github/scripts/release_matrix.rb --write
+
+and commit the file.
+
 ## API conventions
 
 Three kinds of method, told apart in the source:
