@@ -169,17 +169,20 @@ module Ziperu
       nil
     end
 
-    # Closes the stream after a failure: the native writer is released,
-    # but the entries written so far are left as they were, since the
-    # archive they were written to is not going to be used. An append
-    # puts the archive back as it was.
+    # Closes the stream after a failure, and the entries written so far
+    # learn nothing from it. An append puts the archive back as it was. A
+    # stream over an IO (`write_buffer`, `body`) is left unfinished, with
+    # no central directory, so whoever receives it sees a broken archive
+    # rather than a complete-looking one missing data; rubyzip leaves it
+    # unfinished too. An archive at a path is closed, as rubyzip's `open`
+    # does.
     def abort # :nodoc:
       @aborted = true
-      if @append
+      if @append || @io
         @writer.abort
         @closed = true
       else
-        @io ? close_buffer : close
+        close
       end
     rescue StandardError
       # Nothing to add to the exception already on its way.
@@ -200,7 +203,7 @@ module Ziperu
     # can be a Ziperu::Entry or a string.
     def put_next_entry(
       entry_name, comment = '', extra = ExtraField.new,
-      compression_method = Entry::DEFLATED, level = Ziperu.default_compression, zip64: nil
+      compression_method = Entry::DEFLATED, level = nil, zip64: nil
     )
       check_open!
 
@@ -210,7 +213,8 @@ module Ziperu
         else
           Entry.new(
             @file_name, entry_name.to_s, comment: comment, extra: extra,
-            compression_method: compression_method, compression_level: level, zip64: zip64,
+            compression_method: compression_method, compression_level: level || @settings.default_compression,
+            zip64: zip64,
             settings: @settings
           )
         end

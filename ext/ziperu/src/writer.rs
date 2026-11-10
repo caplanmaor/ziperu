@@ -139,6 +139,11 @@ struct State {
     append: Option<Append>,
 }
 
+/// Writes below this many bytes keep the GVL (see `Writer::write`).
+const INLINE_WRITE: usize = 16 * 1024;
+/// How much of a large write goes in between checks for an interrupt.
+const WRITE_CHUNK: usize = 1024 * 1024;
+
 impl Writer {
     pub fn open_path(ruby: &Ruby, path: String) -> Result<Self, Error> {
         // Readable too: `finish` reads the central directory back.
@@ -248,14 +253,24 @@ impl Writer {
         self.io.is_some()
     }
 
-    /// Gives up on an append: the entries written so far are discarded
-    /// and the archive is put back as it was. A writer that is not an
-    /// append is just dropped.
+    /// Gives up on the archive. An append is put back as it was. A
+    /// writer over a Ruby IO is detached first, so that the crate, which
+    /// finishes an archive when it is dropped, cannot hand that IO a
+    /// central directory: what reached the IO stays an unfinished archive
+    /// that no reader takes for a complete one. Any other writer is just
+    /// dropped.
     pub fn abort(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
         let (zip, append) = {
             let mut state = rb_self.borrow(ruby)?;
             (state.zip.take(), state.append.take())
         };
+        if append.is_none() {
+            if let Some(attached) = &rb_self.attached {
+                attached.store(false, Ordering::Release);
+            }
+            drop(zip);
+            return Ok(());
+        }
         let (Some(Zip::Seekable(mut zip)), Some(append)) = (zip, append) else {
             return Ok(());
         };
@@ -321,7 +336,7 @@ impl Writer {
             // The check byte is the high byte of the DOS time the header
             // carries, which is what the crate wrote.
             let check = (options.last_modified().timepart() >> 8) as u8;
-            let (header, pending) = Pending::begin(
+            let begun = Pending::begin(
                 index,
                 password,
                 options.method,
@@ -329,13 +344,25 @@ impl Writer {
                 check,
                 extra_flags,
             )
-            .rb(ruby)?;
-            maybe_without_gvl(rb_self.needs_gvl(), || {
-                with_zip!(zip, |w| w.write_all(&header))
-            })
-            .rb(ruby)?;
-            state.crypto.pending = Some(pending);
-            Ok(())
+            .and_then(|(header, pending)| {
+                maybe_without_gvl(rb_self.needs_gvl(), || {
+                    with_zip!(zip, |w| w.write_all(&header))
+                })?;
+                Ok(pending)
+            });
+            match begun {
+                Ok(pending) => {
+                    state.crypto.pending = Some(pending);
+                    Ok(())
+                }
+                Err(e) => {
+                    // Without `pending` the data written next would go in
+                    // as it is, under a header that says nothing of
+                    // encryption: take the entry back out instead.
+                    Self::withdraw(rb_self.needs_gvl(), state, zip);
+                    Err(entry_error(ruby, &name, ZipError::Io(e)))
+                }
+            }
         })
     }
 
@@ -417,20 +444,30 @@ impl Writer {
         // GVL (the string could be moved by compaction meanwhile).
         let bytes = bytes_of(data);
         let len = bytes.len();
+        // Releasing the GVL and getting it back costs more than deflating a
+        // few KiB, and under contention can mean waiting out another
+        // thread's time slice: small writes (`puts`, `<<` of a line) keep it.
+        let keep_gvl = rb_self.needs_gvl() || len < INLINE_WRITE;
         rb_self.with_state(ruby, |state, zip| {
-            maybe_without_gvl(rb_self.needs_gvl(), || {
-                match state.crypto.pending.as_mut() {
-                    Some(pending) => {
-                        let cipher = pending.feed(&bytes)?;
-                        with_zip!(zip, |w| w.write_all(&cipher))
-                    }
-                    None => {
-                        if let Some(stats) = zip.stats() {
-                            stats.feed(&bytes);
+            maybe_without_gvl(keep_gvl, || {
+                // A large write goes in chunks, so an interrupt (see `gvl`)
+                // is seen between them rather than after all of it.
+                for chunk in bytes.chunks(WRITE_CHUNK) {
+                    crate::gvl::check()?;
+                    match state.crypto.pending.as_mut() {
+                        Some(pending) => {
+                            let cipher = pending.feed(chunk)?;
+                            with_zip!(zip, |w| w.write_all(&cipher))?;
                         }
-                        with_zip!(zip, |w| w.write_all(&bytes))
+                        None => {
+                            if let Some(stats) = zip.stats() {
+                                stats.feed(chunk);
+                            }
+                            with_zip!(zip, |w| w.write_all(chunk))?;
+                        }
                     }
                 }
+                io::Result::Ok(())
             })
             .rb(ruby)?;
             Ok(len)
@@ -529,34 +566,47 @@ impl Writer {
                     csize: file.compressed_size(),
                 };
                 w.start_file_with_options(file_options.name(&name))?;
-                // The crate has the entry from here on, whatever happens
-                // to the rest; the patch counts on the index.
+                // The crate has the entry from here on: a failure below
+                // takes it back out, or the archive would carry a
+                // Stored entry of partial ciphertext with no flag saying
+                // it is encrypted.
                 let index = state.count;
-                state.count += 1;
-                let copied = io::copy(&mut file, w)?;
-                if copied != fields.csize {
-                    return Err(ZipError::InvalidArchive(
-                        format!(
-                            "entry has {copied} bytes of data, not the {} declared",
-                            fields.csize
-                        )
-                        .into(),
-                    ));
+                let mut copy = || -> ZipResult<u16> {
+                    let copied = io::copy(&mut file, w)?;
+                    if copied != fields.csize {
+                        return Err(ZipError::InvalidArchive(
+                            format!(
+                                "entry has {copied} bytes of data, not the {} declared",
+                                fields.csize
+                            )
+                            .into(),
+                        ));
+                    }
+                    let mut flags = zipcrypto::ENCRYPTED_FLAG;
+                    if options.descriptor {
+                        w.write_all(&zipcrypto::data_descriptor(
+                            fields.crc,
+                            fields.csize,
+                            fields.size,
+                        )?)?;
+                        flags |= zipcrypto::DATA_DESCRIPTOR_FLAG;
+                    }
+                    Ok(flags)
+                };
+                match copy() {
+                    Ok(flags) => {
+                        state.count += 1;
+                        Ok(Patch {
+                            index,
+                            flags,
+                            fields: Some(fields),
+                        })
+                    }
+                    Err(e) => {
+                        let _ = w.abort_file();
+                        Err(e)
+                    }
                 }
-                let mut flags = zipcrypto::ENCRYPTED_FLAG;
-                if options.descriptor {
-                    w.write_all(&zipcrypto::data_descriptor(
-                        fields.crc,
-                        fields.csize,
-                        fields.size,
-                    )?)?;
-                    flags |= zipcrypto::DATA_DESCRIPTOR_FLAG;
-                }
-                Ok(Patch {
-                    index,
-                    flags,
-                    fields: Some(fields),
-                })
             })
             .map_err(|e| entry_error(ruby, &name, e))?;
             state.crypto.patches.push(patch);
@@ -702,6 +752,15 @@ impl Writer {
             }
             Ok(index)
         })
+    }
+
+    /// Takes the entry just begun back out of the archive, after a failure
+    /// that leaves it unusable: the crate forgets it and the next entry is
+    /// written over its bytes. Best effort; the error that brought us here
+    /// is the one reported.
+    fn withdraw(needs_gvl: bool, state: &mut State, zip: &mut Zip) {
+        let _ = maybe_without_gvl(needs_gvl, || with_zip!(zip, |w| w.abort_file()));
+        state.count = state.count.saturating_sub(1);
     }
 
     fn borrow(&self, ruby: &Ruby) -> Result<std::cell::RefMut<'_, State>, Error> {

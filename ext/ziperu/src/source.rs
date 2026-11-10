@@ -15,7 +15,11 @@ use std::fs;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use magnus::{prelude::*, value::Opaque, Error, RString, Ruby, Value};
+use magnus::{
+    prelude::*,
+    value::{BoxValue, Opaque},
+    Error, RString, Ruby, Value,
+};
 
 const BUF_SIZE: usize = 64 * 1024;
 
@@ -227,30 +231,51 @@ impl RubyIo {
 /// A Ruby exception (or non-local jump: `throw`, `Timeout`) raised inside
 /// the IO's `read`, `write`, `seek` or `flush`, carried through the Rust layers as an
 /// `io::Error` so that `errors::io_error` can re-raise the original.
-pub struct RubyError(pub Error);
+///
+/// The exception lives on the Rust heap until then, where the GC cannot
+/// see it, and Ruby may allocate on the way (a `BufWriter` flushing into
+/// the IO as it drops, say): `root` registers it with the GC so it is
+/// neither freed nor moved meanwhile.
+pub struct RubyError {
+    error: Error,
+    _root: Option<BoxValue<Value>>,
+}
+
+impl RubyError {
+    pub(crate) fn new(error: Error) -> Self {
+        let _root = error.value().map(BoxValue::new);
+        RubyError { error, _root }
+    }
+
+    /// The error to raise, releasing the root.
+    pub(crate) fn into_error(self) -> Error {
+        self.error
+    }
+}
 
 // SAFETY: created and consumed only under the GVL (a Ruby-backed source
-// or sink never runs with it released), so the `Value` inside is never touched
-// from another thread; the bounds are only there to fit in `io::Error`.
+// or sink never runs with it released), so the `Value` inside is never
+// touched, nor the root registered or released, from another thread; the
+// bounds are only there to fit in `io::Error`.
 unsafe impl Send for RubyError {}
 unsafe impl Sync for RubyError {}
 
 impl fmt::Debug for RubyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        fmt::Debug::fmt(&self.error, f)
     }
 }
 
 impl fmt::Display for RubyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        fmt::Display::fmt(&self.error, f)
     }
 }
 
 impl std::error::Error for RubyError {}
 
 pub(crate) fn ruby_io_error(err: Error) -> io::Error {
-    io::Error::other(RubyError(err))
+    io::Error::other(RubyError::new(err))
 }
 
 impl Read for RubyIo {

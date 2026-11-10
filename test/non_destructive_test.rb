@@ -56,14 +56,17 @@ class NonDestructiveTest < Minitest::Test
       assert_equal "changed", zf.comment
       assert_empty zf.verify
     end
-    # After the commit the object keeps reading the archive it opened.
+    # After the commit the object works on the archive it wrote, so what
+    # it lists is what is on disk there, and a later commit builds on it.
     Ziperu::File.open(@path, write: other) do |zf|
       zf.remove("one.txt")
       zf.commit
-      assert_equal %w[one.txt], zf.entries.map(&:name)
-      assert_equal "one", zf.read("one.txt")
+      assert_equal other, zf.name
+      assert_nil zf.write_to
+      assert_empty zf.entries
     end
     Ziperu::File.open(other) { |zf| assert_empty zf.entries }
+    assert_equal @before, File.binread(@path), "the archive opened is still untouched"
   end
 
   def test_write_to_accepts_a_pathname

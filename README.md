@@ -203,10 +203,17 @@ its classes (`Zip::File`, `Zip::Entry`, `Zip::Error`, ...) point at the
 exception messages, which only matters to code comparing against the
 string `"Zip::Entry"`.
 
+Gems that depend on rubyzip (roo, caxlsx, rubyXL and the like) still
+pull it in, but under Bundler ziperu's `zip.rb` comes first on the load
+path, so `require "zip"` loads ziperu and those gems run on it; rubyzip
+stays installed and unused. Checked with Bundler 2.3, 2.5 and 4.0, in
+either Gemfile order.
+
 > [!NOTE]
-> rubyzip and ziperu cannot both own the `Zip` constant. While another gem
-> still depends on rubyzip, use `require "ziperu"` and `Ziperu::` for the
-> code you have switched and leave `Zip::` to rubyzip.
+> Without Bundler, RubyGems loads whichever gem asks for `zip` first, and
+> rubyzip and ziperu cannot both own the `Zip` constant. There, use
+> `require "ziperu"` and `Ziperu::` for your own code and leave `Zip::` to
+> rubyzip.
 
 ziperu tracks the rubyzip 3.x API (`Ziperu::RUBYZIP_COMPAT_VERSION`), and
 diverges on purpose where rubyzip is lax: `InputStream` reads through the

@@ -104,6 +104,7 @@ module Ziperu
   # default.
   # Not in rubyzip.
   attr_accessor :max_entries,
+                :max_archive_size,
                 :max_total_size,
                 :max_entry_size,
                 :max_compression_ratio,
@@ -140,6 +141,12 @@ module Ziperu
     # so the total is a real bound on what can be extracted.
     @max_entries = nil
     @max_total_size = nil
+    # The most bytes read from a pipe or socket (an upload's `rack.input`,
+    # say) before the archive is rejected. Its central directory is at the
+    # end, so such an input is read whole before the other limits can be
+    # checked; this bounds the memory that takes. A file or seekable IO is
+    # never read whole and is not affected.
+    @max_archive_size = nil
     # The largest uncompressed size any one entry may declare.
     @max_entry_size = nil
     # The highest uncompressed-to-compressed size ratio any entry may

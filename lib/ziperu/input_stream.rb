@@ -199,7 +199,7 @@ module Ziperu
       end
 
       def open_archive(context, settings = ::Ziperu) # :nodoc:
-        check_limits(open_native(context), settings)
+        check_limits(open_native(context, settings), settings)
       end
 
       # Ziperu.max_entries / max_total_size, checked before any entry is
@@ -250,7 +250,7 @@ module Ziperu
         IOExtras.path_of(context)
       end
 
-      def open_native(context)
+      def open_native(context, settings = ::Ziperu)
         return Native::Archive.open_path(path_of(context)) if path_like?(context)
 
         # A StringIO's bytes are already in memory: snapshot them once rather
@@ -263,13 +263,27 @@ module Ziperu
           Native::Archive.open_io(context)
         else
           # A pipe or socket: there is no way back to the central directory
-          # once the data has gone past, so take it all.
-          bytes = context.read.to_s.b
+          # once the data has gone past, so take it all, up to
+          # `max_archive_size`.
+          bytes = read_bounded(context, settings.max_archive_size)
           raise SplitArchiveError if split_signature?(bytes)
 
           Native::Archive.open_bytes(bytes)
         end
       end
+
+      # All of `io`, or a LimitError as soon as it passes `limit` bytes.
+      def read_bounded(io, limit)
+        return io.read.to_s.b unless limit
+
+        bytes = +''.b
+        while (chunk = io.read(IOExtras::CHUNK_SIZE))
+          bytes << chunk
+          raise LimitError.new('an archive size', bytes.bytesize, limit) if bytes.bytesize > limit
+        end
+        bytes
+      end
+      private :read_bounded
 
       # The first part of a multi-part archive starts with a split-file
       # signature.

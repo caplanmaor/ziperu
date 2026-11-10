@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+Fixed:
+
+- A stream that fails part-way (`OutputStream.body` or `write_buffer`
+  whose block raises) is left unfinished, with no central directory, so
+  whoever receives it sees a broken archive. Before, it was finished, and
+  a download cut short by an error opened as a complete-looking zip with
+  an entry missing data. An archive at a path is still closed on failure,
+  as rubyzip does.
+- `Ziperu::File.open(path, write: "out.zip")`: an explicit `commit`
+  followed by more changes lost the entries of the first commit. After
+  the first commit the object now works on `out.zip` (`name` is that
+  path, `write_to` is nil), so later commits build on it; the original
+  is still never written.
+- `InputStream#read(0)` and `sysread(0)` part-way through an entry ended
+  it, losing the rest; they now return `""`.
+- Native work can be interrupted. `Timeout`, `Thread#raise`,
+  `Thread#kill` and Ctrl-C reach a long `read`, `extract_all`, `verify`
+  or a large `write` within a chunk (64 KiB to 1 MiB) instead of waiting
+  for it to finish, and leave the archive usable.
+- With `threads:`, `extract_all` stops starting new files once one has
+  failed, as it does on one thread.
+- After a ZipCrypto entry fails to start or to copy, it is taken back out
+  of the archive, rather than left as a Stored entry whose further data
+  would go in unencrypted.
+- A Ruby exception raised by an IO the core reads or writes is kept from
+  the garbage collector until it is re-raised.
+- `Ziperu.default_compression` can be set per archive like the other
+  settings (`File.open(path, default_compression: 0)`).
+- `OutputStream.estimated_size` takes the stream's settings as keywords
+  (`write_extended_timestamps: true`), as `body` does, and its docs say
+  how entries must be written for the estimate to hold.
+- `File.foreach` raises on an unknown keyword, as `File.new` does.
+
+Added:
+
+- `Ziperu.max_archive_size` (and the `max_archive_size:` keyword): the
+  most bytes read from a pipe or socket before the archive is rejected.
+  An archive's central directory is at its end, so such an input is read
+  whole before the other limits can be checked; this bounds the memory.
+- Small `OutputStream#write`s (under 16 KiB) keep the GVL rather than
+  releasing and re-acquiring it each time, which under contention could
+  mean waiting out another thread's time slice per write.
+
 - Per-archive settings: every `Ziperu.*` setting (the limits,
   `validate_entry_sizes`, `sort_entries`, `case_insensitive_match`,
   `write_zip64_support`, `write_extended_timestamps`, `unicode_names`,

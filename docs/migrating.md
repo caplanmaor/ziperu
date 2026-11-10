@@ -163,7 +163,8 @@ Everything here is additive: code that does not use it behaves as above.
   read-only: any change raises, and `close` never touches the file, where
   rubyzip's `open` rewrites the archive on close (and has lost content
   that way). `write: "other.zip"` writes the changes to a new archive and
-  leaves the one opened as it was.
+  leaves the one opened as it was; after that first commit the object
+  works on the new archive (its `name`), so later commits build on it.
 - **A password on the archive.** `Ziperu::File.open(path, password: "...")`
   (or `decrypter:`) makes `read`, `get_input_stream`, `extract`,
   `extract_all` and `verify` decrypt every entry, AES and ZipCrypto alike;

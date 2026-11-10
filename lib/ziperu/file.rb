@@ -46,7 +46,7 @@ module Ziperu
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-                   compression_level: ::Ziperu.default_compression,
+                   compression_level: nil,
                    suppress_extra_fields: false, password: nil, decrypter: nil,
                    write: true, threads: 1, metadata_encoding: nil, **settings)
       super()
@@ -107,7 +107,7 @@ module Ziperu
       @restore_ownership     = restore_ownership
       @restore_permissions   = restore_permissions
       @restore_times         = restore_times
-      @compression_level     = compression_level
+      @compression_level     = compression_level || @settings.default_compression
       @suppress_extra_fields = suppress_extra_fields
     end
 
@@ -127,7 +127,9 @@ module Ziperu
     end
 
     # The path changes are written to on commit (`write: path`), or nil
-    # when they go back into the archive opened.
+    # when they go back into the archive opened. After the first commit
+    # it is nil and `name` is that path: the object then works on the new
+    # archive, and the original stays as it was.
     # Not in rubyzip.
     attr_reader :write_to
 
@@ -205,7 +207,10 @@ module Ziperu
       def foreach(path_or_io, metadata_encoding: nil, **settings, &block)
         return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding, **settings) unless block
 
-        settings = Settings.take!(settings.dup)
+        unknown = settings.dup
+        settings = Settings.take!(unknown)
+        raise ArgumentError, "unknown keyword: #{unknown.keys.map(&:inspect).join(', ')}" unless unknown.empty?
+
         native = InputStream.open_archive(path_or_io, settings)
         begin
           native.each_entry do |meta|
@@ -557,6 +562,14 @@ module Ziperu
       # Only now are the changes on disk; until here the entries keep
       # their dirty state so a failed commit can be retried.
       @cdir.each(&:clean_up)
+      if @write_to
+        # From here on this object works on the archive just written:
+        # what it holds now includes the changes, and a later commit
+        # updates it rather than starting again from the original (which
+        # would drop what this commit wrote).
+        @name = @write_to
+        @write_to = nil
+      end
       initialize_cdir(@name)
     end
 

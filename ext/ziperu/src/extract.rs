@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use magnus::{
@@ -141,11 +142,9 @@ pub fn extract_entries(
             ))
         }
     };
-    let mut entries = Vec::with_capacity(specs.len());
     let mut parsed = Vec::with_capacity(specs.len());
     for spec in specs.into_iter() {
         let spec = RArray::try_convert(spec)?;
-        let entry: Value = spec.entry(0)?;
         let index: usize = spec.entry(1)?;
         let name: RString = spec.entry(2)?;
         let name = name
@@ -158,9 +157,6 @@ pub fn extract_entries(
         };
         let mode: Option<u32> = spec.entry(5)?;
         let directory: bool = spec.entry(6)?;
-        // Kept only to name the entry in an exception; `specs` keeps it
-        // alive, and nothing touches it without the GVL.
-        entries.push(entry);
         parsed.push(Spec {
             index,
             name,
@@ -177,7 +173,13 @@ pub fn extract_entries(
 
     let mut notices = match outcome {
         Ok(notices) => notices,
-        Err((i, failure)) => return Err(raise(ruby, entries[i], failure)),
+        Err((i, failure)) => {
+            // The entry object, to name in the exception, is fetched now
+            // the GVL is back: one held across the release could have
+            // been moved by compaction meanwhile.
+            let entry: Value = RArray::try_convert(specs.entry::<Value>(i as isize)?)?.entry(0)?;
+            return Err(raise(ruby, entry, failure));
+        }
     };
     notices.sort_by_key(|(index, _)| *index);
     let unsafe_kind = ruby.to_symbol("unsafe");
@@ -222,18 +224,34 @@ fn extract_all(
 
     // Each thread takes every `threads`th file, so a run of large ones
     // is shared out, and reads through its own handle on the archive.
+    // Once one fails the others stop before their next file, so that, as
+    // with one thread, little is written after the entry that failed (a
+    // file already in progress on another thread is finished). They also
+    // share the call's cancellation flag.
     let threads = threads.min(files.len());
+    let failed = AtomicBool::new(false);
+    let token = crate::gvl::token();
     let results: Vec<Outcome> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|t| {
                 let mut worker =
                     Extractor::new(extractor.archive.clone(), dest, enforce_size, on_exists);
                 worker.made.clone_from(&extractor.made);
+                let failed = &failed;
+                let token = token.clone();
                 scope.spawn(move || {
-                    for (i, spec) in files.iter().enumerate().skip(t).step_by(threads) {
-                        worker.extract(spec).map_err(|f| (files_from + i, f))?;
-                    }
-                    Ok(worker.notices)
+                    crate::gvl::with_token(token, || {
+                        for (i, spec) in files.iter().enumerate().skip(t).step_by(threads) {
+                            if failed.load(Ordering::Acquire) {
+                                break;
+                            }
+                            if let Err(f) = worker.extract(spec) {
+                                failed.store(true, Ordering::Release);
+                                return Err((files_from + i, f));
+                            }
+                        }
+                        Ok(worker.notices)
+                    })
                 })
             })
             .collect();
@@ -444,6 +462,7 @@ impl<'a> Extractor<'a> {
         let mut written = 0u64;
         let mut copy = |reader: &mut dyn Read| -> Result<(), Failure> {
             loop {
+                crate::gvl::check()?;
                 let n = reader.read(buf)?;
                 if n == 0 {
                     return Ok(());

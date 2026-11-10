@@ -20,6 +20,7 @@ module Ziperu
       force_entry_names_encoding validate_entry_sizes
       max_entries max_total_size max_entry_size max_compression_ratio
       append_in_place write_extended_timestamps source_date_epoch
+      default_compression max_archive_size
     ].freeze
 
     # Takes the settings out of `options` (leaving the other keywords) and

@@ -273,6 +273,11 @@ impl EntryReader {
         if inner.finished {
             return Ok(None);
         }
+        if maxlen == Some(0) {
+            // `read(0)` asks for nothing, which is not the end of the
+            // entry: below, an empty fill means exactly that.
+            return Ok(Some(ruby.str_new("")));
+        }
         let remaining = inner.size.map(|s| s - inner.consumed).unwrap_or(u64::MAX);
         let want = match maxlen {
             Some(n) => (n as u64).min(remaining),
@@ -351,6 +356,7 @@ fn fill(
     let mut buf = Vec::with_capacity(want.min(CHUNK as u64) as usize);
     let mut eof = false;
     while (buf.len() as u64) < want {
+        crate::gvl::check()?;
         let step = (want - buf.len() as u64).min(CHUNK as u64) as usize;
         let start = buf.len();
         buf.resize(start + step, 0);

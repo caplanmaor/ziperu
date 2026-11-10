@@ -13,15 +13,17 @@ module Ziperu
     #     e.add_directory("logs/")
     #   end
     #
-    # The archive must then be written the same way: stored entries with
-    # `Entry.new(name, size: n, compression_method: STORED)` (or
-    # `put_next_entry(name, nil, nil, STORED)` with the size set), deflated
-    # ones with a compressed size known from an earlier run, the names in
-    # the same encoding, no extra fields beyond the default extended
-    # timestamp (`Ziperu.write_extended_timestamps`, read when the
-    # estimate is made) and no comments. It mirrors what the native
-    # writer emits for a stream: a data descriptor after every file's
-    # data, zip64 records only for a 4 GiB entry or 65,535 entries.
+    # The archive must then be written the same way: each file through
+    # `put_next_entry(Entry.new(name, size: n, compression_method: STORED))`
+    # (or DEFLATED, with a compressed size known from an earlier run); an
+    # entry given without its size is written zip64-ready, 28 bytes more
+    # than estimated, so the size must be set. The names in the same
+    # encoding, no extra fields beyond the default extended timestamp, and
+    # no comments. Pass the stream's settings to `estimated_size` as
+    # keywords, as to `body` (`write_extended_timestamps: true`), so the
+    # estimate sees the same ones. It mirrors what the native writer emits
+    # for a stream: a data descriptor after every file's data, zip64
+    # records only for a 4 GiB entry or 65,535 entries.
     class SizeEstimator
       LOCAL_HEADER = 30
       CENTRAL_HEADER = 46
@@ -30,7 +32,8 @@ module Ziperu
       ZIP64_THRESHOLD = 0xFFFFFFFF
       ZIP64_ENTRY_THRESHOLD = 0xFFFF
 
-      def initialize
+      def initialize(settings = ::Ziperu)
+        @settings = settings
         @entries = 0
         @data = 0 # local headers, data and descriptors
         @central = 0
@@ -98,7 +101,7 @@ module Ziperu
       # The extra field the writer adds by default: the extended timestamp
       # (4 + 1 + 4 bytes).
       def default_fields(_name)
-        ::Ziperu.write_extended_timestamps ? 9 : 0
+        @settings.write_extended_timestamps ? 9 : 0
       end
     end
 
@@ -106,8 +109,10 @@ module Ziperu
       # The size an archive streamed with `body` or `write_buffer` will
       # come to; see SizeEstimator.
       # Not in rubyzip.
-      def estimated_size
-        estimator = SizeEstimator.new
+      def estimated_size(**settings)
+        estimator = SizeEstimator.new(Settings.take!(settings))
+        raise ArgumentError, "unknown keyword: #{settings.keys.map(&:inspect).join(', ')}" unless settings.empty?
+
         yield estimator
         estimator.size
       end

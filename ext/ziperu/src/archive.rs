@@ -18,7 +18,7 @@ use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
 use crate::errors::{busy_error, read_error, zip_read_error, IntoRuby};
-use crate::gvl::maybe_without_gvl;
+use crate::gvl::{maybe_without_gvl, Cancellable};
 use crate::rb::bytes_of;
 use crate::reader::{open_local_entry, EntryInfo, EntryReader};
 use crate::source::Source;
@@ -189,7 +189,7 @@ impl Archive {
         maybe_without_gvl(rb_self.needs_gvl, || {
             let options = ZipReadOptions::new().password(password.as_deref());
             let mut entry = archive.by_index_with_options(index, options)?;
-            io::copy(&mut entry, &mut io::sink())?;
+            io::copy(&mut Cancellable(&mut entry), &mut io::sink())?;
             Ok::<_, ZipError>(())
         })
         .map_err(|e| zip_read_error(ruby, e))
@@ -219,7 +219,7 @@ impl Archive {
         };
         maybe_without_gvl(rb_self.needs_gvl, || {
             let mut entry = open_local_entry(&mut source, &info, password.as_deref(), size)?;
-            io::copy(&mut entry, &mut io::sink())?;
+            io::copy(&mut Cancellable(&mut entry), &mut io::sink())?;
             Ok::<_, ZipError>(())
         })
         .map_err(|e| zip_read_error(ruby, e))
@@ -419,8 +419,10 @@ impl Archive {
         let mut entry = archive.by_index(index).rb(ruby)?;
         // A hint only: the declared size is untrusted and may be a lie.
         let mut buf = Vec::with_capacity(entry.size().min(CAPACITY_HINT_MAX) as usize);
-        maybe_without_gvl(rb_self.needs_gvl, || entry.read_to_end(&mut buf))
-            .map_err(|e| read_error(ruby, e))?;
+        maybe_without_gvl(rb_self.needs_gvl, || {
+            Cancellable(&mut entry).read_to_end(&mut buf)
+        })
+        .map_err(|e| read_error(ruby, e))?;
         Ok(ruby.str_from_slice(&buf))
     }
 

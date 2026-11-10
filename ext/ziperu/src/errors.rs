@@ -110,9 +110,12 @@ pub fn busy_error(ruby: &Ruby, what: &str) -> Error {
 }
 
 pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
+    if crate::gvl::is_cancelled(&err) {
+        return interrupted(ruby);
+    }
     // An exception from a Ruby IO source propagates unchanged.
     let err = match err.downcast::<RubyError>() {
-        Ok(ruby_err) => return ruby_err.0,
+        Ok(ruby_err) => return ruby_err.into_error(),
         Err(err) => err,
     };
     // The crate funnels its own errors through io::Error while reading.
@@ -153,6 +156,26 @@ pub fn read_error(ruby: &Ruby, err: io::Error) -> Error {
             decompression_error(ruby, &err.to_string())
         }
         _ => io_error(ruby, err),
+    }
+}
+
+/// Work cut short because Ruby interrupted the thread (see `gvl`): the
+/// interrupt is pending, and checking for it raises it (Timeout::Error,
+/// Interrupt, the exception of a `Thread#raise`), which is what the
+/// caller should see. Should there be none, a plain `Ziperu::Error`.
+pub fn interrupted(ruby: &Ruby) -> Error {
+    use magnus::rb_sys::AsRawValue;
+    let nil = ruby.qnil().as_raw();
+    // SAFETY: called with the GVL held; `protect` turns the exception that
+    // `rb_thread_check_ints` raises into an `Err` rather than a longjmp
+    // through Rust frames.
+    let pending = magnus::rb_sys::protect(|| {
+        unsafe { rb_sys::rb_thread_check_ints() };
+        nil
+    });
+    match pending {
+        Err(e) => e,
+        Ok(_) => Error::new(ruby.get_inner(&ERROR), "interrupted"),
     }
 }
 

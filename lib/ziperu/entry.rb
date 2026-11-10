@@ -156,7 +156,7 @@ module Ziperu
       zipfile = '', name = '', *legacy,
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
-      compression_level: ::Ziperu.default_compression,
+      compression_level: nil,
       time: nil, extra: ::Ziperu::ExtraField.new, zip64: nil, settings: ::Ziperu
     )
       super()
@@ -186,7 +186,7 @@ module Ziperu
       @original_name      = nil
       @comment            = comment || ''
       @compression_method = compression_method || DEFLATED
-      @compression_level  = compression_level || ::Ziperu.default_compression
+      @compression_level  = compression_level || @settings.default_compression
       @compressed_size    = compressed_size || 0
       @crc                = crc || 0
       @size               = size
@@ -904,7 +904,7 @@ module Ziperu
       @compressed_size = meta[:compressed_size]
       @crc = meta[:crc]
       @compression_method = meta[:compression_method]
-      @compression_level = ::Ziperu.default_compression
+      @compression_level = @settings.default_compression
       @fstype = meta[:fstype]
       @version = meta[:version_made_by]
       @external_file_attributes = meta[:external_attributes]
