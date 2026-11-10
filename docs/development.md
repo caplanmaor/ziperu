@@ -70,25 +70,11 @@ pure-Rust parts.
 ## Benchmarks
 
 `rake bench` runs [bench/bench.rb](../bench/bench.rb) with rubyzip and ziperu
-loaded side by side. On one Windows machine (Ruby 3.4, median of 5):
-
-| scenario | rubyzip 3.7.0 | ziperu 0.1.0 | speedup |
-|---|---:|---:|---:|
-| open and list 10000 entries | 298 ms | 130 ms | 2.3x |
-| read 1000 x 8 KB deflated entries | 196 ms | 23 ms | 8.4x |
-| InputStream over 1000 entries | 111 ms | 64 ms | 1.7x |
-| inflate one 64 MB entry | 106 ms | 54 ms | 2.0x |
-| extract_all 1000 entries | 984 ms | 459 ms | 2.1x |
-| write 1000 x 8 KB entries (OutputStream) | 89 ms | 39 ms | 2.3x |
-| deflate one 64 MB entry (OutputStream) | 245 ms | 58 ms | 4.3x |
-| open_buffer(String) and read 1000 entries | 69 ms | 15 ms | 4.5x |
-| Zip::File add 100 files and commit | 40 ms | 33 ms | 1.2x |
-
-Inflating and deflating are where the Rust core pays off. Listing a large
-central directory is dominated by building Ruby `Entry` objects, which both
-libraries do in Ruby. `extract_all` writes every entry in one native call
-(one open per file, with its mtime set on that handle) and is left bounded
-by file creation itself, which is slow on Windows.
+loaded side by side (`RUNS=5`, `QUICK=1` for small sizes). Labelling a pull
+request `bench`, or running the Bench workflow from the Actions tab, runs
+it on Linux, macOS and Windows and puts each table in the job summary.
+[benchmarks.md](benchmarks.md) is the published page: update it from such
+a run, naming the run, when a release changes the numbers.
 
 ## Releasing
 

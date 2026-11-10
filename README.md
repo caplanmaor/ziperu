@@ -224,27 +224,20 @@ rubyzip is pure Ruby and does per-entry work in Ruby objects. ziperu
 parses the central directory once in Rust and hands Ruby a flat metadata
 dump, reads entries in large chunks, copies unchanged entries byte for
 byte on `commit`, and releases the GVL while inflating from a file or
-String buffer and while deflating, so other Ruby threads keep running.
+String buffer and while deflating to a file, so other Ruby threads keep running.
 
-`rake bench` runs [bench/bench.rb](bench/bench.rb) with both libraries
-loaded. On one Windows machine (Ruby 3.4, median of 5):
+On GitHub's Linux runners (Ruby 3.4, median of 5), against rubyzip 3.7.0:
 
-| scenario | rubyzip 3.7.0 | ziperu 0.1.0 | speedup |
+| scenario | rubyzip | ziperu | speedup |
 |---|---:|---:|---:|
-| open and list 10000 entries | 298 ms | 130 ms | 2.3x |
-| read 1000 x 8 KB deflated entries | 196 ms | 23 ms | 8.4x |
-| InputStream over 1000 entries | 111 ms | 64 ms | 1.7x |
-| inflate one 64 MB entry | 106 ms | 54 ms | 2.0x |
-| extract_all 1000 entries | 984 ms | 459 ms | 2.1x |
-| write 1000 x 8 KB entries (OutputStream) | 89 ms | 39 ms | 2.3x |
-| deflate one 64 MB entry (OutputStream) | 245 ms | 58 ms | 4.3x |
-| open_buffer(String) and read 1000 entries | 69 ms | 15 ms | 4.5x |
-| Zip::File add 100 files and commit | 40 ms | 33 ms | 1.2x |
+| read 1000 x 8 KB deflated entries | 80 ms | 14 ms | 5.8x |
+| open and list 10000 entries | 135 ms | 58 ms | 2.3x |
+| deflate one 64 MB entry | 188 ms | 77 ms | 2.4x |
+| extract_all 1000 entries | 169 ms | 80 ms | 2.1x |
+| add 1000 files from disk (`threads: 4`) | 214 ms | 60 ms | 3.6x |
 
-Inflating and deflating are where the Rust core pays off. Listing a large
-central directory is dominated by building Ruby `Entry` objects, which both
-libraries do in Ruby (ziperu parses their extra fields and timestamps only
-when asked), and `extract_all` is bounded by file creation itself.
+macOS and Windows, every scenario, and which calls release the GVL (what
+Puma users ask about) are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Development
 

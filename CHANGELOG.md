@@ -21,6 +21,10 @@
   every platform, 3.1 and 3.2 best effort, ruby-head watched by a
   nightly, non-blocking CI job. CI now runs the suite on 4.0 too.
 - Every Ruby example in the README runs as a test.
+- Published benchmarks for Linux, macOS and Windows from one CI run
+  (docs/benchmarks.md), with threaded extract and add scenarios and a
+  table of which calls release the GVL; label a pull request `bench` to
+  rerun them.
 - The release workflow can push to rubygems.org itself through trusted
   publishing (OIDC, no API key), native gems before the source gem; it
   is off until the repository variable `RUBYGEMS_TRUSTED_PUBLISHING` is
