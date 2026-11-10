@@ -48,7 +48,7 @@ end
 
 # Fixtures are written once, by ziperu, into a scratch directory.
 class Fixtures
-  attr_reader :dir, :many_entries, :some_entries, :big_entry, :small_payload, :big_payload
+  attr_reader :dir, :many_entries, :some_entries, :big_entry, :small_payload, :big_payload, :source_files
 
   def initialize(dir)
     @dir = dir
@@ -71,6 +71,13 @@ class Fixtures
         zos.put_next_entry("file#{i}.txt")
         zos.write(@small_payload)
       end
+    end
+
+    # Distinct files, so compressing them is real work on every thread.
+    @source_files = Array.new(SOME) do |i|
+      path = File.join(dir, "src-#{i}.txt")
+      File.binwrite(path, @small_payload * 8 + i.to_s)
+      path
     end
 
     @big_entry = File.join(dir, 'big.zip')
@@ -127,6 +134,22 @@ SCENARIOS = {
     File.binwrite(src, fx.small_payload) unless File.exist?(src)
     lib::File.open(out, create: true) do |zf|
       (SOME / 10).times { |i| zf.add("file#{i}.txt", src) }
+    end
+  end,
+  # ziperu only: the same work on four threads, against rubyzip's one.
+  "extract_all #{SOME} entries (ziperu: threads: 4)" => lambda do |lib, fx|
+    dest = File.join(fx.dir, "extract4-#{lib.name.downcase}")
+    FileUtils.rm_rf(dest)
+    opts = lib.equal?(Ziperu) ? { threads: 4 } : {}
+    lib::File.open(fx.some_entries) { |zf| zf.extract_all(dest, **opts) }
+  end,
+  "add #{SOME} files from disk and commit (ziperu: threads: 4)" => lambda do |lib, fx|
+    out = File.join(fx.dir, "add4-#{lib.name.downcase}.zip")
+    FileUtils.rm_f(out)
+    srcs = fx.source_files
+    opts = lib.equal?(Ziperu) ? { threads: 4 } : {}
+    lib::File.open(out, create: true, **opts) do |zf|
+      srcs.each_with_index { |src, i| zf.add("file#{i}.txt", src) }
     end
   end
 }.freeze
