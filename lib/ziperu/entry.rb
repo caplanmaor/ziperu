@@ -40,7 +40,21 @@ module Ziperu
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
                   :internal_file_attributes, :local_header_offset # :nodoc:
 
-    attr_reader :compression_level, :filepath, :source_io # :nodoc:
+    attr_reader :compression_level # :nodoc:
+
+    # Where the data is (see Entry::Source). The four readers below are
+    # what the rest of the library, and rubyzip-era callers, ask it.
+    attr_reader :source # :nodoc:
+
+    # The path given to `add`, for an entry whose data is still on disk.
+    def filepath # :nodoc:
+      @source.path
+    end
+
+    # The IO given to `add`, for an entry whose data is still in it.
+    def source_io # :nodoc:
+      @source.io
+    end
 
     # The per-entry zip64 choice given to `Entry.new`, `put_next_entry` or
     # `get_output_stream`: true, false, or nil for the default.
@@ -50,7 +64,7 @@ module Ziperu
     # IO given to `add`, to be streamed in when the archive is written.
     # Until then the entry reads and extracts from that source.
     def pending_data? # :nodoc:
-      !@filepath.nil? || !@source_io.nil?
+      @source.pending?
     end
 
     # Whether the entry's bytes are those of the native archive `native`:
@@ -58,7 +72,7 @@ module Ziperu
     def backed_by?(native) # :nodoc:
       return false if pending_data?
 
-      # `archive`, not `@archive`: it reopens the archive the owning
+      # Through `archive`, which reopens the archive the owning
       # Ziperu::File released on close, as rubyzip lets entries be read then.
       current = archive
       !current.nil? && current.equal?(native)
@@ -69,10 +83,9 @@ module Ziperu
     # extended timestamp's atime/ctime live) are merged in on first use,
     # rather than by seeking to every local header when the archive opens.
     def extra
-      if @archive && !@local_extra_merged
+      if @source.stored? && !@local_extra_merged
         @local_extra_merged = true
-        local = @index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)
-        parsed_extra.merge(local, local: true)
+        parsed_extra.merge(@source.local_extra(@local_header_offset), local: true)
         # Edits made through this object (`extra.merge`, `extra.delete`)
         # leave no other trace; the bytes are compared at commit.
         @extra_snapshot = extra_bytes
@@ -103,16 +116,7 @@ module Ziperu
     # The native archive this entry was read from, reopened if the owning
     # Ziperu::File has released it (rubyzip lets entries be read after `close`).
     def archive # :nodoc:
-      if @archive&.closed? && @zipfile.kind_of?(::Ziperu::File)
-        reopened = @zipfile.native_archive
-        unless still_at_place?(reopened)
-          where = @index ? "at index #{@index} of" : 'in'
-          raise Error, "entry '#{@original_name}' is no longer #{where} #{@zipfile.name}"
-        end
-
-        @archive = reopened
-      end
-      @archive
+      @source.native(@local_header_offset)
     end
 
     attr_writer :size # :nodoc:
@@ -121,7 +125,9 @@ module Ziperu
     # entry that is not (yet) in an archive, or that the native core cannot
     # address by index: one of several records under the same name, which
     # is read from its local header offset instead.
-    attr_reader :index # :nodoc:
+    def index # :nodoc:
+      @source.index
+    end
 
     # Validated here rather than when the archive is written, so a bad
     # value fails at the call site (rubyzip writes a corrupt header).
@@ -172,8 +178,7 @@ module Ziperu
       @fstype = ::Ziperu::RUNNING_ON_WINDOWS && !::Ziperu.source_date_epoch ? ::Ziperu::FSTYPE_FAT : ::Ziperu::FSTYPE_UNIX
 
       @zipfile            = zipfile
-      @archive            = nil
-      @index              = nil
+      @source             = Source::NONE
       @original_name      = nil
       @comment            = comment || ''
       @compression_method = compression_method || DEFLATED
@@ -360,16 +365,15 @@ module Ziperu
     # inspected but not read.
     def marshal_dump # :nodoc:
       instance_variables.each_with_object({}) do |ivar, h|
-        next if ivar == :@archive
         next if ivar == :@zipfile && @zipfile.kind_of?(::Ziperu::File)
 
-        h[ivar] = instance_variable_get(ivar)
+        h[ivar] = ivar == :@source ? @source.detached : instance_variable_get(ivar)
       end
     end
 
     def marshal_load(ivars) # :nodoc:
       ivars.each { |ivar, value| instance_variable_set(ivar, value) }
-      @archive = nil
+      @source ||= Source::NONE
       @zipfile = nil unless instance_variable_defined?(:@zipfile)
     end
 
@@ -457,7 +461,7 @@ module Ziperu
     # Where a symlink entry points: the link on disk for one being added,
     # the stored content for one read from an archive.
     def symlink_target # :nodoc:
-      return ::File.readlink(@filepath) if @filepath
+      return ::File.readlink(filepath) if filepath
 
       get_raw_input_string
     end
@@ -466,28 +470,12 @@ module Ziperu
     # Optional decrypter can be provided for an encrypted entry
     # Warning: may behave weird with symlinks.
     def get_input_stream(decrypter: nil, &block)
-      return open_pending_data(&block) if pending_data? && ftype != :directory
+      # Not yet in the archive: the file on disk, the link's target, or
+      # the IO given to `add`.
+      return @source.open(ftype, &block) if pending_data? && ftype != :directory
 
       open_input_stream(decrypter: decrypter || default_decrypter, &block)
     end
-
-    # An IO over the data of an entry not yet in the archive (see
-    # `pending_data?`): the file on disk, the link's target, or the IO
-    # given to `add`, read from the top (a pipe or socket cannot be
-    # rewound and is read once).
-    def open_pending_data(&block)
-      io =
-        if @source_io
-          @source_io.rewind if ::Ziperu::IOExtras.seekable?(@source_io)
-          @source_io
-        elsif ftype == :symlink
-          ::StringIO.new(::File.readlink(@filepath))
-        else
-          return ::File.open(@filepath, 'rb', &block)
-        end
-      block ? yield(io) : io
-    end
-    private :open_pending_data
 
     def gather_fileinfo_from_srcpath(src_path) # :nodoc:
       stat   = file_stat(src_path)
@@ -513,9 +501,9 @@ module Ziperu
                  raise "unknown file type: #{src_path.inspect} #{stat.inspect}"
                end
 
-      @filepath = src_path
+      @source = Source::Path.new(src_path, @source.stored)
       @size = stat.size
-      get_extra_attributes_from_path(@filepath)
+      get_extra_attributes_from_path(src_path)
     end
 
     # `add` from an IO rather than a path: the data is streamed from the
@@ -526,7 +514,7 @@ module Ziperu
       end
 
       @ftype = :file
-      @source_io = io
+      @source = Source::IO.new(io, @source.stored)
       @size = io.size if io.respond_to?(:size) && !io.size.nil?
       @time = ::Ziperu.default_entry_time
     end
@@ -577,10 +565,10 @@ module Ziperu
       # A symlink's target goes into the header call, whether the link is
       # new or a copy that has to be written afresh (an edit, or extra
       # fields the raw copy would lose).
-      return :header if ftype == :directory || (ftype == :symlink && (@filepath || needs_restream?))
+      return :header if ftype == :directory || (ftype == :symlink && (filepath || needs_restream?))
       return :restream if pending_data?
 
-      if changed? || @index.nil? || loses_fields_on_raw_copy?
+      if changed? || index.nil? || loses_fields_on_raw_copy?
         check_restreamable!
         return :restream
       end
@@ -641,16 +629,6 @@ module Ziperu
                    'another record can only be read'
     end
     private :check_restreamable!
-
-    # Whether the reopened archive still holds this entry where it was.
-    def still_at_place?(reopened) # :nodoc:
-      name = @original_name.b
-      return @index < reopened.entry_count && reopened.entry_meta(@index)[:name] == name if @index
-
-      reopened.entries.any? do |meta|
-        meta[:index].nil? && meta[:header_offset] == @local_header_offset && meta[:name] == name
-      end
-    end
 
     def parent_as_string # :nodoc:
       entry_name  = name.chomp('/')
@@ -721,18 +699,18 @@ module Ziperu
     end
 
     def extra_size # :nodoc:
-      return extra.local_size if @archive.nil? || pending_data?
+      return extra.local_size if !@source.stored? || pending_data?
 
-      (@index ? archive.local_extra(@index) : archive.local_extra_at(@local_header_offset)).bytesize
+      @source.local_extra(@local_header_offset).bytesize
     end
 
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
       check_in_archive!(archive)
       # A record without an index is read through the stream.
-      return open_input_stream(enforce_size: true, &:read) if @index.nil?
+      return open_input_stream(enforce_size: true, &:read) if index.nil?
 
-      archive.read_entry(@index)
+      archive.read_entry(index)
     rescue Native::SizeLimitError
       raise EntrySizeError, self
     end
@@ -741,7 +719,7 @@ module Ziperu
     # one: in a single native call when the entry is in an archive and its
     # declared size is to be trusted, through a stream otherwise.
     def read_all # :nodoc:
-      if !pending_data? && @archive && !encrypted? && ::Ziperu.validate_entry_sizes
+      if !pending_data? && @source.stored? && !encrypted? && ::Ziperu.validate_entry_sizes
         get_raw_input_string
       else
         get_input_stream(&:read)
@@ -764,7 +742,7 @@ module Ziperu
         return ::Ziperu::NullInputStream
       end
 
-      check_in_archive!(@archive)
+      check_in_archive!(@source.stored)
 
       # No offset: get_next_stream_entry positions by index, and resolving
       # an offset would walk the whole central directory on every read.
@@ -881,8 +859,6 @@ module Ziperu
       @version                   = VERSION_MADE_BY
 
       @ftype           = nil
-      @filepath        = nil
-      @source_io       = nil
       @gp_flags        = 0
       if ::Ziperu.unicode_names
         @gp_flags |= EFS
@@ -908,8 +884,6 @@ module Ziperu
       @zip64 = nil
       set_default_vars_values
       @zipfile = zipfile
-      @archive = archive
-      @index = meta[:index]
       # Names and comments are the stored bytes. They become UTF-8 when the
       # entry's language-encoding flag says so (rubyzip leaves them binary),
       # or whatever `Ziperu.force_entry_names_encoding` names; otherwise
@@ -918,6 +892,7 @@ module Ziperu
       # the archive knows the entry by.
       @gp_flags = meta[:flags]
       @original_name = meta[:name]
+      @source = archive ? Source::Archive.new(archive, zipfile, meta[:index], @original_name) : Source::NONE
       @name = decode_stored_text(@original_name.dup, metadata_encoding, meta[:extra])
       @name.tr!('\\', '/')
       @size = meta[:size]
@@ -1043,3 +1018,5 @@ module Ziperu
     end
   end
 end
+
+require_relative 'entry/source'
