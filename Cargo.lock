@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "ziperu"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "crc32fast",
  "flate2",
