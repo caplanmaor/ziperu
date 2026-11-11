@@ -82,6 +82,10 @@ require_relative "ziperu/size_estimator"
 #     c.unicode_names = true
 #   end
 module Ziperu
+  # Loaded on first use, so net/http is only required by those who read
+  # archives over HTTP.
+  autoload :RemoteIO, ::File.expand_path('ziperu/remote_io', __dir__)
+
   # Used by the ported Deflater only; kept because rubyzip exposes it.
   ZLIB_FLUSHING_STRATEGY = defined?(JRUBY_VERSION) ? Zlib::SYNC_FLUSH : Zlib::NO_FLUSH
 

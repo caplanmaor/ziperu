@@ -13,6 +13,7 @@ mod rb;
 mod reader;
 mod sink;
 mod source;
+mod stream;
 mod stream_stats;
 mod writer;
 mod zipcrypto;
@@ -43,15 +44,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         method!(archive::Archive::has_duplicate_names, 0),
     )?;
     archive.define_method("comment", method!(archive::Archive::comment, 0))?;
-    archive.define_method("total_size", method!(archive::Archive::total_size, 0))?;
-    archive.define_method(
-        "max_entry_size",
-        method!(archive::Archive::max_entry_size, 0),
-    )?;
-    archive.define_method(
-        "max_compression_ratio",
-        method!(archive::Archive::max_compression_ratio, 0),
-    )?;
+    archive.define_method("limits", method!(archive::Archive::limits, 0))?;
     archive.define_method("verify_entry", method!(archive::Archive::verify_entry, 2))?;
     archive.define_method(
         "verify_entry_at",
@@ -73,7 +66,16 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     reader.define_method("eof?", method!(reader::EntryReader::is_eof, 0))?;
     reader.define_method("read", method!(reader::EntryReader::read, 1))?;
     reader.define_method("rewind", method!(reader::EntryReader::rewind, 0))?;
+    reader.define_method("seek", method!(reader::EntryReader::seek, 1))?;
     reader.define_method("close", method!(reader::EntryReader::close, 0))?;
+
+    let stream = native.define_class("StreamReader", ruby.class_object())?;
+    stream.define_singleton_method("open", function!(stream::StreamReader::new, 3))?;
+    stream.define_method("next_entry", method!(stream::StreamReader::next_entry, 0))?;
+    stream.define_method("read", method!(stream::StreamReader::read, 1))?;
+    stream.define_method("eof?", method!(stream::StreamReader::is_eof, 0))?;
+    stream.define_method("trailer", method!(stream::StreamReader::trailer, 0))?;
+    stream.define_method("close", method!(stream::StreamReader::close, 0))?;
 
     let writer = native.define_class("Writer", ruby.class_object())?;
     writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;
@@ -94,6 +96,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 4))?;
     writer.define_method("copy_zipcrypto", method!(writer::Writer::copy_zipcrypto, 4))?;
     writer.define_method("comment=", method!(writer::Writer::set_comment, 1))?;
+    writer.define_method("rollback_entry", method!(writer::Writer::rollback_entry, 0))?;
     writer.define_method("finish", method!(writer::Writer::finish, 0))?;
     writer.define_method("closed?", method!(writer::Writer::is_closed, 0))?;
 

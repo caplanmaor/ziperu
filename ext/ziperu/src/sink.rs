@@ -34,6 +34,24 @@ impl Sink {
         self.write_all(bytes)
     }
 
+    /// Makes `len` the end of what was written: an entry taken back out
+    /// (`Writer::rollback_entry`) can leave bytes past the central
+    /// directory that a shorter archive did not overwrite.
+    pub(crate) fn end_at(&mut self, len: u64) -> io::Result<()> {
+        match self {
+            Sink::File(_) => self.set_len(len),
+            Sink::Memory(c) => {
+                c.get_mut().truncate(len as usize);
+                Ok(())
+            }
+            Sink::Ruby(w) => {
+                w.flush()?;
+                w.get_mut().end = len;
+                Ok(())
+            }
+        }
+    }
+
     /// Cuts a file off at `len`; a no-op for the other kinds.
     pub(crate) fn set_len(&mut self, len: u64) -> io::Result<()> {
         if let Sink::File(f) = self {
@@ -105,10 +123,15 @@ impl Seek for Sink {
 pub struct RubyOut {
     io: Opaque<Value>,
     attached: Arc<AtomicBool>,
+    /// Set once a call on the IO has raised. From then on the sink takes
+    /// nothing more: the crate, recovering from the error, would write
+    /// again what the IO may already have half taken, and the Writer
+    /// refuses every later call (see `Writer::with_state`).
+    broken: Arc<AtomicBool>,
     /// Where the next write or read goes.
     pos: u64,
     /// One past the furthest byte written: the archive's end.
-    end: u64,
+    pub(crate) end: u64,
     flushable: bool,
     /// False for a pipe, socket or response body: writes go out in order
     /// and nothing is ever seeked to.
@@ -118,11 +141,17 @@ pub struct RubyOut {
 const SEEK_SET: i64 = 0;
 
 impl RubyOut {
-    pub(crate) fn new(io: Value, attached: Arc<AtomicBool>, seekable: bool) -> Result<Self, Error> {
+    pub(crate) fn new(
+        io: Value,
+        attached: Arc<AtomicBool>,
+        broken: Arc<AtomicBool>,
+        seekable: bool,
+    ) -> Result<Self, Error> {
         Ok(Self {
             flushable: io.respond_to("flush", false)?,
             io: Opaque::from(io),
             attached,
+            broken,
             pos: 0,
             end: 0,
             seekable,
@@ -134,6 +163,9 @@ impl RubyOut {
     fn value(&self) -> io::Result<Option<Value>> {
         if !self.attached.load(Ordering::Acquire) {
             return Ok(None);
+        }
+        if self.broken.load(Ordering::Acquire) {
+            return Err(io::Error::other("the IO raised earlier"));
         }
         let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Some(ruby.get_inner(self.io)))
@@ -149,7 +181,7 @@ impl RubyOut {
         };
         if self.seekable {
             io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
-                .map_err(ruby_io_error)?;
+                .map_err(|e| self.fail(e))?;
         }
         Ok(Some(io))
     }
@@ -164,9 +196,9 @@ impl RubyOut {
         if !self.seekable {
             return Ok(());
         }
-        if io.respond_to("truncate", false).map_err(ruby_io_error)? {
+        if io.respond_to("truncate", false).map_err(|e| self.fail(e))? {
             io.funcall::<_, _, Value>("truncate", (self.end as i64,))
-                .map_err(ruby_io_error)?;
+                .map_err(|e| self.fail(e))?;
         }
         Ok(())
     }
@@ -179,6 +211,14 @@ impl RubyOut {
     }
 }
 
+impl RubyOut {
+    /// The error a call on the IO raised, noting that the IO is broken.
+    fn fail(&self, err: Error) -> io::Error {
+        self.broken.store(true, Ordering::Release);
+        ruby_io_error(err)
+    }
+}
+
 impl Write for RubyOut {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
@@ -188,7 +228,7 @@ impl Write for RubyOut {
             Some(io) => {
                 let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
                 let chunk = ruby.str_from_slice(buf);
-                let written: Value = io.funcall("write", (chunk,)).map_err(ruby_io_error)?;
+                let written: Value = io.funcall("write", (chunk,)).map_err(|e| self.fail(e))?;
                 // `IO#write` returns the byte count; an IO-like object may
                 // return anything else, in which case the whole buffer
                 // counts as written.
@@ -213,7 +253,7 @@ impl Write for RubyOut {
     fn flush(&mut self) -> io::Result<()> {
         if let (true, Some(io)) = (self.flushable, self.value()?) {
             io.funcall::<_, _, Value>("flush", ())
-                .map_err(ruby_io_error)?;
+                .map_err(|e| self.fail(e))?;
         }
         Ok(())
     }
@@ -227,7 +267,7 @@ impl Read for RubyOut {
         if buf.is_empty() {
             return Ok(0);
         }
-        let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(ruby_io_error)?;
+        let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(|e| self.fail(e))?;
         let Some(chunk) = chunk else {
             return Ok(0);
         };

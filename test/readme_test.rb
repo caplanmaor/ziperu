@@ -4,13 +4,17 @@ require_relative "test_helper"
 require "tmpdir"
 require "json"
 require "ziperu/rails_streaming"
+require "net/http"
+require_relative "support/range_server"
 
 # Every Ruby example in README.md, run as written. Each block runs in a
 # directory of its own holding the files the examples name (archive.zip,
 # secret.zip, public/ ...), with the free variables they use (`csv`,
 # `socket`, `params` ...) defined. The only rewrites: a `{ |x| ... }`
-# placeholder body becomes empty, and the one absolute path is made
-# relative. A README example that stops working fails here.
+# placeholder body becomes empty, the one absolute path is made
+# relative, and `require "ziperu/replace_rubyzip"` is left out (it changes
+# `require` for the whole process; replace_rubyzip_test.rb runs it in
+# processes of its own). A README example that stops working fails here.
 class ReadmeTest < Minitest::Test
   include TestHelper
 
@@ -101,6 +105,42 @@ class ReadmeTest < Minitest::Test
       @processed << [name, data]
     end
 
+    # An object store's response body: read forward only.
+    class Body
+      def initialize(bytes)
+        @io = StringIO.new(bytes)
+      end
+
+      def read(*args)
+        @io.read(*args)
+      end
+    end
+
+    def s3_object
+      Struct.new(:body).new(Body.new(File.binread(File.join(@dir, "archive.zip"))))
+    end
+
+    # The archive.zip fixture, served over HTTP with Range support.
+    def url
+      @server ||= RangeServer.new(File.binread(File.join(@dir, "archive.zip")))
+      @server.url
+    end
+
+    def stop
+      @server&.stop
+    end
+
+    # What the rollback example downloads: one of them fails.
+    def files
+      { "a.txt" => "ok", "missing.txt" => "fail", "c.txt" => "ok" }
+    end
+
+    def fetch(url)
+      raise Net::HTTPError.new("404 Not Found", nil) if url == "fail"
+
+      yield "data"
+    end
+
     def run(code, line)
       instance_eval(code, README, line)
     end
@@ -121,10 +161,15 @@ class ReadmeTest < Minitest::Test
     define_method("test_readme_block_at_line_#{line}") do
       code = code.gsub(/\{ \|(\w+)\| \.\.\. \}/) { "{ |#{Regexp.last_match(1)}| }" }
                  .gsub('"/var/log/', '"var/log/')
+                 .gsub('require "ziperu/replace_rubyzip"', 'nil')
       ctx = Context.new(@dir)
       result = nil
-      Dir.chdir(@dir) { capture_io { result = ctx.run(code, line) } }
-      check_result(result)
+      begin
+        Dir.chdir(@dir) { capture_io { result = ctx.run(code, line) } }
+        check_result(result)
+      ensure
+        ctx.stop
+      end
       check_controller(ctx)
       check_archives
     end
@@ -161,6 +206,10 @@ class ReadmeTest < Minitest::Test
         z.write("old")
         z.put_next_entry("manifest.json")
         z.write("{}")
+      end
+      Ziperu::OutputStream.open("scans.zip") do |z|
+        z.put_next_entry("scan.pdf", nil, nil, Ziperu::Entry::STORED)
+        z.write("%PDF" + ("." * 4000))
       end
       FileUtils.mkdir_p("var/log/app")
       File.write("var/log/app/today.log", "today")

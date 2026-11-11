@@ -7,7 +7,7 @@
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 
 use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
@@ -17,7 +17,7 @@ use zip::read::{ZipFileEntry, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
-use crate::errors::{busy_error, read_error, zip_read_error, IntoRuby};
+use crate::errors::{busy_error, header_error, read_error, zip_read_error, IntoRuby};
 use crate::gvl::{maybe_without_gvl, Cancellable};
 use crate::rb::bytes_of;
 use crate::reader::{open_local_entry, EntryInfo, EntryReader};
@@ -56,7 +56,11 @@ impl Archive {
     }
 
     pub fn open_bytes(ruby: &Ruby, bytes: RString) -> Result<Self, Error> {
-        Self::from_source(ruby, Source::memory(bytes_of(bytes)))
+        // SAFETY: copied out at once into the Arc, with the GVL held and
+        // no Ruby call in between: one copy, rather than a Vec and then
+        // the Arc it is moved into (twice the archive's size, briefly).
+        let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(unsafe { bytes.as_slice() });
+        Self::from_source(ruby, Source::memory(shared))
     }
 
     /// Any seekable IO-like Ruby object; read lazily, never copied.
@@ -130,50 +134,45 @@ impl Archive {
         Ok(rb_self.archive(ruby)?.has_duplicate_names())
     }
 
-    /// Sum of the declared uncompressed sizes, for `Ziperu.max_total_size`.
-    pub fn total_size(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
+    /// What the open-time limits look at, in one pass:
+    /// `[records, total_size, largest_size, highest_ratio]`.
+    ///
+    /// Every record counts, including several under one name. The crate's
+    /// parsed view keeps only the last record of each name, but `entries`,
+    /// `InputStream` and `extract_all` reach every one of them, so the
+    /// limits must too: otherwise a bomb hides behind a harmless entry of
+    /// the same name.
+    ///
+    /// An entry declaring data but no compressed bytes has an infinite
+    /// ratio. The archive's overall ratio can be no higher than its
+    /// highest entry's, so that bounds it too.
+    pub fn limits(ruby: &Ruby, rb_self: &Self) -> Result<(usize, u64, u64, f64), Error> {
         let archive = rb_self.archive(ruby)?;
-        let meta = archive.metadata();
-        let mut total: u64 = 0;
-        for i in 0..meta.len() {
-            total = total.saturating_add(meta.entry(i).rb(ruby)?.size());
-        }
-        Ok(total)
-    }
-
-    /// The largest uncompressed size any entry declares, for
-    /// `Ziperu.max_entry_size`.
-    pub fn max_entry_size(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
-        let archive = rb_self.archive(ruby)?;
-        let meta = archive.metadata();
-        let mut largest = 0;
-        for i in 0..meta.len() {
-            largest = largest.max(meta.entry(i).rb(ruby)?.size());
-        }
-        Ok(largest)
-    }
-
-    /// The highest declared uncompressed-to-compressed size ratio among
-    /// the entries, for `Ziperu.max_compression_ratio`. An entry declaring
-    /// data but no compressed bytes is infinite. Also the bound on the
-    /// archive's overall ratio, which can be no higher than its highest
-    /// entry's.
-    pub fn max_compression_ratio(ruby: &Ruby, rb_self: &Self) -> Result<f64, Error> {
-        let archive = rb_self.archive(ruby)?;
-        let meta = archive.metadata();
-        let mut worst: f64 = 0.0;
-        for i in 0..meta.len() {
-            let entry = meta.entry(i).rb(ruby)?;
-            let (size, csize) = (entry.size(), entry.compressed_size());
-            if size == 0 {
-                continue;
+        let mut summary = LimitSummary::default();
+        if archive.has_duplicate_names() {
+            let dir_start = archive.central_directory_start();
+            let mut raw = archive.clone().into_inner();
+            drop(archive);
+            let records = maybe_without_gvl(rb_self.needs_gvl, || {
+                walk_central_directory(&mut raw, dir_start)
+            })
+            .map_err(|e| header_error(ruby, e))?;
+            for record in &records {
+                summary.add(record.size, record.compressed_size);
             }
-            if csize == 0 {
-                return Ok(f64::INFINITY);
+        } else {
+            let meta = archive.metadata();
+            for i in 0..meta.len() {
+                let entry = meta.entry(i).rb(ruby)?;
+                summary.add(entry.size(), entry.compressed_size());
             }
-            worst = worst.max(size as f64 / csize as f64);
         }
-        Ok(worst)
+        Ok((
+            summary.records,
+            summary.total,
+            summary.largest,
+            summary.ratio,
+        ))
     }
 
     /// Inflates entry `index` to nowhere so the crate checks its CRC (and
@@ -216,6 +215,7 @@ impl Archive {
             size,
             compressed_size,
             crc32: crc,
+            method: None,
         };
         maybe_without_gvl(rb_self.needs_gvl, || {
             let mut entry = open_local_entry(&mut source, &info, password.as_deref(), size)?;
@@ -267,7 +267,7 @@ impl Archive {
             let records = maybe_without_gvl(rb_self.needs_gvl, || {
                 walk_central_directory(&mut raw, dir_start)
             })
-            .rb(ruby)?;
+            .map_err(|e| header_error(ruby, e))?;
             let mut by_offset = HashMap::with_capacity(meta.len());
             for i in 0..meta.len() {
                 let entry = meta.entry(i).rb(ruby)?;
@@ -288,7 +288,10 @@ impl Archive {
                 })
                 .collect::<ZipResult<Vec<_>>>()
         })
-        .rb(ruby)?;
+        .map_err(|e| match e {
+            ZipError::Io(e) => header_error(ruby, e),
+            other => crate::errors::zip_error(ruby, other),
+        })?;
         for (i, record) in records.iter().enumerate() {
             let entry = meta.entry(i).rb(ruby)?;
             emit(entry_hash(ruby, &keys, i, &entry, record)?)?;
@@ -303,7 +306,8 @@ impl Archive {
         let mut raw = small_source(&archive);
         drop(archive);
         let entry = meta.entry(index).rb(ruby)?;
-        let record = raw_central_record(&mut raw, entry.central_header_start()).rb(ruby)?;
+        let record = raw_central_record(&mut raw, entry.central_header_start())
+            .map_err(|e| header_error(ruby, e))?;
         entry_hash(ruby, &MetaKeys::new(ruby), index, &entry, &record)
     }
 
@@ -325,7 +329,8 @@ impl Archive {
         let out = ruby.ary_new_capa(end.saturating_sub(index));
         for i in index..end {
             let entry = meta.entry(i).rb(ruby)?;
-            let record = raw_central_record(&mut raw, entry.central_header_start()).rb(ruby)?;
+            let record = raw_central_record(&mut raw, entry.central_header_start())
+                .map_err(|e| header_error(ruby, e))?;
             out.push(entry_hash(ruby, &keys, i, &entry, &record)?)?;
         }
         Ok(out)
@@ -339,7 +344,7 @@ impl Archive {
         let header_start = archive.metadata().entry(index).rb(ruby)?.header_start();
         let mut raw = small_source(&archive);
         drop(archive);
-        let extra = raw_local_extra(&mut raw, header_start).rb(ruby)?;
+        let extra = raw_local_extra(&mut raw, header_start).map_err(|e| header_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
     }
 
@@ -350,7 +355,7 @@ impl Archive {
         header_offset: u64,
     ) -> Result<RString, Error> {
         let mut raw = rb_self.small_source(ruby)?;
-        let extra = raw_local_extra(&mut raw, header_offset).rb(ruby)?;
+        let extra = raw_local_extra(&mut raw, header_offset).map_err(|e| header_error(ruby, e))?;
         Ok(ruby.str_from_slice(&extra))
     }
 
@@ -399,6 +404,7 @@ impl Archive {
             size,
             compressed_size,
             crc32: crc,
+            method: None,
         };
         EntryReader::open_at(
             ruby,
@@ -443,6 +449,31 @@ impl Archive {
             on_exists,
         };
         crate::extract::extract_entries(ruby, archive, rb_self.needs_gvl, dest, specs, options)
+    }
+}
+
+/// The figures `Archive::limits` returns.
+#[derive(Default)]
+struct LimitSummary {
+    records: usize,
+    total: u64,
+    largest: u64,
+    ratio: f64,
+}
+
+impl LimitSummary {
+    fn add(&mut self, size: u64, compressed_size: u64) {
+        self.records += 1;
+        self.total = self.total.saturating_add(size);
+        self.largest = self.largest.max(size);
+        if size > 0 {
+            let ratio = if compressed_size == 0 {
+                f64::INFINITY
+            } else {
+                size as f64 / compressed_size as f64
+            };
+            self.ratio = self.ratio.max(ratio);
+        }
     }
 }
 
@@ -496,7 +527,7 @@ fn walk_central_directory(
     source: &mut Source,
     dir_start: u64,
 ) -> io::Result<Vec<RawCentralRecord>> {
-    source.seek(SeekFrom::Start(dir_start))?;
+    source.seek_to(dir_start)?;
     let mut records = Vec::new();
     let mut offset = dir_start;
     while let Some(record) = read_central_record(source, offset)? {
@@ -604,7 +635,7 @@ fn raw_local_extra(source: &mut Source, header_offset: u64) -> io::Result<Vec<u8
     const SIGNATURE: u32 = 0x0403_4b50;
     const HEADER_LEN: usize = 30;
 
-    source.seek(SeekFrom::Start(header_offset))?;
+    source.seek_to(header_offset)?;
     let mut header = [0u8; HEADER_LEN];
     source.read_exact(&mut header)?;
     if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
@@ -613,9 +644,9 @@ fn raw_local_extra(source: &mut Source, header_offset: u64) -> io::Result<Vec<u8
             "local file header signature not found",
         ));
     }
-    let name_len = u16::from_le_bytes([header[26], header[27]]) as i64;
+    let name_len = u16::from_le_bytes([header[26], header[27]]) as u64;
     let extra_len = u16::from_le_bytes([header[28], header[29]]) as usize;
-    source.seek(SeekFrom::Current(name_len))?;
+    source.seek_to(header_offset + HEADER_LEN as u64 + name_len)?;
     let mut extra = vec![0u8; extra_len];
     source.read_exact(&mut extra)?;
     Ok(extra)
@@ -738,7 +769,7 @@ fn record_hash(
 /// `to_u16` is deprecated in favour of matching on constants, but it is the
 /// only public way to recover the raw code, which is what we hand to Ruby.
 #[allow(deprecated)]
-fn compression_code(method: zip::CompressionMethod) -> u16 {
+pub(crate) fn compression_code(method: zip::CompressionMethod) -> u16 {
     method.to_u16()
 }
 

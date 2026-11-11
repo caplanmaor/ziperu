@@ -96,7 +96,7 @@ module Ziperu
             reopened = @owner.native_archive
             unless still_at_place?(reopened, offset)
               where = @index ? "at index #{@index} of" : 'in'
-              raise Error, "entry '#{@raw_name}' is no longer #{where} #{@owner.name}"
+              raise EntryMovedError, "entry '#{@raw_name}' is no longer #{where} #{@owner.name}"
             end
 
             @native = reopened

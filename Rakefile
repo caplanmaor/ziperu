@@ -23,7 +23,7 @@ Rake::TestTask.new("test:gc_stress") do |t|
   t.libs << "test" << "lib"
   t.test_files = FileList[
     "test/io_source_test.rb", "test/extract_all_native_test.rb", "test/duplicate_names_test.rb",
-    "test/review_regressions_test.rb", "test/streaming_test.rb"
+    "test/review_regressions_test.rb", "test/streaming_test.rb", "test/streaming_read_test.rb"
   ]
 end
 

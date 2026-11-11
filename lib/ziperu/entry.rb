@@ -86,7 +86,14 @@ module Ziperu
     def extra
       if @source.stored? && !@local_extra_merged
         @local_extra_merged = true
-        parsed_extra.merge(@source.local_extra(@local_header_offset), local: true)
+        begin
+          parsed_extra.merge(@source.local_extra(@local_header_offset), local: true)
+        rescue EntryMovedError
+          # Kept across a commit that moved its record (a removed entry,
+          # say): the central directory's fields are all there is now,
+          # which is what rubyzip reads anyway.
+          nil
+        end
         # Edits made through this object (`extra.merge`, `extra.delete`)
         # leave no other trace; the bytes are compared at commit.
         @extra_snapshot = extra_bytes

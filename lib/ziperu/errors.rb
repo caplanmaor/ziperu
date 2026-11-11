@@ -156,6 +156,11 @@ module Ziperu
 
   # Raised by the Rust core where it lacks the domain object a rubyzip
   # exception wants; the Ruby layer re-raises the rubyzip-shaped error.
+  # An entry object outlived a commit that moved its record; what it holds
+  # from the central directory is still good, its local header is gone.
+  class EntryMovedError < Error # :nodoc:
+  end
+
   module Native
     class SizeLimitError < Ziperu::Error; end
     class PasswordError < Ziperu::Error; end

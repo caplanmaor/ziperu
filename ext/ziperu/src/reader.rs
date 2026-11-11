@@ -58,6 +58,20 @@ pub(crate) struct EntryInfo {
     pub(crate) size: u64,
     pub(crate) compressed_size: u64,
     pub(crate) crc32: u32,
+    /// The central directory's compression method, when known. The local
+    /// header must agree: reading through it must not decode the data
+    /// differently from reading by index.
+    pub(crate) method: Option<u16>,
+}
+
+/// The compression method in the local header at the source's position,
+/// which is left where it was.
+fn local_method(source: &mut Source, header_start: u64) -> ZipResult<u16> {
+    let mut head = [0u8; 10];
+    source.seek(SeekFrom::Start(header_start))?;
+    source.read_exact(&mut head)?;
+    source.seek(SeekFrom::Start(header_start))?;
+    Ok(u16::from_le_bytes([head[8], head[9]]))
 }
 
 /// Opens the entry `info` describes by seeking to its local header, with
@@ -71,6 +85,13 @@ pub(crate) fn open_local_entry<'a>(
     password: Option<&'a [u8]>,
     size_cap: u64,
 ) -> ZipResult<ZipFile<'a, Source>> {
+    if let Some(method) = info.method {
+        if local_method(source, info.header_start)? != method {
+            return Err(ZipError::InvalidArchive(
+                "local header compression method differs from the central directory".into(),
+            ));
+        }
+    }
     source.seek(SeekFrom::Start(info.header_start))?;
     let options = ZipReadOptions::new()
         .password(password)
@@ -150,10 +171,27 @@ struct Inner {
     info: EntryInfo,
     /// Declared size, or `None` when reading to the true end of the data.
     size: Option<u64>,
+    /// Bytes delivered to Ruby so far.
     consumed: u64,
     finished: bool,
+    /// Bytes already decompressed but not yet handed out: what a read
+    /// had gathered when it was interrupted, served first by the next.
+    pending: Vec<u8>,
+    /// Set when a read failed part-way for any reason but an interrupt:
+    /// the decoder's state is then unknown, so later reads raise rather
+    /// than return data that may have a hole in it. `rewind` clears it.
+    failed: Option<String>,
     /// Reads over a Ruby IO must keep the GVL; the rest release it.
     needs_gvl: bool,
+    /// For a Stored entry that is not encrypted, which `seek` can move
+    /// about in: a source of its own over the archive's bytes.
+    raw_source: Option<Source>,
+    /// Where the entry's data begins, once a seek has looked it up.
+    data_start: Option<u64>,
+    /// After a seek, reads come straight from `raw_source`: the absolute
+    /// position of the next byte, and of the end of the data. A read
+    /// this way checks no CRC (only reading from the start can).
+    raw: Option<(u64, u64)>,
 }
 
 #[derive(TypedData)]
@@ -188,20 +226,104 @@ impl EntryReader {
         needs_gvl: bool,
         io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
+        let seekable;
         let info = {
             // From the parsed central directory: no seek to the local
             // header, which the reader is about to do anyway.
             let meta = archive.metadata();
             let raw = meta.entry(index).rb(ruby)?;
+            seekable = raw.compression() == zip::CompressionMethod::Stored && !raw.encrypted();
             EntryInfo {
                 index: Some(index),
                 header_start: raw.header_start(),
                 size: raw.size(),
                 compressed_size: raw.compressed_size(),
                 crc32: raw.crc32(),
+                method: Some(crate::archive::compression_code(raw.compression())),
             }
         };
-        Self::open_at(ruby, archive, info, password, enforce_size, needs_gvl, io)
+        let raw_source =
+            (seekable && enforce_size).then(|| archive.clone().into_inner().clone_small());
+        let reader = Self::open_at(ruby, archive, info, password, enforce_size, needs_gvl, io)?;
+        reader.inner.borrow_mut().raw_source = raw_source;
+        Ok(reader)
+    }
+
+    /// Moves to byte `pos` of the entry's data (the end, if past it). Only
+    /// a Stored entry that is not encrypted has its bytes where they can
+    /// be reached directly; any other must be read from the start.
+    pub fn seek(ruby: &Ruby, rb_self: &Self, pos: u64) -> Result<(), Error> {
+        let mut inner = rb_self.inner(ruby)?;
+        if inner.entry.is_none() {
+            return Err(Error::new(ruby.exception_io_error(), "closed stream"));
+        }
+        let (Some(size), true) = (inner.size, inner.raw_source.is_some()) else {
+            return Err(Error::new(
+                ruby.get_inner(&crate::errors::ERROR),
+                "only a Stored entry that is not encrypted can be seeked in; \
+                 a compressed one must be read from the start (rewind)",
+            ));
+        };
+        let data_start = match inner.data_start {
+            Some(at) => at,
+            None => {
+                let header_start = inner.info.header_start;
+                let source = inner.raw_source.as_mut().expect("checked above");
+                let at = data_offset(source, header_start)
+                    .map_err(|e| crate::errors::header_error(ruby, e))?;
+                inner.data_start = Some(at);
+                at
+            }
+        };
+        let pos = pos.min(size);
+        inner.raw = Some((data_start + pos, data_start + size));
+        inner.consumed = pos;
+        inner.pending.clear();
+        inner.failed = None;
+        inner.finished = pos >= size;
+        Ok(())
+    }
+
+    /// `read` after a seek: straight from the archive's bytes.
+    fn read_raw(
+        ruby: &Ruby,
+        inner: &mut Inner,
+        maxlen: Option<usize>,
+    ) -> Result<Option<RString>, Error> {
+        let (at, end) = inner.raw.expect("called after a seek");
+        let remaining = end - at;
+        if remaining == 0 {
+            inner.finished = true;
+            return Ok(None);
+        }
+        let want = maxlen.map_or(remaining, |n| (n as u64).min(remaining));
+        let keep_gvl = inner.needs_gvl || want < INLINE_READ;
+        let source = inner.raw_source.as_mut().expect("seekable");
+        let mut buf = Vec::new();
+        maybe_without_gvl(keep_gvl, || -> io::Result<()> {
+            source.seek_to(at)?;
+            while (buf.len() as u64) < want {
+                crate::gvl::check()?;
+                let step = (want - buf.len() as u64).min(CHUNK as u64) as usize;
+                let start = buf.len();
+                buf.resize(start + step, 0);
+                let n = source.read(&mut buf[start..])?;
+                buf.truncate(start + n);
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the entry's data ends before its declared size",
+                    ));
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| read_error(ruby, e))?;
+        let n = buf.len() as u64;
+        inner.raw = Some((at + n, end));
+        inner.consumed += n;
+        inner.finished = at + n >= end;
+        Ok(Some(ruby.str_from_slice(&buf)))
     }
 
     /// A reader over the entry `info` describes, which need not be one the
@@ -228,7 +350,12 @@ impl EntryReader {
                 size,
                 consumed: 0,
                 finished,
+                pending: Vec::new(),
+                failed: None,
                 needs_gvl,
+                raw_source: None,
+                data_start: None,
+                raw: None,
             }),
             io,
         })
@@ -270,13 +397,19 @@ impl EntryReader {
         maxlen: Option<usize>,
     ) -> Result<Option<RString>, Error> {
         let mut inner = rb_self.inner(ruby)?;
-        if inner.finished {
+        if let Some(reason) = &inner.failed {
+            return Err(failed_error(ruby, reason));
+        }
+        if inner.finished && inner.pending.is_empty() {
             return Ok(None);
         }
         if maxlen == Some(0) {
             // `read(0)` asks for nothing, which is not the end of the
             // entry: below, an empty fill means exactly that.
             return Ok(Some(ruby.str_new("")));
+        }
+        if inner.raw.is_some() {
+            return Self::read_raw(ruby, &mut inner, maxlen);
         }
         let remaining = inner.size.map(|s| s - inner.consumed).unwrap_or(u64::MAX);
         let want = match maxlen {
@@ -290,12 +423,43 @@ impl EntryReader {
         // Releasing the GVL costs about as much as inflating a few KiB, so
         // tiny reads (`getc`, `each_byte`) keep it.
         let keep_gvl = inner.needs_gvl || want < INLINE_READ;
-        let Some(file) = inner.entry.as_mut().and_then(|e| e.file.as_mut()) else {
-            // Closed, or a rewind failed to reopen it.
-            return Ok(None);
+        let mut buf = std::mem::take(&mut inner.pending);
+        if !buf.is_empty() && buf.len() as u64 >= want {
+            // Served from what an interrupted read left behind. Should
+            // this reach the declared size, the next read probes past it.
+            inner.pending = buf.split_off(want as usize);
+            inner.consumed += want;
+            return Ok(Some(ruby.str_from_slice(&buf)));
+        }
+        let Inner {
+            entry, finished, ..
+        } = &mut *inner;
+        let file = match entry.as_mut().and_then(|e| e.file.as_mut()) {
+            Some(file) if !*finished => file,
+            // Closed, a rewind failed to reopen it, or the data has ended
+            // and only pending bytes were left.
+            _ => {
+                if buf.is_empty() {
+                    return Ok(None);
+                }
+                inner.consumed += buf.len() as u64;
+                return Ok(Some(ruby.str_from_slice(&buf)));
+            }
         };
-        let (buf, eof, oversize) = maybe_without_gvl(keep_gvl, || fill(file, want, probe))
-            .map_err(|e| read_error(ruby, e))?;
+        let outcome = maybe_without_gvl(keep_gvl, || fill(file, &mut buf, want, probe));
+        let (eof, oversize) = match outcome {
+            Ok(flags) => flags,
+            Err(e) => {
+                if crate::gvl::is_cancelled(&e) {
+                    // Interrupted between chunks: the decoder is intact,
+                    // and what it produced so far waits for the next read.
+                    inner.pending = buf;
+                } else {
+                    inner.failed = Some(e.to_string());
+                }
+                return Err(read_error(ruby, e));
+            }
+        };
 
         let filled = buf.len() as u64;
         inner.consumed += filled;
@@ -341,19 +505,53 @@ impl EntryReader {
         }
         *consumed = 0;
         *finished = *size == Some(0) && info.compressed_size == 0;
+        inner.pending.clear();
+        inner.failed = None;
+        inner.raw = None;
         Ok(())
     }
 }
 
-/// Reads up to `want` bytes in `CHUNK` steps, pure Rust so it can run
-/// without the GVL. Returns the bytes, whether the entry ended early, and
-/// (when `probe`) whether data continues past the declared size.
+/// Where the data of the entry whose local header is at `header_start`
+/// begins: after the header's fixed part, the name and the extra field.
+fn data_offset(source: &mut Source, header_start: u64) -> io::Result<u64> {
+    const SIGNATURE: u32 = 0x0403_4b50;
+    const HEADER_LEN: u64 = 30;
+    let mut header = [0u8; HEADER_LEN as usize];
+    source.seek_to(header_start)?;
+    source.read_exact(&mut header)?;
+    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local file header signature not found",
+        ));
+    }
+    let name_len = u64::from(u16::from_le_bytes([header[26], header[27]]));
+    let extra_len = u64::from(u16::from_le_bytes([header[28], header[29]]));
+    Ok(header_start + HEADER_LEN + name_len + extra_len)
+}
+
+/// The error every read raises after one failed part-way.
+fn failed_error(ruby: &Ruby, reason: &str) -> Error {
+    Error::new(
+        ruby.get_inner(&crate::errors::ERROR),
+        format!(
+            "entry cannot be read further after an earlier error ({reason}); rewind to start again"
+        ),
+    )
+}
+
+/// Reads into `buf` until it holds `want` bytes, in `CHUNK` steps, pure
+/// Rust so it can run without the GVL. Returns whether the entry ended
+/// early and (when `probe`) whether data continues past the declared
+/// size. On an error, `buf` keeps what was read before it.
 fn fill(
     file: &mut ZipFile<'static, Source>,
+    buf: &mut Vec<u8>,
     want: u64,
     probe: bool,
-) -> io::Result<(Vec<u8>, bool, bool)> {
-    let mut buf = Vec::with_capacity(want.min(CHUNK as u64) as usize);
+) -> io::Result<(bool, bool)> {
+    buf.reserve(want.saturating_sub(buf.len() as u64).min(CHUNK as u64) as usize);
     let mut eof = false;
     while (buf.len() as u64) < want {
         crate::gvl::check()?;
@@ -372,5 +570,5 @@ fn fill(
         let mut extra = [0u8; 1];
         oversize = file.read(&mut extra)? != 0;
     }
-    Ok((buf, eof, oversize))
+    Ok((eof, oversize))
 }

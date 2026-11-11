@@ -210,16 +210,34 @@ fn extract_all(
     specs: &[Spec],
     threads: usize,
 ) -> Outcome {
-    let files_from = specs
-        .iter()
-        .position(|s| !s.directory)
-        .unwrap_or(specs.len());
-    let (dirs, files) = specs.split_at(files_from);
+    // Every directory first, wherever it is listed, so that no file has
+    // to wait for one and no worker thread meets one. Each spec keeps its
+    // place in the batch, which is how a failure names its entry.
+    let (dirs, files): (Vec<_>, Vec<_>) = specs.iter().enumerate().partition(|(_, s)| s.directory);
     let mut extractor = Extractor::new(archive, dest, enforce_size, on_exists);
-    extractor.extract_each(dirs, 0)?;
+    extractor.extract_each(&dirs)?;
+    let outcome = extract_files(&mut extractor, dest, &files, threads);
+    // A directory's times go on once nothing more is written into it:
+    // creating a file inside would move its mtime again.
+    let stamped = extractor.stamp_directories();
+    let mut notices = outcome?;
+    stamped?;
+    notices.append(&mut extractor.notices);
+    Ok(notices)
+}
+
+/// The files of `extract_all`: in order on this thread, or shared out
+/// among `threads`.
+fn extract_files(
+    extractor: &mut Extractor<'_>,
+    dest: &str,
+    files: &[(usize, &Spec)],
+    threads: usize,
+) -> Outcome {
+    let (enforce_size, on_exists) = (extractor.enforce_size, extractor.on_exists);
     if threads <= 1 || files.len() <= 1 {
-        extractor.extract_each(files, files_from)?;
-        return Ok(extractor.notices);
+        extractor.extract_each(files)?;
+        return Ok(std::mem::take(&mut extractor.notices));
     }
 
     // Each thread takes every `threads`th file, so a run of large ones
@@ -241,13 +259,13 @@ fn extract_all(
                 let token = token.clone();
                 scope.spawn(move || {
                     crate::gvl::with_token(token, || {
-                        for (i, spec) in files.iter().enumerate().skip(t).step_by(threads) {
+                        for &(i, spec) in files.iter().skip(t).step_by(threads) {
                             if failed.load(Ordering::Acquire) {
                                 break;
                             }
                             if let Err(f) = worker.extract(spec) {
                                 failed.store(true, Ordering::Release);
-                                return Err((files_from + i, f));
+                                return Err((i, f));
                             }
                         }
                         Ok(worker.notices)
@@ -260,7 +278,7 @@ fn extract_all(
             .map(|w| w.join().expect("extraction thread panicked"))
             .collect()
     });
-    let mut notices = extractor.notices;
+    let mut notices = std::mem::take(&mut extractor.notices);
     let mut first_failure: Option<(usize, Failure)> = None;
     for result in results {
         match result {
@@ -292,6 +310,12 @@ fn raise(ruby: &Ruby, entry: Value, failure: Failure) -> Error {
         Failure::SizeLimit => exception(ruby, &ENTRY_SIZE_ERROR, (entry,)),
         Failure::Zip(e) => zip_error(ruby, e),
         Failure::Io(e) => read_error(ruby, e),
+        // A name the file system cannot take at all (a NUL in it) is
+        // what Ruby's own File calls raise ArgumentError for.
+        Failure::IoAt(path, e) if e.kind() == io::ErrorKind::InvalidInput => Error::new(
+            ruby.exception_arg_error(),
+            format!("{e} - {}", path.replace('\0', "\\0")),
+        ),
         Failure::IoAt(path, e) => io_error(ruby, io::Error::new(e.kind(), format!("{e} - {path}"))),
     }
 }
@@ -318,6 +342,11 @@ struct Extractor<'a> {
     on_exists: OnExists,
     /// Directories known to exist, so each parent is created once.
     made: HashSet<PathBuf>,
+    /// Directories made for an entry, with the times and mode to give
+    /// them once their files are in.
+    stamp: Vec<(usize, PathBuf, Option<SystemTime>, Option<u32>)>,
+    /// The place in the batch of the spec being extracted.
+    at: usize,
     buf: Vec<u8>,
     notices: Vec<(usize, Notice)>,
 }
@@ -335,6 +364,8 @@ impl<'a> Extractor<'a> {
             enforce_size,
             on_exists,
             made: HashSet::new(),
+            stamp: Vec::new(),
+            at: 0,
             buf: vec![0; CHUNK],
             notices: Vec::new(),
         }
@@ -342,9 +373,12 @@ impl<'a> Extractor<'a> {
 
     /// Extracts `specs` in order; `offset` is the index of the first in
     /// the whole batch, for naming the one that failed.
-    fn extract_each(&mut self, specs: &[Spec], offset: usize) -> Result<(), (usize, Failure)> {
-        for (i, spec) in specs.iter().enumerate() {
-            self.extract(spec).map_err(|f| (offset + i, f))?;
+    /// Extracts `specs`, each with its place in the whole batch, in
+    /// order; a failure names the place.
+    fn extract_each(&mut self, specs: &[(usize, &Spec)]) -> Result<(), (usize, Failure)> {
+        for &(i, spec) in specs {
+            self.at = i;
+            self.extract(spec).map_err(|f| (i, f))?;
         }
         Ok(())
     }
@@ -381,14 +415,29 @@ impl<'a> Extractor<'a> {
         }
         fs::create_dir_all(path).map_err(at(path))?;
         self.made.insert(path.to_path_buf());
-        if let Some(mtime) = spec.mtime {
-            let times = FileTimes::new().set_accessed(mtime).set_modified(mtime);
-            open_directory(path)
-                .and_then(|dir| dir.set_times(times))
-                .map_err(at(path))?;
+        if spec.mtime.is_some() || spec.mode.is_some() {
+            self.stamp
+                .push((self.at, path.to_path_buf(), spec.mtime, spec.mode));
         }
-        if let Some(mode) = spec.mode {
-            set_mode(path, mode).map_err(at(path))?;
+        Ok(())
+    }
+
+    /// Gives the directories made their times and modes, deepest first,
+    /// so that stamping a parent comes after everything inside it.
+    fn stamp_directories(&mut self) -> Result<(), (usize, Failure)> {
+        let mut stamp = std::mem::take(&mut self.stamp);
+        stamp.sort_by_key(|(_, path, _, _)| std::cmp::Reverse(path.components().count()));
+        for (i, path, mtime, mode) in stamp {
+            let path = path.as_path();
+            if let Some(mtime) = mtime {
+                let times = FileTimes::new().set_accessed(mtime).set_modified(mtime);
+                open_directory(path)
+                    .and_then(|dir| dir.set_times(times))
+                    .map_err(|e| (i, at(path)(e)))?;
+            }
+            if let Some(mode) = mode {
+                set_mode(path, mode).map_err(|e| (i, at(path)(e)))?;
+            }
         }
         Ok(())
     }
@@ -427,18 +476,27 @@ impl<'a> Extractor<'a> {
             }
             Err(e) => return Err(at(path)(e)),
         };
-        let written = self
-            .copy_entry(spec.index, &mut file)
-            .map_err(|f| match f {
-                // Reading the entry is the entry's problem; writing is the path's.
-                Failure::Io(e)
-                    if e.kind() == io::ErrorKind::WriteZero
-                        || e.kind() == io::ErrorKind::StorageFull =>
-                {
-                    at(path)(e)
-                }
-                other => other,
-            })?;
+        let written = match self.copy_entry(spec.index, &mut file) {
+            Ok(n) => n,
+            Err(failure) => {
+                // Interrupted or failed part-way: a half-written file
+                // would pass for the entry, and stand in the way of a
+                // second run.
+                drop(file);
+                let _ = fs::remove_file(path);
+                return Err(match failure {
+                    // Reading the entry is the entry's problem; writing is
+                    // the path's.
+                    Failure::Io(e)
+                        if e.kind() == io::ErrorKind::WriteZero
+                            || e.kind() == io::ErrorKind::StorageFull =>
+                    {
+                        at(path)(e)
+                    }
+                    other => other,
+                });
+            }
+        };
         if let Some(mtime) = spec.mtime {
             file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
                 .map_err(at(path))?;
@@ -495,6 +553,7 @@ impl<'a> Extractor<'a> {
                     size: raw.size(),
                     compressed_size: raw.compressed_size(),
                     crc32: raw.crc32(),
+                    method: Some(crate::archive::compression_code(raw.compression())),
                 }
             };
             let mut source = self.archive.clone().into_inner();

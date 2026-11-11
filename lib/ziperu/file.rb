@@ -82,6 +82,11 @@ module Ziperu
       # decrypter on `InputStream`; `decrypter:` is accepted here too.
       @password = password || decrypter&.password
 
+      unless path_or_io.kind_of?(::String) || path_or_io.respond_to?(:to_path) ||
+             path_or_io.respond_to?(:read) || path_or_io.respond_to?(:write)
+        raise TypeError, "no implicit conversion of #{path_or_io.inspect} into String"
+      end
+
       @name    = if IOExtras.path_like?(path_or_io)
                    IOExtras.path_of(path_or_io)
                  elsif path_or_io.respond_to?(:path)
@@ -312,8 +317,9 @@ module Ziperu
                       compression_level: @compression_level, settings: @settings
                     )
                   end
-      if src_path.respond_to?(:read)
+      if src_path.respond_to?(:read) && !IOExtras.path_like?(src_path)
         # An IO (File, StringIO, Tempfile, a socket): streamed at commit.
+        # A Pathname has `read` too, but names a file.
         new_entry.gather_fileinfo_from_io(src_path)
       else
         new_entry.gather_fileinfo_from_srcpath(src_path)
@@ -579,7 +585,7 @@ module Ziperu
     # the archive is rewritten.
     def appended_entries
       return nil if @create || @buffer || @native.nil? || @comment_changed || @settings.sort_entries
-      return nil unless @settings.append_in_place
+      return nil unless @settings.append_in_place && appendable_in_place?
 
       all = @cdir.entries
       held = @native.entry_count
@@ -591,6 +597,18 @@ module Ziperu
       all.drop(held)
     end
     private :appended_entries
+
+    # Whether the archive's file can take an append: one that is read-only
+    # can still be replaced (the rewrite renames a new file over it), and
+    # one with other hard links must be, or the append would change what
+    # they hold too.
+    def appendable_in_place?
+      stat = ::File.stat(@name)
+      stat.file? && stat.writable? && stat.nlink <= 1
+    rescue SystemCallError
+      false
+    end
+    private :appendable_in_place?
 
     # Writes the archive, with any changes, to `io` and returns it. `io`
     # may be a pipe, socket or response body: entries are streamed to it
@@ -835,6 +853,10 @@ module Ziperu
       begin
         ::File.rename(tmp_filename, name)
       rescue Errno::EACCES
+        # A directory (or anything but a file) at the path is not ours to
+        # move: the commit fails, as rubyzip's does.
+        raise unless ::File.file?(name)
+
         # Something else (another Ziperu::File, say) still has the archive
         # open. Renaming an open file is allowed where replacing one is
         # not, so move the old archive aside first; that handle keeps

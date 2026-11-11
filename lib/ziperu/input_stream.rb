@@ -28,8 +28,20 @@ module Ziperu
     # `Ziperu.*` setting by its name, for this stream alone (the limits,
     # `validate_entry_sizes:`, `force_entry_names_encoding:`; see
     # Ziperu::Settings).
+    #
+    # `streaming: true` reads a pipe or socket (an upload, an S3 object's
+    # body) in one pass, entry by entry, rather than taking all of it in
+    # first to reach the central directory at its end: memory stays at an
+    # entry's worth, whatever the archive's size. What the stream gives is
+    # what the local headers hold: no comments, no permissions, and an
+    # entry whose sizes come after its data has them (`size`, `crc`) only
+    # once it has been read to its end. Such an entry must be Deflated,
+    # which is how streaming writers write; a Stored one cannot be told
+    # apart from what follows it in one pass, and raises. The limits apply
+    # to the bytes as they come. A file, a StringIO or a seekable IO is
+    # read through its central directory either way. Not in rubyzip.
     def initialize(context, *legacy, offset: 0, decrypter: nil, password: nil,
-                   enforce_size: nil, metadata_encoding: nil, **opts)
+                   enforce_size: nil, metadata_encoding: nil, streaming: false, **opts)
       @settings = Settings.take!(opts)
       enforce_size = @settings.validate_entry_sizes if enforce_size.nil?
       @metadata_encoding = metadata_encoding
@@ -41,6 +53,19 @@ module Ziperu
       # AES from ZipCrypto by the entry, so one password serves both.
       decrypter ||= TraditionalDecrypter.new(password) if password
       super(**opts)
+      if streaming && self.class.pipe_like?(context)
+        IOExtras.binmode(context)
+        @stream = Native::StreamReader.open(context, decrypter&.password&.b, enforce_size)
+        @stream_entries = 0
+        @stream_total = 0
+        @decrypter = decrypter
+        @enforce_size = enforce_size
+        @owns_archive = false
+        @archive = nil
+        @reader = nil
+        @current_entry = nil
+        return
+      end
       @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       # An archive handed in (by Entry#get_input_stream) stays open for its
       # owner; one opened here is closed with the stream. A split segment
@@ -85,6 +110,8 @@ module Ziperu
     def close
       @reader&.close
       @reader = nil
+      @stream&.close
+      @stream = nil
       @archive&.close if @owns_archive
       @archive = nil
       @open_error = nil
@@ -95,6 +122,8 @@ module Ziperu
     def get_next_entry
       raise SplitArchiveError if @split
       check_open!
+      return next_stream_entry if @stream
+
       return @current_entry = nil if @archive.nil? || @next_index.nil?
       if @next_index >= (@records ? @records.size : @archive.entry_count)
         # Past the last entry there is nothing to read, not the previous
@@ -154,11 +183,45 @@ module Ziperu
     def rewind
       check_open!
       return if @current_entry.nil?
+      raise Error, 'an entry read with streaming: true cannot be rewound' if @stream
 
       @lineno = 0
       @pos    = 0
       wrap_errors { @reader.rewind }
       flush
+    end
+
+    # Moves to byte `offset` of the current entry (from its start, its
+    # current position or its end, as `whence` says), as IO#seek does.
+    # Only a Stored entry that is not encrypted can be seeked in: its
+    # bytes are in the archive as they are. A compressed one raises
+    # Ziperu::Error; `rewind` is the way back to its start. Reads after a
+    # seek check no CRC, which only reading from the start can do.
+    # Not in rubyzip.
+    def seek(offset, whence = ::IO::SEEK_SET)
+      check_open!
+      raise Error, 'no entry to seek in' if @reader.nil?
+      raise Error, 'an entry read with streaming: true cannot be seeked in' if @stream
+
+      target =
+        case whence
+        when ::IO::SEEK_SET, :SET then offset
+        when ::IO::SEEK_CUR, :CUR then pos + offset
+        when ::IO::SEEK_END, :END then @current_entry.size + offset
+        else raise ArgumentError, "unknown whence: #{whence.inspect}"
+        end
+      raise Errno::EINVAL, "seek to #{target}" if target.negative?
+
+      wrap_errors { @reader.seek(target) }
+      flush
+      @pos = [target, @current_entry.size].min
+      0
+    end
+
+    # IO#pos=, through #seek.
+    # Not in rubyzip.
+    def pos=(offset)
+      seek(offset)
     end
 
     # Modelled after IO#sysread. Reads up to maxlen bytes from the stream,
@@ -202,20 +265,26 @@ module Ziperu
         check_limits(open_native(context, settings), settings)
       end
 
-      # Ziperu.max_entries / max_total_size, checked before any entry is
-      # read. An archive that fails is closed again.
+      # Ziperu.max_entries / max_total_size / max_entry_size /
+      # max_compression_ratio, checked before any entry is read, over every
+      # record in the central directory (several under one name included).
+      # An archive that fails is closed again.
       def check_limits(native, settings = ::Ziperu)
-        if (limit = settings.max_entries) && native.entry_count > limit
-          raise LimitError.new('an entry count', native.entry_count, limit)
+        limits = [settings.max_entries, settings.max_total_size,
+                  settings.max_entry_size, settings.max_compression_ratio]
+        return native if limits.none?
+
+        count, total, largest, ratio = native.limits
+        if (limit = settings.max_entries) && count > limit
+          raise LimitError.new('an entry count', count, limit)
         end
-        if (limit = settings.max_total_size) && (total = native.total_size) > limit
+        if (limit = settings.max_total_size) && total > limit
           raise LimitError.new('a declared total size', total, limit)
         end
-        if (limit = settings.max_entry_size) && (largest = native.max_entry_size) > limit
+        if (limit = settings.max_entry_size) && largest > limit
           raise LimitError.new('an entry with a declared size', largest, limit)
         end
-        if (limit = settings.max_compression_ratio) &&
-           (ratio = native.max_compression_ratio) > limit
+        if (limit = settings.max_compression_ratio) && ratio > limit
           raise LimitError.new('an entry with a compression ratio', ratio.round(1), limit)
         end
 
@@ -227,6 +296,12 @@ module Ziperu
 
       def path_like?(context) # :nodoc:
         IOExtras.path_like?(context)
+      end
+
+      # A pipe, socket or the like: an IO that can only be read forward.
+      def pipe_like?(context) # :nodoc:
+        !context.kind_of?(Native::Archive) && !path_like?(context) &&
+          !context.kind_of?(::StringIO) && context.respond_to?(:read) && !IOExtras.seekable?(context)
       end
 
       # Whether what `context` holds begins with a local file header, the
@@ -251,7 +326,15 @@ module Ziperu
       end
 
       def open_native(context, settings = ::Ziperu)
-        return Native::Archive.open_path(path_of(context)) if path_like?(context)
+        if path_like?(context)
+          path = path_of(context)
+          begin
+            return Native::Archive.open_path(path)
+          rescue Errno::ENOENT
+            # The native message names no file; Ruby's own does.
+            raise Errno::ENOENT, path
+          end
+        end
 
         # A StringIO's bytes are already in memory: snapshot them once rather
         # than paying a method call per chunk (12x faster per entry).
@@ -338,6 +421,7 @@ module Ziperu
       end
       raise ArgumentError, "negative length #{maxlen} given" if maxlen&.negative?
       return nil if @reader.nil?
+      return produce_stream_input(maxlen) if @stream
 
       wrap_errors { @reader.read(maxlen) }
     end
@@ -363,7 +447,79 @@ module Ziperu
     # archive (`@open_error` holds why), which yields no entries but is
     # not closed.
     def closed?
-      @archive.nil? && @open_error.nil?
+      @archive.nil? && @open_error.nil? && @stream.nil?
+    end
+
+    # `get_next_entry` with `streaming: true`: the next local header.
+    def next_stream_entry
+      meta = wrap_errors { @stream.next_entry }
+      @reader = nil
+      flush
+      return @current_entry = nil unless meta
+
+      @stream_entries += 1
+      if (limit = @settings.max_entries) && @stream_entries > limit
+        raise LimitError.new('an entry count', @stream_entries, limit)
+      end
+      if meta[:size]
+        check_stream_entry_size(meta[:size])
+        if (limit = @settings.max_compression_ratio) && meta[:size].positive?
+          ratio = meta[:compressed_size].zero? ? Float::INFINITY : meta[:size].fdiv(meta[:compressed_size])
+          raise LimitError.new('an entry with a compression ratio', ratio.round(1), limit) if ratio > limit
+        end
+      end
+      # Unknown until the entry has been read (see `produce_stream_input`).
+      meta[:crc] ||= 0
+      meta[:compressed_size] ||= 0
+      @current_entry = Entry.from_meta(nil, meta, metadata_encoding: @metadata_encoding, settings: @settings)
+      @current_entry.instance_variable_set(:@size, nil) if meta[:size].nil?
+      @stream_entry_bytes = 0
+      @reader = @stream
+      @lineno = 0
+      @pos = 0
+      @current_entry
+    end
+
+    # Reads from the stream, counting against the limits as the bytes
+    # come; nil `maxlen` reads to the end of the entry, in chunks.
+    def produce_stream_input(maxlen)
+      return stream_chunk(maxlen) if maxlen
+
+      out = +''.b
+      while (chunk = stream_chunk(CHUNK_SIZE))
+        out << chunk
+      end
+      out.empty? ? nil : out
+    end
+
+    def stream_chunk(length)
+      chunk = wrap_errors { @stream.read(length) }
+      if chunk
+        @stream_entry_bytes += chunk.bytesize
+        @stream_total += chunk.bytesize
+        check_stream_entry_size(@stream_entry_bytes)
+        if (limit = @settings.max_total_size) && @stream_total > limit
+          raise LimitError.new('a total size', @stream_total, limit)
+        end
+      end
+      learn_stream_trailer if @stream.eof?
+      chunk
+    end
+
+    def check_stream_entry_size(size)
+      return unless (limit = @settings.max_entry_size) && size > limit
+
+      raise LimitError.new('an entry with a size', size, limit)
+    end
+
+    # Once a streamed entry has been read to its end: what its data came
+    # to, for an entry whose header left it to the descriptor.
+    def learn_stream_trailer
+      crc, size = @stream.trailer
+      return unless crc && !@current_entry.size_known?
+
+      @current_entry.instance_variable_set(:@size, size)
+      @current_entry.instance_variable_set(:@crc, crc)
     end
 
     # Re-raise the native core's errors as the rubyzip-shaped ones.

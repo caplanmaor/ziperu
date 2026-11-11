@@ -82,6 +82,12 @@ module Ziperu
       @closed = false
       @current_entry = nil
       @written = []
+      # On a stream, a file entry is begun in the native writer only when
+      # its first bytes are written (or the next entry, or the end, comes):
+      # until then nothing of it has gone out, so `rollback_entry` can
+      # still take it back. Its name and options wait here.
+      @deferred = nil
+      @stream_names = {} if @streamed
     end
 
     class << self
@@ -224,6 +230,42 @@ module Ziperu
       @current_entry = new_entry
     end
 
+    # Takes the entry being written back out of the archive, as if it had
+    # never been put: the central directory will not list it, and the
+    # next entry goes where it was. For an entry whose data could not be
+    # had (a download that failed, say), so the rest of the archive can
+    # still be written:
+    #
+    #   files.each do |name, url|
+    #     zos.put_next_entry(name)
+    #     begin
+    #       fetch(url) { |chunk| zos << chunk }
+    #     rescue Net::HTTPError
+    #       zos.rollback_entry
+    #     end
+    #   end
+    #
+    # On a stream to an IO that cannot seek (`body`, `write_buffer` to a
+    # pipe) bytes already sent cannot be taken back, so there it works
+    # until the entry's first bytes are written, and raises after.
+    # Returns the entry taken back.
+    # Not in rubyzip.
+    def rollback_entry
+      check_open!
+      entry = @current_entry
+      raise Error, 'there is no entry being written to take back' if entry.nil? || !@written.last.equal?(entry)
+
+      if @deferred
+        @deferred = nil
+      else
+        @writer.rollback_entry
+      end
+      @written.pop
+      @stream_names&.delete(entry.name.b)
+      @current_entry = nil
+      entry
+    end
+
     # Bytes handed to the IO so far, for a stream to an IO that cannot
     # seek (`write_buffer` to a pipe or socket, `body`): what the consumer
     # has been given, for a progress report alongside
@@ -320,6 +362,8 @@ module Ziperu
           { dos_date: time.to_binary_dos_date, dos_time: time.to_binary_dos_time,
             unix_perms: entry.unix_perms }
         end
+      start_deferred
+      @stream_names[(new_name || entry.name).to_s.b] = true if @stream_names
       @writer.raw_copy(entry.archive, entry.index, new_name, touch_opts)
       @written << entry
       @current_entry = nil
@@ -347,6 +391,7 @@ module Ziperu
         raise Error, "cannot write data to directory entry '#{@current_entry.name}'"
       end
 
+      start_deferred
       @writer.write(data.to_s.b)
       self
     end
@@ -362,6 +407,7 @@ module Ziperu
 
         @writer.comment = comment
       end
+      start_deferred
       @current_entry = nil
       begin
         bytes, stats = @writer.finish
@@ -372,6 +418,10 @@ module Ziperu
                      "the IO given does not allow (#{e.message}); open it for reading and writing"
       end
       unless @aborted
+        if stats.size != @written.size
+          raise Error, "the archive holds #{stats.size} entries where #{@written.size} were written"
+        end
+
         stats.each_with_index do |(offset, size, compressed_size, crc), i|
           @written[i].written_as(offset, size, compressed_size, crc)
         end
@@ -388,17 +438,38 @@ module Ziperu
         raise ::Ziperu::CompressionMethodError, entry.compression_method
       end
 
+      start_deferred
       opts = native_entry_options(entry)
+      if @stream_names
+        # The native writer would catch a second entry under a name only
+        # once it begins it, which on a stream is later (see @deferred).
+        raise EntryExistsError.new('put_next_entry', entry.name) if @stream_names.key?(entry.name.b)
+
+        @stream_names[entry.name.b] = true
+      end
       if entry.directory?
         @writer.add_directory(entry.name, opts)
       elsif entry.symlink?
         @writer.add_symlink(entry.name, entry.symlink_target, opts)
       else
         opts.merge!(@encrypter.native_options)
-        @writer.start_entry(entry.name.b, opts)
+        if @streamed
+          @deferred = [entry.name.b, opts]
+        else
+          @writer.start_entry(entry.name.b, opts)
+        end
       end
     rescue Native::DuplicateEntryError
       raise EntryExistsError.new('put_next_entry', entry.name)
+    end
+
+    # Begins in the native writer the entry `init_next_entry` deferred.
+    def start_deferred
+      name, opts = @deferred
+      return unless name
+
+      @deferred = nil
+      @writer.start_entry(name, opts)
     end
 
     def check_open!

@@ -46,6 +46,10 @@ pub struct Writer {
     /// Cleared when this object is freed, before the `ZipWriter` inside
     /// drops, so that its finalizer cannot reach the IO (see `RubyOut`).
     attached: Option<Arc<AtomicBool>>,
+    /// Set by the sink once the Ruby IO has raised: the crate and the
+    /// Ruby side may no longer agree on what the archive holds (the crate
+    /// takes back an entry it was finishing), so nothing more is written.
+    broken: Option<Arc<AtomicBool>>,
 }
 
 impl DataTypeFunctions for Writer {
@@ -143,6 +147,11 @@ struct State {
 const INLINE_WRITE: usize = 16 * 1024;
 /// How much of a large write goes in between checks for an interrupt.
 const WRITE_CHUNK: usize = 1024 * 1024;
+/// `add_files_parallel` hands the crate this many files per thread at a
+/// time, checking for an interrupt in between.
+const PARALLEL_PART_PER_THREAD: usize = 4;
+/// ...or this many bytes per thread, once each thread has a file.
+const PARALLEL_PART_BYTES_PER_THREAD: u64 = 8 * 1024 * 1024;
 
 impl Writer {
     pub fn open_path(ruby: &Ruby, path: String) -> Result<Self, Error> {
@@ -167,12 +176,14 @@ impl Writer {
     /// start, entry by entry, as the stream takes shape.
     pub fn open_io(io: Value) -> Result<Self, Error> {
         let attached = Arc::new(AtomicBool::new(true));
-        let out = RubyOut::new(io, Arc::clone(&attached), true)?;
+        let broken = Arc::new(AtomicBool::new(false));
+        let out = RubyOut::new(io, Arc::clone(&attached), Arc::clone(&broken), true)?;
         let sink = Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out));
         Ok(Self::over_ruby_io(
             Zip::Seekable(ZipWriter::new(sink)),
             io,
             attached,
+            broken,
         ))
     }
 
@@ -183,12 +194,14 @@ impl Writer {
     /// patched at the end.
     pub fn open_stream(io: Value) -> Result<Self, Error> {
         let attached = Arc::new(AtomicBool::new(true));
-        let out = RubyOut::new(io, Arc::clone(&attached), false)?;
+        let broken = Arc::new(AtomicBool::new(false));
+        let out = RubyOut::new(io, Arc::clone(&attached), Arc::clone(&broken), false)?;
         let (counting, stats) = Counting::new(Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out)));
         Ok(Self::over_ruby_io(
             Zip::Stream(ZipWriter::new_stream(counting), Box::new(stats)),
             io,
             attached,
+            broken,
         ))
     }
 
@@ -237,14 +250,32 @@ impl Writer {
             inner: RefCell::new(State::new(Zip::Seekable(zip))),
             io: None,
             attached: None,
+            broken: None,
         }
     }
 
-    fn over_ruby_io(zip: Zip, io: Value, attached: Arc<AtomicBool>) -> Self {
+    fn over_ruby_io(
+        zip: Zip,
+        io: Value,
+        attached: Arc<AtomicBool>,
+        broken: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             inner: RefCell::new(State::new(zip)),
             io: Some(Opaque::from(io)),
             attached: Some(attached),
+            broken: Some(broken),
+        }
+    }
+
+    /// An error once the sink's IO has raised (see `broken`).
+    fn check_broken(&self, ruby: &Ruby) -> Result<(), Error> {
+        match &self.broken {
+            Some(b) if b.load(Ordering::Acquire) => Err(Error::new(
+                ruby.get_inner(&crate::errors::ERROR),
+                "the archive cannot be written further: its IO raised an error earlier",
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -665,12 +696,84 @@ impl Writer {
             let Zip::Seekable(w) = zip else {
                 return Err(stream_error(ruby, "entries added in parallel"));
             };
+            // The crate cannot be interrupted inside a call, so the batch
+            // goes in parts of a few files per thread, with a check for an
+            // interrupt (see `gvl`) between them. Should a part fail or the
+            // call be interrupted, the parts already in are taken back out
+            // again, last first, so the batch is added whole or not at all.
+            let part_len = threads.max(1) * PARALLEL_PART_PER_THREAD;
+            let part_bytes = threads.max(1) as u64 * PARALLEL_PART_BYTES_PER_THREAD;
             maybe_without_gvl(rb_self.needs_gvl(), || -> ZipResult<()> {
                 state.crypto.seal_pending(w)?;
-                pool.install(|| w.par_append_from_paths_atomic(entries))
+                let mut added = 0;
+                let mut rest = entries.into_iter();
+                let outcome = loop {
+                    // At least a file per thread, then up to `part_len`
+                    // files or `part_bytes`, whichever comes first.
+                    let mut part = Vec::new();
+                    let mut bytes = 0u64;
+                    while part.len() < part_len
+                        && (part.len() < threads.max(1) || bytes < part_bytes)
+                    {
+                        let Some(item) = rest.next() else { break };
+                        bytes += fs::metadata(item.1).map_or(0, |m| m.len());
+                        part.push(item);
+                    }
+                    if part.is_empty() {
+                        break Ok(());
+                    }
+                    if let Err(e) = crate::gvl::check() {
+                        break Err(ZipError::Io(e));
+                    }
+                    let len = part.len();
+                    if let Err(e) = pool.install(|| w.par_append_from_paths_atomic(part)) {
+                        break Err(e);
+                    }
+                    added += len;
+                };
+                if outcome.is_err() {
+                    for _ in 0..added {
+                        let _ = w.abort_file();
+                    }
+                }
+                outcome
             })
             .map_err(|e| entry_error(ruby, b"", e))?;
             state.count += parsed.len();
+            Ok(())
+        })
+    }
+
+    /// Takes the entry last begun back out of the archive: the central
+    /// directory will not list it, and the next entry is written over its
+    /// bytes. A stream cannot go back over bytes it has sent, so there
+    /// only an entry not yet begun can be taken back, which Ruby handles
+    /// by deferring the start (see `OutputStream#rollback_entry`).
+    pub fn rollback_entry(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
+        rb_self.with_state(ruby, |state, zip| {
+            if zip.is_stream() {
+                return Err(Error::new(
+                    ruby.get_inner(&crate::errors::ERROR),
+                    "the entry's data has already gone out on a stream that cannot seek,                      and cannot be taken back",
+                ));
+            }
+            let base = state.append.as_ref().map_or(0, |a| a.base);
+            if state.count <= base {
+                return Err(Error::new(
+                    ruby.get_inner(&crate::errors::ERROR),
+                    "there is no entry to take back",
+                ));
+            }
+            let index = state.count - 1;
+            // A ZipCrypto entry in progress has nothing to seal now, and
+            // no header patch of the entry may land on the next one.
+            state.crypto.pending = None;
+            state.crypto.patches.retain(|p| p.index != index);
+            let Zip::Seekable(w) = zip else {
+                unreachable!("a stream was refused above")
+            };
+            maybe_without_gvl(rb_self.needs_gvl(), || discard_last(w)).rb(ruby)?;
+            state.count = index;
             Ok(())
         })
     }
@@ -688,6 +791,7 @@ impl Writer {
     /// written (for an append, per entry added), which is how Ruby learns
     /// what a streamed entry came to.
     pub fn finish(ruby: &Ruby, rb_self: &Self) -> Result<(Option<RString>, RArray), Error> {
+        rb_self.check_broken(ruby)?;
         let (zip, crypto, base) = {
             let mut state = rb_self.borrow(ruby)?;
             let zip = state.zip.take().ok_or_else(|| closed_error(ruby))?;
@@ -759,7 +863,10 @@ impl Writer {
     /// written over its bytes. Best effort; the error that brought us here
     /// is the one reported.
     fn withdraw(needs_gvl: bool, state: &mut State, zip: &mut Zip) {
-        let _ = maybe_without_gvl(needs_gvl, || with_zip!(zip, |w| w.abort_file()));
+        let _ = maybe_without_gvl(needs_gvl, || match zip {
+            Zip::Seekable(w) => discard_last(w),
+            Zip::Stream(w, _) => w.abort_file(),
+        });
         state.count = state.count.saturating_sub(1);
     }
 
@@ -774,6 +881,7 @@ impl Writer {
         ruby: &Ruby,
         f: impl FnOnce(&mut State, &mut Zip) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.check_broken(ruby)?;
         let mut guard = self.borrow(ruby)?;
         let state = &mut *guard;
         let mut zip = state.zip.take().ok_or_else(|| closed_error(ruby))?;
@@ -792,6 +900,21 @@ impl State {
             append: None,
         }
     }
+}
+
+/// Takes the last entry back out of a seekable archive and cuts the sink
+/// off where it began. The crate rewinds to the entry's header but cannot
+/// shorten the sink, and at the end it would move the central directory
+/// past the dead bytes rather than leave them after it.
+fn discard_last(w: &mut ZipWriter<Sink>) -> ZipResult<()> {
+    w.abort_file()?;
+    // SAFETY: the sink is cut at its current position and left there, as
+    // `get_mut` requires; nothing the crate has written lies beyond it.
+    if let Some(sink) = unsafe { w.get_mut() } {
+        let at = sink.stream_position()?;
+        sink.end_at(at)?;
+    }
+    Ok(())
 }
 
 /// Seals a ZipCrypto entry still in progress, writes the central

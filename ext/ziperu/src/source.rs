@@ -34,8 +34,8 @@ impl Source {
         Source::File(BufReader::with_capacity(BUF_SIZE, SharedFile::new(file)))
     }
 
-    pub fn memory(bytes: Vec<u8>) -> Self {
-        Source::Memory(Cursor::new(Arc::from(bytes)))
+    pub fn memory(bytes: Arc<[u8]>) -> Self {
+        Source::Memory(Cursor::new(bytes))
     }
 
     pub fn ruby(io: Value) -> Result<Self, Error> {

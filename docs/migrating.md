@@ -124,6 +124,16 @@ until it goes. Exception classes follow the namespace, so rescue
   directory, checking the resolved absolute path with a trailing separator,
   the fix for CVE-2026-85396.
 
+- An entry object kept across a commit that moved its record (the one
+  `remove` returns, say) still gives its metadata, but reading its data
+  raises `Ziperu::Error`; rubyzip returns `""` for it.
+- `InputStream#read` with a negative length raises `ArgumentError`, as
+  `IO#read` does; rubyzip returns `""`.
+- `File#name` is a String even when the archive was opened with a
+  Pathname; rubyzip keeps the Pathname.
+- An archive whose central directory size field is too large opens in
+  rubyzip with a warning; ziperu refuses it.
+
 ## Beyond rubyzip
 
 Everything here is additive: code that does not use it behaves as above.

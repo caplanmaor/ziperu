@@ -1,5 +1,78 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- Duplicate entry names no longer get around the open-time limits. The
+  checks for `max_entries`, `max_total_size`, `max_entry_size` and
+  `max_compression_ratio` counted only the last record under each name,
+  while listing, `InputStream` and `extract_all` reach every one: a
+  zip bomb behind a harmless entry of the same name went through. Every
+  record now counts, in one pass.
+- A large `read` interrupted (`Timeout`, `Thread#raise`) and then
+  rescued no longer loses data: what it had decompressed is returned by
+  the next read. After any other failure part-way through an entry,
+  further reads raise until `rewind`, instead of returning a short entry
+  with no error.
+- `OutputStream.new(io, stream: true)` whose IO raises, with the error
+  rescued and writing carried on: the writer refuses every later call
+  rather than lose track of which entries the archive holds (which gave
+  a `NoMethodError` on close, or an entry silently overwritten), and no
+  longer writes again what it had handed the IO before it raised.
+- `File#add`, `add_stored` and `replace` take a `Pathname` as the path it
+  is, not an IO (`Rails.root.join(...)` raised `NoMethodError`).
+- On Windows, `File.open(dir, create: true)` and a commit no longer move
+  a directory at that path aside to put the archive in its place; the
+  commit raises, as rubyzip's does.
+- Adding to an archive that is read-only (or has other hard links)
+  rewrites it instead of failing to append in place.
+- Errors that came out as a bare `IOError` are `Ziperu::Error`s: corrupt
+  zstd and LZMA data (`DecompressionError`, as for Deflate), a local
+  header past the end of the archive or with a bad signature, a forged
+  zip64 offset no file can seek to. A NUL in a name raises
+  `ArgumentError` from the native `extract_all`, as from Ruby's own file
+  calls.
+- `add_files(threads:)` (and the parallel commit) can be interrupted: it
+  stopped only once the whole batch, up to 256 MB, was compressed. It
+  still adds the batch whole or not at all.
+- A local header that names a different compression method from the
+  central directory is refused, rather than decoded one way or the other
+  depending on `validate_entry_sizes`.
+- An interrupted `extract_all` removes the file it was writing, so a
+  second run is not stopped by `DestinationExistsError`.
+- Directory times restored by `extract_all` are set once the files in
+  the directory are written, which would otherwise move them (and every
+  directory entry is made before any file, wherever it is listed).
+- An entry kept across a commit that moved it (the one `remove` returns,
+  say) still answers `time`, `extra` and the like from what it holds.
+- `InputStream.open("missing.zip")` names the file in its `ENOENT`;
+  `File.open(nil)` raises `TypeError`.
+
+Added:
+
+- `require "ziperu/replace_rubyzip"`: ziperu answers for rubyzip
+  (`require "zip"`, `"rubyzip"`, `"zip/..."`) even without Bundler, where
+  RubyGems would otherwise load a rubyzip that a dependency asks for.
+- `InputStream.open(pipe, streaming: true)`: a pipe or socket read in one
+  pass, local header by local header, in an entry's worth of memory, with
+  the limits counted as the bytes come. Entries whose sizes follow their
+  data (how streaming writers write) are read when Deflated.
+- `Ziperu::RemoteIO`: a seekable IO over HTTP Range requests (or a block
+  that fetches byte ranges), so an archive on S3 or a web server can be
+  listed and have entries read without downloading it.
+- `OutputStream#rollback_entry`: takes the entry being written back out
+  of the archive, so one whose data could not be had can be skipped. On
+  a stream it works until the entry's first bytes are written (the entry
+  is begun only then); on a file or seekable IO, at any point.
+- `InputStream#seek` and `pos=` in a Stored entry that is not encrypted
+  (`get_input_stream(...).seek`): random access without reading what
+  comes before.
+
+Changed:
+
+- `open_buffer` on a String copies the archive once, not twice.
+
 ## 0.2.1 (2026-11-10)
 
 Fixed:

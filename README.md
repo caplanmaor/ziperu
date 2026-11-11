@@ -165,6 +165,51 @@ Ziperu::InputStream.open(socket) do |zis|           # any IO, no seeking needed
     process(entry.name, zis.read)
   end
 end
+
+# A pipe or an upload read in one pass, an entry's worth of memory at a
+# time, rather than taken in whole to reach the central directory:
+Ziperu::InputStream.open(s3_object.body, streaming: true) do |zis|
+  while (entry = zis.get_next_entry)
+    zis.each_line { |line| ... }
+  end
+end
+```
+
+Read an archive in place on a server, without downloading it: only the
+central directory and the entries read are fetched, with HTTP Range
+requests (S3, GCS, a CDN; or a block that returns byte ranges):
+
+```ruby
+io = Ziperu::RemoteIO.new(url)   # "https://example.com/dataset.zip"
+Ziperu::File.open_buffer(io, write: false) do |zf|
+  zf.extract("docs/guide.txt", "guide.txt")   # a few requests, not 5 GB
+end
+```
+
+Leave out an entry whose data could not be had, and go on with the rest
+(a download that failed half-way through a streamed zip, say):
+
+```ruby
+body = Ziperu::OutputStream.body do |zos|
+  files.each do |name, url|
+    zos.put_next_entry(name)
+    begin
+      fetch(url) { |chunk| zos << chunk }
+    rescue Net::HTTPError
+      zos.rollback_entry   # before its first byte on a stream; any time on a file
+    end
+  end
+end
+[200, { "content-type" => "application/zip" }, body]
+```
+
+Seek about in a Stored entry, for readers that want random access (a PDF
+stored in an archive):
+
+```ruby
+Ziperu::File.open("scans.zip") do |zf|
+  zf.get_input_stream("scan.pdf") { |io| io.seek(-1024, IO::SEEK_END); io.read(1024) }
+end
 ```
 
 Passwords, both ways:
@@ -209,11 +254,17 @@ path, so `require "zip"` loads ziperu and those gems run on it; rubyzip
 stays installed and unused. Checked with Bundler 2.3, 2.5 and 4.0, in
 either Gemfile order.
 
-> [!NOTE]
-> Without Bundler, RubyGems loads whichever gem asks for `zip` first, and
-> rubyzip and ziperu cannot both own the `Zip` constant. There, use
-> `require "ziperu"` and `Ziperu::` for your own code and leave `Zip::` to
-> rubyzip.
+Without Bundler, RubyGems loads whichever gem asks for `zip` first. To
+have ziperu answer for rubyzip there too, require this before anything
+else loads it (the top of a script, or `config/boot.rb`):
+
+```ruby
+require "ziperu/replace_rubyzip"   # every require "zip" / "zip/..." loads ziperu
+```
+
+It raises if rubyzip is already loaded, rather than mix the two. Short of
+that, use `require "ziperu"` and `Ziperu::` for your own code and leave
+`Zip::` to rubyzip.
 
 ziperu tracks the rubyzip 3.x API (`Ziperu::RUBYZIP_COMPAT_VERSION`), and
 diverges on purpose where rubyzip is lax: `InputStream` reads through the

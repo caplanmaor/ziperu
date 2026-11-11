@@ -27,7 +27,7 @@ exception!(pub ERROR, "Ziperu::Error");
 exception!(DECOMPRESSION_ERROR, "Ziperu::DecompressionError");
 exception!(NATIVE_SIZE_LIMIT_ERROR, "Ziperu::Native::SizeLimitError");
 exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
-exception!(NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
+exception!(pub NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
 exception!(pub DESTINATION_EXISTS_ERROR, "Ziperu::DestinationExistsError");
 exception!(pub ENTRY_SIZE_ERROR, "Ziperu::EntrySizeError");
 exception!(pub NATIVE_DUPLICATE_ENTRY_ERROR, "Ziperu::Native::DuplicateEntryError");
@@ -96,8 +96,59 @@ fn invalid_archive_message(msg: &str) -> String {
     if msg.contains("EOCD") {
         "Zip end of central directory signature not found".to_string()
     } else {
-        msg.to_string()
+        // Some of the crate's messages carry a placeholder it never fills.
+        msg.replace(" of {properties_size}", "")
     }
+}
+
+/// `io_error` for a failure while reading an archive's own structure (a
+/// central record, a local header): bytes that end early or make no
+/// sense are a broken archive, `Ziperu::Error`, not an `IOError`.
+pub fn header_error(ruby: &Ruby, err: io::Error) -> Error {
+    if is_foreign(&err) || crate::gvl::is_cancelled(&err) {
+        return io_error(ruby, err);
+    }
+    match err.kind() {
+        io::ErrorKind::UnexpectedEof => Error::new(
+            ruby.get_inner(&ERROR),
+            "invalid Zip archive: a header runs past the end of the data",
+        ),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => Error::new(
+            ruby.get_inner(&ERROR),
+            format!("invalid Zip archive: {err}"),
+        ),
+        _ => io_error(ruby, err),
+    }
+}
+
+/// An error that carries a Ruby exception or one of the crate's own.
+fn is_foreign(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|e| e.is::<RubyError>() || e.is::<ZipError>())
+}
+
+/// The kinds that are about the file system or the machine rather than
+/// the bytes being decoded.
+fn is_system(kind: io::ErrorKind) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        kind,
+        NotFound
+            | PermissionDenied
+            | AlreadyExists
+            | IsADirectory
+            | NotADirectory
+            | StorageFull
+            | WriteZero
+            | Interrupted
+            | OutOfMemory
+            | BrokenPipe
+            | ResourceBusy
+            | ReadOnlyFilesystem
+            | QuotaExceeded
+            | FileTooLarge
+            | TimedOut
+    )
 }
 
 /// Raised when a thread calls into a native object another thread is
@@ -139,24 +190,35 @@ pub fn io_error(ruby: &Ruby, err: io::Error) -> Error {
         io::ErrorKind::NotADirectory => Error::new(ruby.get_inner(&ENOTDIR), err.to_string()),
         _ if is_size_limit(&err) => size_limit_error(ruby),
         io::ErrorKind::InvalidData => decompression_error(ruby, &err.to_string()),
+        // An archive that ends early, or an offset no file can seek to
+        // (a forged zip64 field): a broken archive.
+        io::ErrorKind::UnexpectedEof => Error::new(
+            ruby.get_inner(&ERROR),
+            format!("invalid Zip archive: unexpected end of data ({err})"),
+        ),
+        io::ErrorKind::InvalidInput => Error::new(
+            ruby.get_inner(&ERROR),
+            format!("invalid Zip archive: {err}"),
+        ),
         _ => Error::new(ruby.exception_io_error(), err.to_string()),
     }
 }
 
-/// `io_error` for a failure while reading an entry's data, where the
-/// decoders report corrupt input as `InvalidInput` and a stream that ends
-/// early as `UnexpectedEof`: both are rubyzip's `DecompressionError`, which
-/// is what callers rescue around a read.
+/// `io_error` for a failure while reading an entry's data. The decoders
+/// each report corrupt input their own way (zlib as `InvalidInput`, a
+/// truncated stream as `UnexpectedEof`, zstd and lzma as `Other` with a
+/// message): all of it is rubyzip's `DecompressionError`, which is what
+/// callers rescue around a read. A file system error, an exception from a
+/// Ruby IO, an interrupt and the crate's own errors keep their own class.
 pub fn read_error(ruby: &Ruby, err: io::Error) -> Error {
-    let foreign = err
-        .get_ref()
-        .is_some_and(|e| e.is::<RubyError>() || e.is::<ZipError>());
-    match err.kind() {
-        io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof if !foreign => {
-            decompression_error(ruby, &err.to_string())
-        }
-        _ => io_error(ruby, err),
+    if is_foreign(&err)
+        || crate::gvl::is_cancelled(&err)
+        || is_size_limit(&err)
+        || is_system(err.kind())
+    {
+        return io_error(ruby, err);
     }
+    decompression_error(ruby, &err.to_string())
 }
 
 /// Work cut short because Ruby interrupted the thread (see `gvl`): the
