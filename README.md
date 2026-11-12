@@ -19,15 +19,18 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 [Magnus](https://github.com/matsadler/magnus). `require "zip"` aliases
 `Zip = Ziperu`, so existing code runs unchanged.
 
-On GitHub's Linux runners (Ruby 3.4, median of 5), against rubyzip 3.7.0:
+ziperu 0.2.3 on GitHub's Linux runners (Ruby 3.4, median of 5), against
+rubyzip 3.7.0:
 
 | scenario | rubyzip | ziperu | speedup |
 |---|---:|---:|---:|
-| read 1000 x 8 KB deflated entries | 80 ms | 14 ms | 5.8x |
-| open and list 10000 entries | 135 ms | 58 ms | 2.3x |
-| deflate one 64 MB entry | 188 ms | 77 ms | 2.4x |
-| extract_all 1000 entries | 169 ms | 80 ms | 2.1x |
-| add 1000 files from disk (`threads: 4`) | 214 ms | 60 ms | 3.6x |
+| read 1000 x 8 KB deflated entries | 110 ms | 18 ms | 6.1x |
+| inflate one 64 MB entry | 112 ms | 38 ms | 3.0x |
+| open and list 10000 entries | 184 ms | 75 ms | 2.5x |
+| deflate one 64 MB entry | 323 ms | 101 ms | 3.2x |
+| `get_output_stream` 1000 entries and commit | 310 ms | 84 ms | 3.7x |
+| append one entry to a 10000-entry archive | 1.16 s | 148 ms | 7.8x |
+| add 1000 files from disk (`threads: 4`) | 348 ms | 89 ms | 3.9x |
 
 macOS and Windows, every scenario, and which calls release the GVL (what
 Puma users ask about) are in [docs/benchmarks.md](docs/benchmarks.md).
