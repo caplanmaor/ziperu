@@ -288,7 +288,7 @@ module Ziperu
               "cannot open stream to directory entry - '#{new_entry}'"
       end
       new_entry.unix_perms = permissions
-      zip_streamable_entry = StreamableStream.new(new_entry)
+      zip_streamable_entry = StreamableStream.new(new_entry, @spool_budget ||= SpoolIO::Budget.new)
       @cdir << zip_streamable_entry
       @dirty = true
       zip_streamable_entry.get_output_stream(&a_proc)
@@ -556,6 +556,7 @@ module Ziperu
         ::Ziperu::OutputStream.open(@name, append: true, **stream_options) do |zos|
           zos.put_entries(appended, threads: @threads)
         end
+        was_append = true
       else
         on_success_replace do |tmp_file|
           ::Ziperu::OutputStream.open(tmp_file, **stream_options) do |zos|
@@ -576,8 +577,40 @@ module Ziperu
         @name = @write_to
         @write_to = nil
       end
-      initialize_cdir(@name)
+      initialize_cdir(@name) unless was_append && refresh_after_append(appended)
     end
+
+    # After an append: the entries already there are where they were, so
+    # they are kept (pointed at the archive reopened) and only the new
+    # records are read, rather than every entry built again. False, with
+    # nothing changed, when the archive does not hold what was expected;
+    # `initialize_cdir` then reads it all.
+    def refresh_after_append(appended)
+      held = @native.entry_count
+      native = InputStream.open_archive(@name, @settings)
+      unless native.entry_count == held + appended.size && !native.duplicate_names?
+        native.close
+        return false
+      end
+
+      fresh = native.entry_metas(held, appended.size).map do |meta|
+        Entry.from_meta(native, meta, self, metadata_encoding: @metadata_encoding, settings: @settings)
+      end
+      unless fresh.map { |e| e.name.b } == appended.map { |e| e.name.b }
+        native.close
+        return false
+      end
+
+      kept = @cdir.entries.first(held)
+      kept.each { |e| e.rebind_native(native) }
+      fresh.each { |e| @cdir << e }
+      @native.close
+      @native = native
+      @dirty = false
+      @file_permissions = ::File.stat(@name).mode
+      true
+    end
+    private :refresh_after_append
 
     # The entries to append, when the pending changes are additions and
     # nothing else: every entry the archive holds is still listed, in
@@ -589,9 +622,12 @@ module Ziperu
 
       all = @cdir.entries
       held = @native.entry_count
+      # The local headers there stay as they are; the crate writes the
+      # central directory again, which loses some fields, so those decide
+      # (without reading every local header, as `needs_restream?` would).
       return nil if all.size <= held || all.first(held).each_with_index.any? do |e, i|
-        !(e.index == i && e.backed_by?(@native) && !e.dirty? && !e.needs_restream? &&
-          !e.extra_changed? && !@cdir.shadowed?(e))
+        !(e.index == i && e.backed_by?(@native) && !e.dirty? && !e.changed? &&
+          !e.central_fields_lost_on_append? && !@cdir.shadowed?(e))
       end
 
       all.drop(held)

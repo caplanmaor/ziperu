@@ -227,6 +227,9 @@ pub fn read_error(ruby: &Ruby, err: io::Error) -> Error {
 /// caller should see. Should there be none, a plain `Ziperu::Error`.
 pub fn interrupted(ruby: &Ruby) -> Error {
     use magnus::rb_sys::AsRawValue;
+    if let Some(raised) = crate::gvl::take_raised() {
+        return raised;
+    }
     let nil = ruby.qnil().as_raw();
     // SAFETY: called with the GVL held; `protect` turns the exception that
     // `rb_thread_check_ints` raises into an `Err` rather than a longjmp

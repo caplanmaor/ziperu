@@ -110,6 +110,7 @@ module Ziperu
     def close
       @reader&.close
       @reader = nil
+      @lazy_open = false
       @stream&.close
       @stream = nil
       @archive&.close if @owns_archive
@@ -130,6 +131,7 @@ module Ziperu
         # entry again.
         @reader&.close
         @reader = nil
+        @lazy_open = false
         flush
         return @current_entry = nil
       end
@@ -137,7 +139,9 @@ module Ziperu
       @current_entry = Entry.from_meta(@archive, meta_at(@next_index),
                                        metadata_encoding: @metadata_encoding, settings: @settings)
       @next_index += 1
-      open_entry
+      # The entry's data is opened when it is first read: a walk that only
+      # looks at the entries reads no local header.
+      open_entry(lazy: true)
       @current_entry
     end
 
@@ -187,7 +191,7 @@ module Ziperu
 
       @lineno = 0
       @pos    = 0
-      wrap_errors { @reader.rewind }
+      wrap_errors { reader.rewind }
       flush
     end
 
@@ -200,7 +204,7 @@ module Ziperu
     # Not in rubyzip.
     def seek(offset, whence = ::IO::SEEK_SET)
       check_open!
-      raise Error, 'no entry to seek in' if @reader.nil?
+      raise Error, 'no entry to seek in' if reader.nil?
       raise Error, 'an entry read with streaming: true cannot be seeked in' if @stream
 
       target =
@@ -212,7 +216,7 @@ module Ziperu
         end
       raise Errno::EINVAL, "seek to #{target}" if target.negative?
 
-      wrap_errors { @reader.seek(target) }
+      wrap_errors { reader.seek(target) }
       flush
       @pos = [target, @current_entry.size].min
       0
@@ -392,7 +396,7 @@ module Ziperu
 
     protected
 
-    def open_entry # :nodoc:
+    def open_entry(lazy: false) # :nodoc:
       entry = @current_entry
       unless READABLE_COMPRESSION_METHODS.include?(entry.compression_method)
         raise CompressionMethodError, entry.compression_method
@@ -402,6 +406,19 @@ module Ziperu
         raise Error, PASSWORD_REQUIRED_MESSAGE
       end
 
+      @reader&.close
+      @reader = nil
+      @lazy_open = true
+      reader unless lazy
+      flush
+    end
+
+    # The native reader of the current entry, opened on first use.
+    def reader # :nodoc:
+      return @reader unless @lazy_open
+
+      @lazy_open = false
+      entry = @current_entry
       password = @decrypter&.password&.b
       @reader = wrap_errors do
         if entry.index
@@ -411,7 +428,6 @@ module Ziperu
                                  entry.crc, password, @enforce_size)
         end
       end
-      flush
     end
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:
@@ -420,8 +436,8 @@ module Ziperu
         raise TypeError, "no implicit conversion of #{maxlen.class} into Integer"
       end
       raise ArgumentError, "negative length #{maxlen} given" if maxlen&.negative?
-      return nil if @reader.nil?
       return produce_stream_input(maxlen) if @stream
+      return nil if reader.nil?
 
       wrap_errors { @reader.read(maxlen) }
     end
@@ -430,7 +446,7 @@ module Ziperu
       # A closed stream is not "at EOF": reading it raises, as with an IO.
       return false if closed?
 
-      @reader.nil? || @reader.eof?
+      reader.nil? || @reader.eof?
     end
 
     private

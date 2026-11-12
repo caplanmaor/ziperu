@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use crate::entry_options::{utf8_name, utf8_text, EntryOptions};
 use crate::errors::{busy_error, zip_error, IntoRuby, NATIVE_DUPLICATE_ENTRY_ERROR};
 use crate::gvl::maybe_without_gvl;
 use crate::rb::bytes_of;
-use crate::sink::{RubyOut, Sink, BUF_SIZE};
+use crate::sink::{RubyOut, Sink, TailBuf, BUF_SIZE, PATCH_BUF_SIZE};
 use crate::stream_stats::{Begun, Counting, EntryStats, StreamStats};
 use crate::zipcrypto::{self, Fields, Patch, Pending};
 
@@ -163,9 +163,8 @@ impl Writer {
             .truncate(true)
             .open(&path)
             .rb(ruby)?;
-        Ok(Self::seekable(ZipWriter::new(Sink::File(BufWriter::new(
-            file,
-        )))))
+        let sink = TailBuf::new(file, PATCH_BUF_SIZE).rb(ruby)?;
+        Ok(Self::seekable(ZipWriter::new(Sink::File(sink))))
     }
 
     pub fn open_memory() -> Self {
@@ -178,7 +177,7 @@ impl Writer {
         let attached = Arc::new(AtomicBool::new(true));
         let broken = Arc::new(AtomicBool::new(false));
         let out = RubyOut::new(io, Arc::clone(&attached), Arc::clone(&broken), true)?;
-        let sink = Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out));
+        let sink = Sink::Ruby(TailBuf::at(out, 0, 0, BUF_SIZE));
         Ok(Self::over_ruby_io(
             Zip::Seekable(ZipWriter::new(sink)),
             io,
@@ -196,7 +195,8 @@ impl Writer {
         let attached = Arc::new(AtomicBool::new(true));
         let broken = Arc::new(AtomicBool::new(false));
         let out = RubyOut::new(io, Arc::clone(&attached), Arc::clone(&broken), false)?;
-        let (counting, stats) = Counting::new(Sink::Ruby(BufWriter::with_capacity(BUF_SIZE, out)));
+        let sink = Sink::Ruby(TailBuf::at(out, 0, 0, BUF_SIZE));
+        let (counting, stats) = Counting::new(sink);
         Ok(Self::over_ruby_io(
             Zip::Stream(ZipWriter::new_stream(counting), Box::new(stats)),
             io,
@@ -217,21 +217,23 @@ impl Writer {
             .open(&path)
             .rb(ruby)?;
         let (tail_start, base) = {
-            let archive = ZipArchive::new(&mut file).rb(ruby)?;
+            let archive = ZipArchive::new(io::BufReader::new(&mut file)).rb(ruby)?;
             (archive.central_directory_start(), archive.len())
         };
         let mut tail = Vec::new();
         file.seek(SeekFrom::Start(tail_start))
             .and_then(|_| file.read_to_end(&mut tail))
             .rb(ruby)?;
+        let sink = TailBuf::new(file, PATCH_BUF_SIZE).rb(ruby)?;
+        let mut zip = ZipWriter::new_append(Sink::File(sink)).rb(ruby)?;
         // The crate leaves the position where its reading ended, at the
         // end of the file, and would write the new entries after the old
-        // central directory, leaving it as dead bytes. A second handle to
-        // the same open file shares its position: moving it moves the
-        // writer's.
-        let mut handle = file.try_clone().rb(ruby)?;
-        let zip = ZipWriter::new_append(Sink::File(BufWriter::new(file))).rb(ruby)?;
-        handle.seek(SeekFrom::Start(tail_start)).rb(ruby)?;
+        // central directory, leaving it as dead bytes.
+        // SAFETY: nothing is written yet; the crate takes the position as
+        // where the next entry begins.
+        if let Some(sink) = unsafe { zip.get_mut() } {
+            sink.seek(SeekFrom::Start(tail_start)).rb(ruby)?;
+        }
         let out = Self::seekable(zip);
         {
             let mut state = out.inner.borrow_mut();
@@ -485,23 +487,39 @@ impl Writer {
                 // is seen between them rather than after all of it.
                 for chunk in bytes.chunks(WRITE_CHUNK) {
                     crate::gvl::check()?;
-                    match state.crypto.pending.as_mut() {
-                        Some(pending) => {
-                            let cipher = pending.feed(chunk)?;
-                            with_zip!(zip, |w| w.write_all(&cipher))?;
-                        }
-                        None => {
-                            if let Some(stats) = zip.stats() {
-                                stats.feed(chunk);
-                            }
-                            with_zip!(zip, |w| w.write_all(chunk))?;
-                        }
-                    }
+                    feed(state, zip, chunk)?;
                 }
                 io::Result::Ok(())
             })
             .rb(ruby)?;
             Ok(len)
+        })
+    }
+
+    /// Writes the contents of the file at `path` to the entry in
+    /// progress, as `write` would, without passing them through Ruby.
+    /// Returns the byte count.
+    pub fn write_file(ruby: &Ruby, rb_self: &Self, path: String) -> Result<u64, Error> {
+        let mut file = fs::File::open(&path)
+            .map_err(|e| io::Error::new(e.kind(), format!("{e} @ rb_sysopen - {path}")))
+            .rb(ruby)?;
+        rb_self.with_state(ruby, |state, zip| {
+            maybe_without_gvl(rb_self.needs_gvl(), || {
+                let mut buf = vec![0u8; WRITE_CHUNK.min(1 << 18)];
+                let mut total = 0u64;
+                loop {
+                    crate::gvl::check()?;
+                    let n = match file.read(&mut buf) {
+                        Ok(0) => return Ok(total),
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e),
+                    };
+                    feed(state, zip, &buf[..n])?;
+                    total += n as u64;
+                }
+            })
+            .rb(ruby)
         })
     }
 
@@ -898,6 +916,23 @@ impl State {
             count: 0,
             crypto: Crypto::default(),
             append: None,
+        }
+    }
+}
+
+/// Hands `chunk` of the entry in progress to the crate: through the
+/// ZipCrypto cipher when the entry is one, and counted for a stream.
+fn feed(state: &mut State, zip: &mut Zip, chunk: &[u8]) -> io::Result<()> {
+    match state.crypto.pending.as_mut() {
+        Some(pending) => {
+            let cipher = pending.feed(chunk)?;
+            with_zip!(zip, |w| w.write_all(&cipher))
+        }
+        None => {
+            if let Some(stats) = zip.stats() {
+                stats.feed(chunk);
+            }
+            with_zip!(zip, |w| w.write_all(chunk))
         }
     }
 }

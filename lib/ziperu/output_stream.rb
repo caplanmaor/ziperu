@@ -396,6 +396,16 @@ module Ziperu
       self
     end
 
+    # Writes the file at `path` to the entry in progress, as `<<` of its
+    # contents would, without reading them into Ruby.
+    def write_file(path) # :nodoc:
+      raise IOError, 'closed stream' if @closed || @current_entry.nil?
+
+      start_deferred
+      @writer.write_file(path)
+      self
+    end
+
     private
 
     def finish_archive

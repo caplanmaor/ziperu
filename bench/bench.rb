@@ -136,6 +136,24 @@ SCENARIOS = {
       (SOME / 10).times { |i| zf.add("file#{i}.txt", src) }
     end
   end,
+  "list names and times of #{MANY} entries" => lambda do |lib, fx|
+    lib::File.open(fx.many_entries) { |zf| zf.each { |e| [e.name, e.time] } }
+  end,
+  "InputStream over #{MANY} entries, names only" => lambda do |lib, fx|
+    lib::InputStream.open(fx.many_entries) { |zis| nil while zis.get_next_entry }
+  end,
+  "Zip::File get_output_stream #{SOME} entries and commit" => lambda do |lib, fx|
+    out = File.join(fx.dir, "gos-#{lib.name.downcase}.zip")
+    FileUtils.rm_f(out)
+    lib::File.open(out, create: true) do |zf|
+      SOME.times { |i| zf.get_output_stream("file#{i}.txt") { |os| os.write(fx.small_payload) } }
+    end
+  end,
+  "append one entry to a #{MANY}-entry archive" => lambda do |lib, fx|
+    out = File.join(fx.dir, "append-#{lib.name.downcase}.zip")
+    FileUtils.cp(fx.many_entries, out)
+    lib::File.open(out) { |zf| zf.get_output_stream('new.txt') { |os| os.write('new') } }
+  end,
   # ziperu only: the same work on four threads, against rubyzip's one.
   "extract_all #{SOME} entries (ziperu: threads: 4)" => lambda do |lib, fx|
     dest = File.join(fx.dir, "extract4-#{lib.name.downcase}")

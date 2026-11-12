@@ -19,6 +19,19 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 [Magnus](https://github.com/matsadler/magnus). `require "zip"` aliases
 `Zip = Ziperu`, so existing code runs unchanged.
 
+On GitHub's Linux runners (Ruby 3.4, median of 5), against rubyzip 3.7.0:
+
+| scenario | rubyzip | ziperu | speedup |
+|---|---:|---:|---:|
+| read 1000 x 8 KB deflated entries | 80 ms | 14 ms | 5.8x |
+| open and list 10000 entries | 135 ms | 58 ms | 2.3x |
+| deflate one 64 MB entry | 188 ms | 77 ms | 2.4x |
+| extract_all 1000 entries | 169 ms | 80 ms | 2.1x |
+| add 1000 files from disk (`threads: 4`) | 214 ms | 60 ms | 3.6x |
+
+macOS and Windows, every scenario, and which calls release the GVL (what
+Puma users ask about) are in [docs/benchmarks.md](docs/benchmarks.md).
+
 - **Precompiled** for Linux (glibc and musl), macOS and Windows, Ruby 3.1 to 4.0. No toolchain, no runtime dependencies.
 - **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, unchanged entries are copied byte for byte on commit, and a commit that only adds entries appends them in place.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, XZ, PPMd, AES and ZipCrypto.
@@ -40,25 +53,8 @@ Or on its own:
 gem install ziperu
 ```
 
-Bundler and `gem install` pick the precompiled gem for the platform
-(`x86_64-linux-gnu`, `x86_64-linux-musl`, `aarch64-linux-gnu`,
-`aarch64-linux-musl`, `arm-linux-musl`, `x86_64-darwin`, `arm64-darwin`,
-`x64-mingw-ucrt`, `aarch64-mingw-ucrt`), each holding the extension for
-Ruby 3.1 through 4.0. The glibc gems need RubyGems 3.3.22 or later (Ruby
-3.1.4 ships it); the musl gems need `libgcc` (`apk add libgcc`, already in
-the `ruby:3.2-alpine` and later images). Anywhere else the source gem
-builds with Rust 1.88+.
-
-Which Rubies, and how firmly:
-
-| Ruby | Status |
-| --- | --- |
-| 3.3, 3.4, 4.0 | Supported. The suite runs on Linux, macOS and Windows on every change; binaries ship. |
-| 3.1, 3.2 | Best effort. Past end of life upstream; binaries still ship and the suite runs on 3.1, but a fix that needs a newer Ruby may drop them, in a minor release and with a changelog entry. |
-| ruby-head | Watched. A non-blocking CI job runs the suite nightly, so a new Ruby gets binaries the day it is released. |
-
-JRuby and TruffleRuby are not supported: the core is a native extension
-against the CRuby API. rubyzip remains the library for those.
+Precompiled gems ship for Linux, macOS and Windows; see
+[Platforms](#platforms) for the details.
 
 ## Quick start
 
@@ -284,18 +280,14 @@ dump, reads entries in large chunks, copies unchanged entries byte for
 byte on `commit`, and releases the GVL while inflating from a file or
 String buffer and while deflating to a file, so other Ruby threads keep running.
 
-On GitHub's Linux runners (Ruby 3.4, median of 5), against rubyzip 3.7.0:
+## Platforms
 
-| scenario | rubyzip | ziperu | speedup |
-|---|---:|---:|---:|
-| read 1000 x 8 KB deflated entries | 80 ms | 14 ms | 5.8x |
-| open and list 10000 entries | 135 ms | 58 ms | 2.3x |
-| deflate one 64 MB entry | 188 ms | 77 ms | 2.4x |
-| extract_all 1000 entries | 169 ms | 80 ms | 2.1x |
-| add 1000 files from disk (`threads: 4`) | 214 ms | 60 ms | 3.6x |
-
-macOS and Windows, every scenario, and which calls release the GVL (what
-Puma users ask about) are in [docs/benchmarks.md](docs/benchmarks.md).
+- **Ruby 3.3 to 4.0** are supported and tested on Linux, macOS and Windows.
+  3.1 and 3.2 still get binaries, best effort.
+- **Precompiled** for x86_64 and aarch64 Linux (glibc and musl; musl needs
+  `libgcc`), Intel and Apple Silicon macOS, and x64 and arm64 Windows.
+  Elsewhere the source gem builds with Rust 1.88+.
+- **CRuby only**: on JRuby or TruffleRuby, use rubyzip.
 
 ## Development
 

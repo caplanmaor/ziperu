@@ -19,7 +19,7 @@ use zip::ZipArchive;
 
 use crate::errors::{busy_error, header_error, read_error, zip_read_error, IntoRuby};
 use crate::gvl::{maybe_without_gvl, Cancellable};
-use crate::rb::bytes_of;
+use crate::rb::{bytes_of, read_into_string, size_believable};
 use crate::reader::{open_local_entry, EntryInfo, EntryReader};
 use crate::source::Source;
 
@@ -422,7 +422,19 @@ impl Archive {
         // A clone (the central directory is shared behind an Arc) so the
         // borrow is released before the GVL is.
         let mut archive = rb_self.archive(ruby)?.clone();
+        let data_end = archive.central_directory_start();
         let mut entry = archive.by_index(index).rb(ruby)?;
+        let size = entry.size();
+        let method = compression_code(entry.compression());
+        if !entry.encrypted() && size_believable(method, size, entry.compressed_size(), data_end) {
+            return read_into_string(
+                ruby,
+                rb_self.needs_gvl,
+                size as usize,
+                &mut Cancellable(&mut entry),
+            )
+            .map_err(|e| read_error(ruby, e));
+        }
         // A hint only: the declared size is untrusted and may be a lie.
         let mut buf = Vec::with_capacity(entry.size().min(CAPACITY_HINT_MAX) as usize);
         maybe_without_gvl(rb_self.needs_gvl, || {

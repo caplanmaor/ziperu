@@ -108,6 +108,17 @@ module Ziperu
     end
     private :parsed_extra
 
+    # The fields as far as the central directory has them (with any local
+    # ones already merged in, and edits), or nil when it has none: no
+    # local header is read.
+    def central_extra
+      return @extra if @extra
+      return nil if @extra_raw.nil? || @extra_raw.empty?
+
+      parsed_extra
+    end
+    private :central_extra
+
     # Whether the extra fields differ from what the archive holds. Such an
     # edit is written whenever the archive is next committed, but does not
     # call for a commit by itself, as in rubyzip: `FileSystem#chown` edits
@@ -128,6 +139,12 @@ module Ziperu
     end
 
     attr_writer :size # :nodoc:
+
+    # Reads from `native` from now on, which holds the entry's record at
+    # the same index (see Ziperu::File#refresh_after_append).
+    def rebind_native(native) # :nodoc:
+      @source.rebind(native)
+    end
 
     # Index of the entry in the archive's central directory, or nil for an
     # entry that is not (yet) in an archive, or that the native core cannot
@@ -249,12 +266,20 @@ module Ziperu
 
     # Get a timestamp component of this entry. Returns modification time by
     # default.
+    #
+    # The modification time comes from the central directory's fields,
+    # which carry it in full, as rubyzip reads it; the access and creation
+    # times are only in the local header's, which is read for them. Listing
+    # the times of a large archive so reads no local header.
     def time(component: :mtime)
+      fields = component == :mtime ? central_extra : extra
       time =
-        if extra[:universaltime]
-          extra[:universaltime].send(component)
-        elsif extra[:ntfs]
-          extra[:ntfs].send(component)
+        if fields.nil?
+          nil
+        elsif fields[:universaltime]
+          fields[:universaltime].send(component)
+        elsif fields[:ntfs]
+          fields[:ntfs].send(component)
         end
 
       time || (stored_time if component == :mtime)
@@ -307,7 +332,8 @@ module Ziperu
 
     # Does this entry return time fields with accurate timezone information?
     def absolute_time?
-      extra.member?(:universaltime) || extra.member?(:ntfs)
+      fields = central_extra
+      !fields.nil? && (fields.member?(:universaltime) || fields.member?(:ntfs))
     end
 
     # Returns STORED if the entry is a directory or the compression level is 0.
@@ -554,8 +580,12 @@ module Ziperu
         zip_output_stream.put_next_entry(self)
       when :restream
         zip_output_stream.put_next_entry(self)
-        get_input_stream do |is|
-          ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
+        if (path = native_source_path)
+          zip_output_stream.write_file(path)
+        else
+          get_input_stream do |is|
+            ::Ziperu::IOExtras.copy_stream(zip_output_stream, is)
+          end
         end
       when :copy_encrypted
         zip_output_stream.copy_encrypted_entry(self)
@@ -572,6 +602,19 @@ module Ziperu
     # its own headers, `:copy_raw` otherwise. Raises, with the reason, for
     # an entry that would have to be restreamed but cannot be (encrypted,
     # or a compression method the writer lacks).
+    # The file on disk a regular file entry added from a path is written
+    # from, when the native core can open it by name; nil otherwise.
+    def native_source_path # :nodoc:
+      return nil unless pending_data? && ftype == :file
+
+      path = @source.path
+      return nil unless path
+
+      path = path.to_path if path.respond_to?(:to_path)
+      path = path.to_s
+      path if path.ascii_only? || (path.encoding == ::Encoding::UTF_8 && path.valid_encoding?)
+    end
+
     def write_plan # :nodoc:
       # A symlink's target goes into the header call, whether the link is
       # new or a copy that has to be written afresh (an edit, or extra
@@ -613,6 +656,14 @@ module Ziperu
 
     def loses_fields_on_raw_copy? # :nodoc:
       restreamable? && (extra.keys & RAW_COPY_LOSES).any?
+    end
+
+    # Whether appending to the archive, which leaves this entry's local
+    # header alone but has the crate write its central record again,
+    # would lose fields of that record.
+    def central_fields_lost_on_append? # :nodoc:
+      fields = central_extra
+      !fields.nil? && restreamable? && (fields.keys & RAW_COPY_LOSES).any?
     end
 
     # Whether the writer can decompress and rewrite the entry: it is not

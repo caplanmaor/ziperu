@@ -192,6 +192,9 @@ struct Inner {
     /// position of the next byte, and of the end of the data. A read
     /// this way checks no CRC (only reading from the start can).
     raw: Option<(u64, u64)>,
+    /// Whether a read of the rest of the entry may go straight into a
+    /// String of the declared size (`rb::size_believable`).
+    direct: bool,
 }
 
 #[derive(TypedData)]
@@ -337,12 +340,22 @@ impl EntryReader {
         needs_gvl: bool,
         io: Option<Opaque<Value>>,
     ) -> Result<Self, Error> {
+        let direct = enforce_size
+            && password.is_none()
+            && info.method.is_some_and(|m| {
+                crate::rb::size_believable(
+                    m,
+                    info.size,
+                    info.compressed_size,
+                    archive.central_directory_start(),
+                )
+            });
         let entry = OwnedEntry::open(archive, enforce_size, password, &info).rb(ruby)?;
         let size = enforce_size.then_some(info.size);
-        // Nothing to read only when there is no data either: an entry
-        // declared empty but holding data is a lie the crate's size check
-        // should catch.
-        let finished = size == Some(0) && info.compressed_size == 0;
+        // Nothing to read only when there is no data either, and the CRC
+        // is that of no data: an entry declared empty but holding data, or
+        // with another CRC, is a lie the crate's checks should catch.
+        let finished = size == Some(0) && info.compressed_size == 0 && info.crc32 == 0;
         Ok(Self {
             inner: RefCell::new(Inner {
                 entry: Some(entry),
@@ -356,6 +369,7 @@ impl EntryReader {
                 raw_source: None,
                 data_start: None,
                 raw: None,
+                direct,
             }),
             io,
         })
@@ -431,6 +445,9 @@ impl EntryReader {
             inner.consumed += want;
             return Ok(Some(ruby.str_from_slice(&buf)));
         }
+        if buf.is_empty() && probe && inner.direct && want >= crate::rb::DIRECT_READ_MIN {
+            return Self::read_direct(ruby, &mut inner, want as usize);
+        }
         let Inner {
             entry, finished, ..
         } = &mut *inner;
@@ -484,6 +501,52 @@ impl EntryReader {
         Ok(Some(ruby.str_from_slice(&buf)))
     }
 
+    /// The rest of the entry, `want` bytes to its declared size, read
+    /// straight into the String handed back (see `rb::fill_new_string`),
+    /// with the same outcomes as the chunked way: an interrupt leaves what
+    /// was read pending for the next read, any other error poisons the
+    /// reader, and data past the declared size is a size-limit error.
+    fn read_direct(ruby: &Ruby, inner: &mut Inner, want: usize) -> Result<Option<RString>, Error> {
+        let needs_gvl = inner.needs_gvl;
+        if inner.finished {
+            return Ok(None);
+        }
+        let Some(file) = inner.entry.as_mut().and_then(|e| e.file.as_mut()) else {
+            return Ok(None);
+        };
+        let (out, result) = crate::rb::fill_new_string(
+            ruby,
+            needs_gvl,
+            want,
+            &mut crate::gvl::Cancellable(file),
+            |r| {
+                let mut extra = [0u8; 1];
+                r.read(&mut extra).map(|n| n != 0)
+            },
+        );
+        match result {
+            Ok((filled, oversize)) => {
+                inner.consumed += filled as u64;
+                if filled < want || oversize.is_some() {
+                    inner.finished = true;
+                }
+                if oversize == Some(true) {
+                    return Err(size_limit_error(ruby));
+                }
+                Ok((filled > 0).then_some(out))
+            }
+            Err(e) => {
+                if crate::gvl::is_cancelled(&e) {
+                    // SAFETY: copied out at once, with the GVL held.
+                    inner.pending = unsafe { out.as_slice() }.to_vec();
+                } else {
+                    inner.failed = Some(e.to_string());
+                }
+                Err(read_error(ruby, e))
+            }
+        }
+    }
+
     pub fn rewind(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
         let mut inner = rb_self.inner(ruby)?;
         let Inner {
@@ -504,7 +567,7 @@ impl EntryReader {
             return Err(zip_error(ruby, e));
         }
         *consumed = 0;
-        *finished = *size == Some(0) && info.compressed_size == 0;
+        *finished = *size == Some(0) && info.compressed_size == 0 && info.crc32 == 0;
         inner.pending.clear();
         inner.failed = None;
         inner.raw = None;

@@ -332,8 +332,8 @@ class ZipOutputStreamTest < Minitest::Test
     assert_equal ["None", COMMENT, ENTRIES.size.to_s], out.lines.map(&:chomp)
   end
 
-  # A seekable IO receives each entry as the next one starts, as rubyzip
-  # streams; nothing waits for close.
+  # A seekable IO receives the archive as it is written, in chunks of up
+  # to 64 KB, as rubyzip streams; nothing waits for close.
   def test_write_buffer_streams_entry_by_entry_into_a_seekable_io
     io = StringIO.new
     positions = []
@@ -341,15 +341,23 @@ class ZipOutputStreamTest < Minitest::Test
       ENTRIES.each do |name|
         zos.put_next_entry(name)
         zos.write(File.binread(fixture("text/#{name}")))
-        positions << io.pos
+      end
+      40.times do |i|
+        zos.put_next_entry("more/#{i}", nil, nil, Ziperu::Entry::STORED)
+        zos.write(Random.new(i).bytes(8 * 1024))
+        positions << io.string.bytesize
       end
     end
     assert_equal positions, positions.sort
-    assert_equal positions.size, positions.uniq.size
-    assert_operator positions.first, :>, 0
+    assert_operator positions.uniq.size, :>, 3, "the IO is written to along the way"
+    assert_operator positions.last, :>, 40 * 8 * 1024 - 64 * 1024
     assert_operator io.pos, :>, positions.last, "the central directory follows the entries"
     assert_equal io.pos, io.string.bytesize
-    assert_test_zip_contents(StringIO.new(io.string))
+    Ziperu::File.open_buffer(io.string) do |zf|
+      assert_equal ENTRIES.size + 40, zf.size
+      ENTRIES.each { |name| assert_equal File.binread(fixture("text/#{name}")), zf.read(name) }
+      assert_equal Random.new(39).bytes(8 * 1024), zf.read("more/39")
+    end
   end
 
   def test_write_buffer_round_trips_a_string_io_file_and_tempfile

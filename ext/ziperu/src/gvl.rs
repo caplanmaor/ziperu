@@ -156,26 +156,97 @@ pub fn without_gvl<F: FnOnce() -> R, R>(f: F) -> R {
     // `Cancelled` error our loops return gets the interrupt raised the
     // safe way (`errors::interrupted`), or Ruby raises it at its next
     // check once we are back in Ruby code.
-    unsafe {
-        rb_sys::rb_thread_call_without_gvl2(
-            Some(trampoline_for(&call)),
-            &mut call as *mut _ as *mut c_void,
-            Some(unblock),
-            Arc::as_ptr(&flag) as *mut c_void,
-        );
-    }
-    if let Some(run) = call.f.take() {
-        // Ruby returned without running `f`: some interrupt flag was set,
-        // which includes its routine thread-scheduling timer, not only a
-        // `Thread#raise` or a signal. Run `f` here with the GVL held, as
-        // if it had to keep it; a real interrupt is raised once we are
-        // back in Ruby code.
-        return run();
+    // SAFETY (each call): `call` and `flag` outlive it, and the unblock
+    // function only stores to the flag.
+    let mut refusals = 0;
+    loop {
+        unsafe {
+            rb_sys::rb_thread_call_without_gvl2(
+                Some(trampoline_for(&call)),
+                &mut call as *mut _ as *mut c_void,
+                Some(unblock),
+                Arc::as_ptr(&flag) as *mut c_void,
+            );
+        }
+        let Some(run) = call.f.take() else { break };
+        // Ruby returned without running `f`: an interrupt flag was set.
+        // Often that is only its routine thread-scheduling timer; running
+        // `f` with the GVL held then would make it impossible to
+        // interrupt and keep every other thread waiting. So: with an
+        // exception queued for this thread (`Thread#raise`, `Timeout`,
+        // Ctrl-C), `f` runs already cancelled, stops at its first check,
+        // and the exception is raised the usual way (`errors::interrupted`,
+        // or Ruby's next check). Otherwise Ruby handles what is pending and
+        // the GVL is released on another try.
+        if exception_pending() {
+            flag.store(true, Ordering::Release);
+            return run();
+        }
+        refusals += 1;
+        if refusals > 3 {
+            // Refused again and again: run it here, as it always could.
+            return run();
+        }
+        if !handle_routine_interrupts() {
+            flag.store(true, Ordering::Release);
+            return run();
+        }
+        call.f = Some(run);
     }
     match call.out.take().expect("trampoline ran") {
         Ok(r) => r,
         Err(panic) => resume_unwind(panic),
     }
+}
+
+/// Whether an exception is queued for this thread, waiting for its next
+/// interrupt check: `Thread#pending_interrupt?`, which leaves it queued.
+fn exception_pending() -> bool {
+    use magnus::prelude::*;
+    let Ok(ruby) = magnus::Ruby::get() else {
+        return false;
+    };
+    ruby.thread_current()
+        .funcall::<_, _, bool>("pending_interrupt?", ())
+        .unwrap_or(false)
+}
+
+/// Lets Ruby handle the interrupts it has pending for this thread, none of
+/// them an exception queued for it (`exception_pending` said so): thread
+/// scheduling, finalizers, signal traps. False if one of those raised
+/// after all (a trap handler, say); that exception is kept for
+/// `errors::interrupted` to raise.
+fn handle_routine_interrupts() -> bool {
+    let Ok(ruby) = magnus::Ruby::get() else {
+        return false;
+    };
+    use magnus::rb_sys::AsRawValue;
+    let nil = ruby.qnil().as_raw();
+    // SAFETY: the GVL is held; `protect` turns what `rb_thread_check_ints`
+    // raises into an `Err` rather than a longjmp through Rust frames.
+    let result = magnus::rb_sys::protect(|| {
+        unsafe { rb_sys::rb_thread_check_ints() };
+        nil
+    });
+    match result {
+        Ok(_) => true,
+        Err(e) => {
+            RAISED.with(|r| *r.borrow_mut() = Some(e));
+            false
+        }
+    }
+}
+
+thread_local! {
+    /// An exception that handling routine interrupts raised, for
+    /// `errors::interrupted` to raise in its place. It is the thread's
+    /// `$!` meanwhile, which keeps it alive.
+    static RAISED: RefCell<Option<magnus::Error>> = const { RefCell::new(None) };
+}
+
+/// The exception `handle_routine_interrupts` caught, if any; taken.
+pub fn take_raised() -> Option<magnus::Error> {
+    RAISED.with(|r| r.borrow_mut().take())
 }
 
 /// `without_gvl` unless the work needs the interpreter (a Ruby-backed

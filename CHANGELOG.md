@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+Faster (Windows, against 0.2.2):
+
+- Writing many small entries to a file: the header each entry patches
+  at its end is now still in the write buffer, so it costs no system
+  call. 1000 entries of 8 KB: 46 to 32 ms; 10,000 tiny entries: 315 to
+  180 ms. A seekable Ruby IO (`write_buffer`) gets the same, in 64 KB
+  chunks.
+- `File#get_output_stream` keeps an entry in memory until the commit
+  rather than opening a tempfile for each one; past 8 MB held between
+  an archive's pending entries, the rest go to tempfiles as before.
+  1000 entries and a commit: 981 to 58 ms.
+- `Entry#time` reads the modification time from the central directory,
+  as rubyzip does, rather than the entry's local header; the access and
+  creation times still come from there. Listing names and times of
+  10,000 entries: 153 to 78 ms.
+- Appending to a large archive no longer reads every entry's local
+  header, reads the central directory through a buffer, and keeps the
+  entries it had after the commit (same objects) rather than building
+  them all again. One entry added to a 10,000-entry archive: 337 to
+  98 ms.
+- `InputStream#get_next_entry` opens the entry's data when it is first
+  read, so walking only the names reads no local header: 103 to 40 ms
+  for 10,000 entries.
+- Reading a whole entry of 64 KB or more (`File#read`, and
+  `get_input_stream`'s `read` of the rest of one, which is what roo and
+  caxlsx do) decompresses straight into the returned String: no second
+  copy, and half the peak memory. 64 MB: 58 to 17 ms; a 64 MB Stored
+  entry: 62 to 18 ms. An interrupted read rescued still loses nothing.
+- Files added by path (`add`, `add_stored`, `replace`) are read by the
+  native core at commit instead of through Ruby: a 64 MB `add_stored`
+  and commit, 141 to 34 ms.
+
+Fixed:
+
+- Native work could not be interrupted, and kept every other thread
+  waiting, whenever Ruby declined to release the GVL for it because an
+  interrupt flag was set (often just its thread-scheduling timer): it
+  then ran to the end with the GVL held. Now a pending `Thread#raise`,
+  `Timeout` or Ctrl-C stops it at once, and otherwise the GVL is
+  released on another try.
+- `get_input_stream.read` of an entry whose central record declares it
+  empty but gives a CRC of some data returned `""`; it raises, as
+  `File#read` does.
+
 ## 0.2.2 (2026-11-11)
 
 Fixed:

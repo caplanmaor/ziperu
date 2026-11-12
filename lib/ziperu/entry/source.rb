@@ -109,6 +109,12 @@ module Ziperu
           @index ? archive.local_extra(@index) : archive.local_extra_at(offset)
         end
 
+        # Moves the record to `native`, which holds it at the same index:
+        # the archive reopened after entries were appended to it.
+        def rebind(native)
+          @native = native
+        end
+
         def detached
           NONE
         end
