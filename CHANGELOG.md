@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 (2026-11-11)
 
 Faster (Windows, against 0.2.2):
 
