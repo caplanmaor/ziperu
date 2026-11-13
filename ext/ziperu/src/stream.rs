@@ -537,3 +537,83 @@ fn apply_zip64(extra: &[u8], size: &mut u64, csize: &mut u64) -> bool {
 fn stream_error(ruby: &Ruby, err: io::Error) -> Error {
     crate::errors::header_error(ruby, err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_rng::{Rng, CASES};
+
+    const SATURATED: u64 = u32::MAX as u64;
+
+    fn field(id: u16, data: &[u8]) -> Vec<u8> {
+        let mut out = id.to_le_bytes().to_vec();
+        out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    #[test]
+    fn property_any_extra_bytes_are_survived() {
+        let mut rng = Rng::new(4);
+        for _ in 0..CASES {
+            let mut extra = rng.bytes(64);
+            if rng.below(2) == 0 && extra.len() >= 2 {
+                extra[..2].copy_from_slice(&ZIP64_EXTRA_ID.to_le_bytes());
+            }
+            let (mut size, mut csize) = (SATURATED, SATURATED);
+            apply_zip64(&extra, &mut size, &mut csize);
+        }
+    }
+
+    #[test]
+    fn property_the_zip64_field_fills_only_saturated_sizes() {
+        let mut rng = Rng::new(5);
+        for case in 0..CASES {
+            let (true_size, true_csize) = (rng.next(), rng.next());
+            let size_saturated = rng.below(2) == 0;
+            let csize_saturated = rng.below(2) == 0;
+            let mut data = Vec::new();
+            if size_saturated {
+                data.extend_from_slice(&true_size.to_le_bytes());
+            }
+            if csize_saturated {
+                data.extend_from_slice(&true_csize.to_le_bytes());
+            }
+            // Other fields before it, as writers put them.
+            let mut extra = Vec::new();
+            for _ in 0..rng.below(3) {
+                let other = rng.bytes(12);
+                extra.extend(field(0x5455 + rng.below(4) as u16, &other));
+            }
+            extra.extend(field(ZIP64_EXTRA_ID, &data));
+            let mut size = if size_saturated { SATURATED } else { 10 };
+            let mut csize = if csize_saturated { SATURATED } else { 20 };
+            assert!(apply_zip64(&extra, &mut size, &mut csize), "case {case}");
+            assert_eq!(
+                size,
+                if size_saturated { true_size } else { 10 },
+                "case {case}"
+            );
+            assert_eq!(
+                csize,
+                if csize_saturated { true_csize } else { 20 },
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn property_without_a_zip64_field_nothing_changes() {
+        let mut rng = Rng::new(6);
+        for case in 0..CASES {
+            let mut extra = Vec::new();
+            for _ in 0..rng.below(4) {
+                let other = rng.bytes(20);
+                extra.extend(field(0x000A + rng.below(0x100) as u16, &other));
+            }
+            let (mut size, mut csize) = (SATURATED, 7);
+            assert!(!apply_zip64(&extra, &mut size, &mut csize), "case {case}");
+            assert_eq!((size, csize), (SATURATED, 7), "case {case}");
+        }
+    }
+}

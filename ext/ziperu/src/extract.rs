@@ -899,4 +899,86 @@ mod tests {
         );
         assert_eq!(safe_path("C:/", "x").as_deref(), Some("C:/x"));
     }
+
+    /// A name made of the pieces that matter to the check: separators of
+    /// both kinds, `.`, `..`, empty components, drive letters and plain
+    /// names.
+    fn random_name(rng: &mut crate::test_rng::Rng) -> String {
+        const PIECES: &[&str] = &[
+            "a",
+            "b",
+            "dest",
+            "dest_evil",
+            "..",
+            ".",
+            "",
+            "/",
+            "\\",
+            "C:",
+            "x.txt",
+        ];
+        let len = rng.below(8);
+        let mut name = String::new();
+        for _ in 0..len {
+            name.push_str(rng.pick(PIECES));
+            name.push(*rng.pick(&['/', '\\', '/']));
+        }
+        name.push_str(rng.pick(PIECES));
+        name
+    }
+
+    #[test]
+    fn property_a_safe_path_is_strictly_inside_and_normal() {
+        const DESTS: &[&str] = &["/p/dest", "/p/dest/", "C:/p/dest", "//srv/share/dest", "/"];
+        let mut rng = crate::test_rng::Rng::new(1);
+        for case in 0..crate::test_rng::CASES {
+            let dest = *rng.pick(DESTS);
+            let name = random_name(&mut rng);
+            let resolved = resolve(dest, &name);
+            // Normalised: nothing a second pass would change.
+            assert_eq!(
+                resolve(&resolved, ""),
+                resolved,
+                "case {case}: {dest:?} + {name:?}"
+            );
+            assert!(!resolved.contains('\\'), "case {case}: {resolved:?}");
+            let Some(path) = safe_path(dest, &name) else {
+                continue;
+            };
+            assert_eq!(path, resolved);
+            if dest != "/" {
+                let root = resolve(dest, "");
+                let prefix = format!("{}/", root.trim_end_matches('/'));
+                assert!(
+                    path.starts_with(&prefix),
+                    "case {case}: {path:?} not under {prefix:?}"
+                );
+                assert!(
+                    path.len() > prefix.len(),
+                    "case {case}: the destination itself"
+                );
+            }
+            let below = &path[resolve(dest, "").len()..];
+            assert!(
+                below.split('/').all(|c| c != ".." && c != "."),
+                "case {case}: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn property_a_name_without_dot_dot_stays_inside() {
+        let mut rng = crate::test_rng::Rng::new(2);
+        for case in 0..crate::test_rng::CASES {
+            let name = random_name(&mut rng);
+            let climbs = name.split(['/', '\\']).any(|c| c == "..");
+            let empty = name.split(['/', '\\']).all(|c| c.is_empty() || c == ".");
+            if !climbs && !empty {
+                assert!(
+                    safe_path("/p/dest", &name).is_some(),
+                    "case {case}: {name:?}"
+                );
+            }
+        }
+    }
 }

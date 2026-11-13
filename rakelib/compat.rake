@@ -81,16 +81,30 @@ namespace :compat do
       result
     end
 
-    # The committed COMPAT.md is the baseline: fewer passes than it
-    # records is a regression (COMPAT_ACCEPT=1 to take a new, lower one).
-    baseline = File.read(COMPAT_REPORT)[/\*\*(\d+) of \d+ tests pass/, 1]&.to_i if File.exist?(COMPAT_REPORT)
-    write_report(results)
+    # The committed COMPAT.md is the baseline, test by test: a test that
+    # fails now and did not then, a file that no longer loads, or a file
+    # with fewer passes is a regression, whatever the total does. The
+    # report is only rewritten for a full run without one
+    # (COMPAT_ACCEPT=1 takes the new results anyway).
+    regressions = if File.exist?(COMPAT_REPORT)
+                    compat_regressions(compat_baseline(File.read(COMPAT_REPORT)),
+                                       results)
+                  else
+                    []
+                  end
     totals = totals_for(results)
     puts
     puts "#{totals[:passed]}/#{totals[:runs]} rubyzip tests pass (#{percent(totals[:passed], totals[:runs])}%); " \
-         "#{totals[:load_errors]} files failed to load. Report: COMPAT.md"
-    if !only && baseline && totals[:passed] < baseline && !ENV["COMPAT_ACCEPT"]
-      abort "rubyzip compatibility regressed: #{totals[:passed]} tests pass, COMPAT.md recorded #{baseline}"
+         "#{totals[:load_errors]} files failed to load."
+    if regressions.any? && !ENV["COMPAT_ACCEPT"]
+      abort "rubyzip compatibility regressed against COMPAT.md (COMPAT_ACCEPT=1 to take it):\n" \
+            "#{regressions.map { |r| "  #{r}" }.join("\n")}"
+    end
+    if only
+      puts "ONLY was set: COMPAT.md left as it was."
+    else
+      write_report(results)
+      puts "Report: COMPAT.md"
     end
   end
 end
@@ -145,9 +159,47 @@ def run_test_file(file)
   end
 
   runs, _asserts, failures, errors, skips = summary.scan(/\d+/).map(&:to_i)
-  failed = out.scan(/^\s*\d+\) (?:Failure|Error):\n(\S+)/).flatten
+  # An error's line is "Class#test_name:", a failure's
+  # "Class#test_name [file:line]:".
+  failed = out.scan(/^\s*\d+\) (?:Failure|Error):\n(\S+)/).flatten.map { |t| t.delete_suffix(":") }
   { file: file, runs: runs, failures: failures, errors: errors, skips: skips,
     passed: runs - failures - errors - skips, failed_tests: failed }
+end
+
+# What a COMPAT.md records, per file: `{ passed:, load_error:, failed: }`,
+# `failed` the names under "Failing tests".
+def compat_baseline(report)
+  files = Hash.new { |h, k| h[k] = { passed: 0, load_error: false, failed: [] } }
+  section = nil
+  report.each_line do |line|
+    case line
+    when /\A\| (\S+_test\.rb) \| — \| load error/
+      files[Regexp.last_match(1)][:load_error] = true
+    when /\A\| (\S+_test\.rb) \| (\d+) \|/
+      files[Regexp.last_match(1)][:passed] = Integer(Regexp.last_match(2))
+    when /\A\*\*(\S+_test\.rb)\*\*/
+      section = Regexp.last_match(1)
+    when /\A- `([^`]+)`/
+      files[section][:failed] << Regexp.last_match(1).delete_suffix(":") if section
+    end
+  end
+  files
+end
+
+# How `results` fall short of `baseline`, one line each.
+def compat_regressions(baseline, results)
+  results.flat_map do |r|
+    before = baseline.fetch(r[:file], nil)
+    next [] unless before # a file rubyzip added: nothing to compare with
+
+    if r[:load_error]
+      before[:load_error] ? [] : ["#{r[:file]} no longer loads: #{r[:reason]}"]
+    else
+      newly = (r[:failed_tests].uniq - before[:failed]).sort.map { |t| "#{r[:file]}: #{t} now fails" }
+      newly << "#{r[:file]}: #{r[:passed]} pass, COMPAT.md recorded #{before[:passed]}" if r[:passed] < before[:passed]
+      newly
+    end
+  end
 end
 
 def format_summary(r)

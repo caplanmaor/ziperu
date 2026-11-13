@@ -322,4 +322,37 @@ mod tests {
         }
         assert_eq!(&plain, b"hello world");
     }
+
+    fn decrypt(keys: &mut Keys, buf: &mut [u8]) {
+        for byte in buf {
+            let plain = *byte ^ keys.stream_byte();
+            keys.update(plain);
+            *byte = plain;
+        }
+    }
+
+    #[test]
+    fn property_any_data_and_password_round_trip_in_any_chunks() {
+        let mut rng = crate::test_rng::Rng::new(3);
+        for case in 0..crate::test_rng::CASES {
+            let password = rng.bytes(16);
+            let data = rng.bytes(300);
+            let check = rng.next() as u8;
+            let mut keys = Keys::new(&password);
+            let mut header = keys.header(check).expect("randomness");
+            let mut cipher = data.clone();
+            // Encrypting in pieces is the same as in one go.
+            let mut at = 0;
+            while at < cipher.len() {
+                let end = (at + 1 + rng.below(40)).min(cipher.len());
+                keys.encrypt(&mut cipher[at..end]);
+                at = end;
+            }
+            let mut keys = Keys::new(&password);
+            decrypt(&mut keys, &mut header);
+            assert_eq!(header[HEADER_SIZE - 1], check, "case {case}: check byte");
+            decrypt(&mut keys, &mut cipher);
+            assert_eq!(cipher, data, "case {case}");
+        }
+    }
 }

@@ -15,6 +15,8 @@ mod sink;
 mod source;
 mod stream;
 mod stream_stats;
+#[cfg(test)]
+mod test_rng;
 mod writer;
 mod zipcrypto;
 

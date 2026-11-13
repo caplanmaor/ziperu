@@ -81,6 +81,14 @@ Internal:
 - RuboCop (`rake rubocop`, and a CI job) with a configuration that keeps
   rubyzip's style in the ported files; clippy now requires a `SAFETY:`
   comment on every unsafe block.
+- `rake compat` gates test by test against COMPAT.md, not on the total:
+  a test that newly fails, a file that no longer loads or a file with
+  fewer passes fails the task, and COMPAT.md is only rewritten by a full
+  run without a regression (or with `COMPAT_ACCEPT=1`). COMPAT.md is
+  regenerated: 419 of 476 rubyzip tests pass.
+- Seeded property tests in the Rust crate (`cargo test`) for the
+  extraction path check, the zip64 extra field parser and the ZipCrypto
+  round trip, 5,000 cases each.
 
 ## 0.2.3 (2026-11-11)
 
