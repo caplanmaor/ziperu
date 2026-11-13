@@ -199,7 +199,18 @@ Everything here is additive: code that does not use it behaves as above.
 - **Integrity check.** `Ziperu::File#verify` inflates every entry to nowhere
   so the CRC of each is checked, releasing the GVL meanwhile, and returns a
   Hash of failing entries to the exception each raised (empty when sound).
-  Encrypted entries are checked when a `decrypter:` is given.
+  Encrypted entries are checked when a `decrypter:` is given and skipped
+  otherwise; `verify(report: true)` returns a `Ziperu::VerifyReport` that
+  lists the skipped entries too, and is not `ok?` while any were.
+- **Extraction preview.** `extraction_plan(dest, **options)` lists what
+  `extract_all` with the same options would do with each entry, writing
+  nothing. Each item says where the entry goes and whether it would be
+  extracted or why not. It also says whether something is already there
+  and which entries collide once sanitized.
+- **Limit profiles.** `Ziperu::Limits::UPLOAD` and `STRICT` are frozen
+  Hashes of the limit settings. Pass one as keywords
+  (`File.open(path, **Ziperu::Limits::UPLOAD)`) or set the globals from
+  it with `Ziperu::Limits.apply`.
 - **Symlink entries.** `add` of a symlink stores a link entry (target as
   content, `S_IFLNK` in the attributes) instead of a copy of the target.
   `extract_all(dir, symlinks: :create)` and `extract(..., symlinks: :create)`

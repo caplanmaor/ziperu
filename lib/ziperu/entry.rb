@@ -968,18 +968,8 @@ module Ziperu
       end
 
       target = symlink_target
-      resolved = ::File.expand_path(target, ::File.dirname(dest_path))
-      unless resolved.start_with?(dest_dir + ::File::SEPARATOR) || resolved == dest_dir
-        warn "WARNING: skipped symlink '#{@name}' to '#{target}' as it points outside the destination."
-        return
-      end
-      # The check above is lexical. A `..` after a name is not: through a
-      # link, `b/..` is the parent of wherever `b` points, so `c -> b/..`
-      # with `b -> .` is really the destination's parent. Leading `..`s
-      # only climb real directories (the ones on the way were checked).
-      parts = target.split(%r{[/\\]}).reject { |part| part.empty? || part == '.' }
-      if parts.drop_while { |part| part == '..' }.include?('..')
-        warn "WARNING: skipped symlink '#{@name}' to '#{target}' as a '..' after a name could lead through a link."
+      if (why = symlink_refusal(target, dest_path, dest_dir))
+        warn "WARNING: skipped symlink '#{@name}' to '#{target}' as #{why}."
         return
       end
 
@@ -994,6 +984,23 @@ module Ziperu
     rescue NotImplementedError, Errno::EACCES, Errno::EPERM => e
       warn "WARNING: could not create symlink '#{dest_path}': #{e.message}"
     end
+
+    # Why a link to `target` at `dest_path` must not be made under
+    # `dest_dir`, or nil when it may.
+    def symlink_refusal(target, dest_path, dest_dir)
+      resolved = ::File.expand_path(target, ::File.dirname(dest_path))
+      unless resolved.start_with?(dest_dir + ::File::SEPARATOR) || resolved == dest_dir
+        return 'it points outside the destination'
+      end
+
+      # The check above is lexical. A `..` after a name is not: through a
+      # link, `b/..` is the parent of wherever `b` points, so `c -> b/..`
+      # with `b -> .` is really the destination's parent. Leading `..`s
+      # only climb real directories (the ones on the way were checked).
+      parts = target.split(%r{[/\\]}).reject { |part| part.empty? || part == '.' }
+      "a '..' after a name could lead through a link" if parts.drop_while { |part| part == '..' }.include?('..')
+    end
+    public :symlink_refusal # :nodoc:
 
     # The first link already on disk below `dest_dir` on the way to `path`,
     # and at `path` itself when `leaf`, or nil. A junction counts (Ruby's
@@ -1013,6 +1020,7 @@ module Ziperu
       end
       nil
     end
+    public :link_on_the_way # :nodoc:
 
     def set_unix_attributes_on_path(dest_path) # :nodoc:
       # Ignore setuid/setgid bits by default. Honour if @restore_ownership.

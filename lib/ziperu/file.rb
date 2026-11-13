@@ -398,15 +398,27 @@ module Ziperu
     # each is checked. Returns a Hash of the entries that failed to the
     # exception raised for them; empty when the archive is sound. Encrypted
     # entries are checked when a `decrypter` is given and skipped otherwise.
+    #
+    # With `report: true` it returns a Ziperu::VerifyReport instead, which
+    # also says which entries were checked and which were skipped and why,
+    # so that an archive with nothing checked does not pass for a sound one:
+    #
+    #   report = zf.verify(report: true)
+    #   report.ok?        # => false when anything failed or was skipped
+    #   report.skipped    # => { entry => :encrypted }
+    #
     # Not in rubyzip.
-    def verify(decrypter: nil)
+    def verify(decrypter: nil, report: false)
       native = native_archive
       password = (decrypter&.password || @password)&.b
-      failures = {}
+      result = VerifyReport.new
       entries.each do |entry|
-        # An entry replaced from disk has nothing in the archive to check.
-        next if entry.directory? || !entry.backed_by?(native)
-        next if entry.encrypted? && password.nil?
+        # A directory has no data to check.
+        next if entry.directory?
+        # An entry added or replaced from disk has nothing in the archive
+        # to check yet.
+        next result.add_skipped(entry, :not_written) unless entry.backed_by?(native)
+        next result.add_skipped(entry, :encrypted) if entry.encrypted? && password.nil?
 
         begin
           if entry.index
@@ -415,11 +427,12 @@ module Ziperu
             native.verify_entry_at(entry.local_header_offset, entry.size, entry.compressed_size,
                                    entry.crc, password)
           end
+          result.add_verified(entry)
         rescue Error, IOError => e
-          failures[entry] = e
+          result.add_failed(entry, e)
         end
       end
-      failures
+      report ? result.freeze : result.failed
     end
 
     # Closes the zip file committing any changes that has been made.

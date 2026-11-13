@@ -70,6 +70,8 @@ require_relative "ziperu/deflater"
 require_relative "ziperu/streamable_directory"
 require_relative "ziperu/file_split"
 require_relative "ziperu/file"
+require_relative "ziperu/verify_report"
+require_relative "ziperu/limits"
 require_relative "ziperu/size_estimator"
 
 # Drop-in replacement for rubyzip, backed by a Rust core.

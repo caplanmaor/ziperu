@@ -239,6 +239,31 @@ Ziperu::File.open(upload, max_entries: 1_000, max_total_size: 1 << 30) { |zip| .
 Ziperu::OutputStream.open("out.zip", write_extended_timestamps: true) { |zos| ... }
 ```
 
+`Ziperu::Limits` has ready-made sets of these: `UPLOAD` for archives
+users upload, `STRICT` for small documents, `NONE` to clear them.
+
+```ruby
+Ziperu::File.open(upload, **Ziperu::Limits::UPLOAD) { |zip| ... }
+Ziperu::Limits.apply(Ziperu::Limits::STRICT)     # the globals
+```
+
+Look before you extract. `extraction_plan` says what `extract_all` would
+do with each entry, without writing anything. `verify(report: true)` says
+which entries were checked, which failed and which were skipped:
+
+```ruby
+Ziperu::File.open(upload) do |zip|
+  plan = zip.extraction_plan("out", sanitize: :windows)
+  plan.reject(&:extract?).each { |item| warn "#{item.entry.name}: #{item.status}" }
+  plan.select(&:collides_with)        # entries that land on the same path
+  plan.sum(&:declared_size)           # declared bytes to be written
+
+  report = zip.verify(report: true)
+  report.ok?                          # false if anything failed or was skipped
+  report.skipped                      # { entry => :encrypted }, say
+end
+```
+
 ## Migrating from rubyzip
 
 Change the Gemfile line and keep `require "zip"`: the `Zip` constant and

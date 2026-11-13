@@ -47,6 +47,26 @@ Fixed, failures that destroyed data:
   old one aside first; if the new one then could not be renamed into
   place, neither was left at the path. The old one is now put back.
 
+Added:
+
+- `File#verify(report: true)` returns a `Ziperu::VerifyReport` listing
+  the entries verified, the ones that failed (with the exception) and
+  the ones skipped and why (`:encrypted` without a password,
+  `:not_written` for an entry added since opening). `ok?` is false when
+  anything was skipped, so an archive with nothing checked no longer
+  passes for a sound one. Without `report:`, `verify` returns the
+  failures as before.
+- `File#extraction_plan(dest, **options)` says what `extract_all` would
+  do, entry by entry, without writing anything: the path each entry goes
+  to, whether it would be extracted or why not (`:unsafe`,
+  `:through_link`, `:symlink_skipped`, `:symlink_refused`), whether
+  something is already there, which entries land on the same path once
+  sanitized, and the declared size (`declared_size`). It is built from the same plan
+  `extract_all` follows.
+- `Ziperu::Limits::UPLOAD`, `STRICT` and `NONE`: ready-made sets of the
+  limit settings, as keywords for one archive or through
+  `Ziperu::Limits.apply` for all.
+
 Faster (Windows, against 0.2.3):
 
 - Opening an archive hands each entry's facts from the native core as

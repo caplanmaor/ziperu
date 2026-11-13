@@ -75,10 +75,49 @@ module Ziperu
       self
     end
 
+    # What `extract_all(destination_directory, **options)` would do, entry
+    # by entry, without writing anything: one ExtractionPlan::Item per
+    # entry, in the order they would be extracted. Takes the options
+    # `extract_all` takes that change the outcome (`symlinks:`,
+    # `exclude:`, `junk_paths:`, `sanitize:`):
+    #
+    #   plan = zf.extraction_plan("out", sanitize: :windows)
+    #   plan.reject(&:extract?).each { |item| puts "#{item.entry.name}: #{item.status}" }
+    #   plan.select(&:collides_with).map(&:path)   # names that clash once sanitized
+    #   plan.sum(&:declared_size)                  # declared bytes to be written
+    #
+    # The disk is only looked at: whether something is already at each
+    # path, and whether a link is on the way. Not in rubyzip.
+    def extraction_plan(destination_directory = '.', symlinks: :skip, exclude: nil, junk_paths: false,
+                        sanitize: nil)
+      ExtractionPlan.new(@cdir.writable_entries, exclude: exclude, junk_paths: junk_paths, sanitize: sanitize)
+                    .preview(destination_directory, symlinks: symlinks)
+    end
+
     # Which entries an `extract_all` writes, in what order, and to which
     # name under the destination: decided from the archive and the options
     # alone, before anything touches the disk.
     class ExtractionPlan # :nodoc:
+      # One entry of `File#extraction_plan`:
+      #
+      # - `entry`, and `name`, the path under the destination it goes to
+      #   (after `junk_paths:` and `sanitize:`); `path`, the absolute one;
+      # - `kind`: `:file`, `:directory` or `:symlink`; `declared_size`:
+      #   the bytes the entry says it holds (0 for a directory or link);
+      # - `status`: `:extract`, `:unsafe` (it resolves outside the
+      #   destination), `:through_link` (a link on disk is on the way, at
+      #   `link`), `:symlink_skipped` (without `symlinks: :create`) or
+      #   `:symlink_refused` (its target is not allowed, `reason` says why);
+      # - `exists`: something is already at `path` (`on_exists:` decides);
+      # - `collides_with`: an earlier entry that goes to the same path (on
+      #   Windows, the same path in any case), or nil.
+      Item = Struct.new(:entry, :name, :path, :kind, :declared_size, :status, :exists, :collides_with, :link, :reason,
+                        keyword_init: true) do
+        def extract?
+          status == :extract
+        end
+      end
+
       # `entries` are the archive's writable entries (of several records
       # under one name only the last, the one rubyzip would know).
       def initialize(entries, exclude: nil, junk_paths: false, sanitize: nil)
@@ -103,7 +142,47 @@ module Ziperu
         ordered.map { |e| [e, target_for(e.name)] }
       end
 
+      # The Items for extracting under `destination_directory`.
+      def preview(destination_directory, symlinks: :skip)
+        dest = ::File.absolute_path(destination_directory || '.')
+        seen = {}
+        targets.map do |entry, name|
+          path = ::File.absolute_path(::File.join(dest, name))
+          kind = kind_of(entry)
+          item = Item.new(entry: entry, name: name, path: path, kind: kind,
+                          declared_size: kind == :file ? entry.size.to_i : 0)
+          item.status = status_of(item, dest, symlinks)
+          item.exists = ::File.symlink?(path) || ::File.exist?(path)
+          key = ::Ziperu::RUNNING_ON_WINDOWS ? path.downcase : path
+          item.collides_with = seen[key]&.entry unless kind == :directory && seen[key]&.kind == :directory
+          seen[key] ||= item
+          item
+        end
+      end
+
       private
+
+      def kind_of(entry)
+        if entry.directory? then :directory
+        elsif entry.symlink? then :symlink
+        else :file
+        end
+      end
+
+      # What `extract_all` would do with the item; fills in `link` or
+      # `reason` where they apply.
+      def status_of(item, dest, symlinks)
+        inside = item.path.start_with?(dest + ::File::SEPARATOR) || dest == ::File::SEPARATOR
+        return :unsafe unless inside
+
+        entry = item.entry
+        return :through_link if (item.link = entry.link_on_the_way(dest, item.path, leaf: item.kind != :symlink))
+        return :extract unless item.kind == :symlink
+        return :symlink_skipped unless symlinks == :create
+
+        item.reason = entry.symlink_refusal(entry.symlink_target, item.path, dest)
+        item.reason ? :symlink_refused : :extract
+      end
 
       # Whether `name` matches one of the `exclude:` patterns: a glob
       # (`File.fnmatch` with `*` crossing `/`, as `unzip -x` has it) or a
