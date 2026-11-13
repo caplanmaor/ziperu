@@ -10,8 +10,8 @@ use std::fs;
 use std::io::{self, Read};
 
 use magnus::{
-    gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
-    Symbol, TypedData, Value,
+    gc::Marker, prelude::*, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash,
+    RString, Ruby, Symbol, TypedData, Value,
 };
 use zip::read::{ZipFileEntry, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
@@ -713,44 +713,37 @@ fn zip_header_error(ruby: &Ruby, err: ZipError) -> Error {
     }
 }
 
+/// The fields of an entry's facts, in row order: the Hash keys of
+/// `to_hash` and the positions of `to_row`. `Native::Archive::ROW_FIELDS`
+/// hands the list to Ruby, where `Entry::ROW_FIELDS` must equal it (a test
+/// checks).
+pub(crate) const ROW_FIELDS: [&str; ROW_LEN] = [
+    "index",
+    "name",
+    "size",
+    "compressed_size",
+    "crc",
+    "compression_method",
+    "flags",
+    "external_attributes",
+    "fstype",
+    "version_made_by",
+    "dos_date",
+    "dos_time",
+    "comment",
+    "extra",
+    "header_offset",
+];
+
+/// The number of fields in a row.
+const ROW_LEN: usize = 15;
+
 /// The Hash keys, interned once per listing rather than once per entry.
-struct MetaKeys {
-    index: Symbol,
-    name: Symbol,
-    size: Symbol,
-    compressed_size: Symbol,
-    crc: Symbol,
-    compression_method: Symbol,
-    flags: Symbol,
-    external_attributes: Symbol,
-    fstype: Symbol,
-    version_made_by: Symbol,
-    dos_date: Symbol,
-    dos_time: Symbol,
-    comment: Symbol,
-    extra: Symbol,
-    header_offset: Symbol,
-}
+struct MetaKeys([Symbol; ROW_LEN]);
 
 impl MetaKeys {
     fn new(ruby: &Ruby) -> Self {
-        Self {
-            index: ruby.to_symbol("index"),
-            name: ruby.to_symbol("name"),
-            size: ruby.to_symbol("size"),
-            compressed_size: ruby.to_symbol("compressed_size"),
-            crc: ruby.to_symbol("crc"),
-            compression_method: ruby.to_symbol("compression_method"),
-            flags: ruby.to_symbol("flags"),
-            external_attributes: ruby.to_symbol("external_attributes"),
-            fstype: ruby.to_symbol("fstype"),
-            version_made_by: ruby.to_symbol("version_made_by"),
-            dos_date: ruby.to_symbol("dos_date"),
-            dos_time: ruby.to_symbol("dos_time"),
-            comment: ruby.to_symbol("comment"),
-            extra: ruby.to_symbol("extra"),
-            header_offset: ruby.to_symbol("header_offset"),
-        }
+        Self(ROW_FIELDS.map(|name| ruby.to_symbol(name)))
     }
 }
 
@@ -760,8 +753,8 @@ fn small_source(archive: &ZipArchive<Source>) -> Source {
     archive.clone().into_inner().clone_small()
 }
 
-/// One entry's facts as Ruby gets them: a Hash (`to_hash`, keyed as
-/// `MetaKeys`) or a row Array (`to_row`, in `ROW_FIELDS` order).
+/// One entry's facts as Ruby gets them: a Hash (`to_hash`) or a row Array
+/// (`to_row`), both laid out by `ROW_FIELDS`.
 struct Meta<'a> {
     /// The crate's index, or `None` for a record it dropped (one of
     /// several under the same name).
@@ -836,50 +829,51 @@ impl<'a> Meta<'a> {
         }
     }
 
+    /// The fields, in `ROW_FIELDS` order. With `empty_as_nil` an empty
+    /// comment or extra field is nil rather than a String of its own.
+    fn values(&self, ruby: &Ruby, empty_as_nil: bool) -> [Value; ROW_LEN] {
+        let bytes = |b: &[u8]| {
+            if empty_as_nil && b.is_empty() {
+                ruby.qnil().as_value()
+            } else {
+                ruby.str_from_slice(b).as_value()
+            }
+        };
+        [
+            ruby.into_value(self.index),
+            ruby.str_from_slice(self.name).as_value(),
+            ruby.into_value(self.size),
+            ruby.into_value(self.compressed_size),
+            ruby.into_value(self.crc),
+            ruby.into_value(self.method),
+            ruby.into_value(self.flags),
+            ruby.into_value(self.external_attributes),
+            ruby.into_value(self.fstype),
+            ruby.into_value(self.version_made_by),
+            ruby.into_value(self.dos_date),
+            ruby.into_value(self.dos_time),
+            bytes(self.comment),
+            bytes(self.extra),
+            ruby.into_value(self.header_offset),
+        ]
+    }
+
+    /// The fields as a Hash keyed by `ROW_FIELDS`.
     fn to_hash(&self, ruby: &Ruby, keys: &MetaKeys) -> Result<RHash, Error> {
         let h = ruby.hash_new();
-        h.aset(keys.index, self.index)?;
-        h.aset(keys.name, ruby.str_from_slice(self.name))?;
-        h.aset(keys.size, self.size)?;
-        h.aset(keys.compressed_size, self.compressed_size)?;
-        h.aset(keys.crc, self.crc)?;
-        h.aset(keys.compression_method, self.method)?;
-        h.aset(keys.flags, self.flags)?;
-        h.aset(keys.external_attributes, self.external_attributes)?;
-        h.aset(keys.fstype, self.fstype)?;
-        h.aset(keys.version_made_by, self.version_made_by)?;
-        h.aset(keys.dos_date, self.dos_date)?;
-        h.aset(keys.dos_time, self.dos_time)?;
-        h.aset(keys.comment, ruby.str_from_slice(self.comment))?;
-        h.aset(keys.extra, ruby.str_from_slice(self.extra))?;
-        h.aset(keys.header_offset, self.header_offset)?;
+        for (key, value) in keys.0.iter().zip(self.values(ruby, false)) {
+            h.aset(*key, value)?;
+        }
         Ok(h)
     }
 
-    /// The number of fields in a row (`Entry::ROW_FIELDS` in Ruby).
-    const ROW_LEN: usize = 15;
-
-    /// The same fields as `to_hash`, in its order, as one Array; an empty
-    /// comment or extra field is nil rather than a String of its own.
-    /// `Entry::ROW_FIELDS` names the positions on the Ruby side.
+    /// The same fields as one Array, in `ROW_FIELDS` order, an empty
+    /// comment or extra field nil.
     fn to_row(&self, ruby: &Ruby) -> Result<RArray, Error> {
-        let bytes = |b: &[u8]| (!b.is_empty()).then(|| ruby.str_from_slice(b));
-        let row = ruby.ary_new_capa(Self::ROW_LEN);
-        row.push(self.index)?;
-        row.push(ruby.str_from_slice(self.name))?;
-        row.push(self.size)?;
-        row.push(self.compressed_size)?;
-        row.push(self.crc)?;
-        row.push(self.method)?;
-        row.push(self.flags)?;
-        row.push(self.external_attributes)?;
-        row.push(self.fstype)?;
-        row.push(self.version_made_by)?;
-        row.push(self.dos_date)?;
-        row.push(self.dos_time)?;
-        row.push(bytes(self.comment))?;
-        row.push(bytes(self.extra))?;
-        row.push(self.header_offset)?;
+        let row = ruby.ary_new_capa(ROW_LEN);
+        for value in self.values(ruby, true) {
+            row.push(value)?;
+        }
         Ok(row)
     }
 }

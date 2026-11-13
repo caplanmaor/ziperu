@@ -19,7 +19,7 @@ end
 # GC-stress and valgrind (rakelib/mem.rake) tasks run these.
 NATIVE_BOUNDARY_TESTS = %w[
   test/io_source_test.rb test/extract_all_native_test.rb test/duplicate_names_test.rb
-  test/review_regressions_test.rb test/streaming_test.rb
+  test/failure_recovery_test.rb test/io_semantics_test.rb test/streaming_test.rb
 ].freeze
 
 # Run with `GC.stress` on (see test_helper.rb) to catch unmarked values. A

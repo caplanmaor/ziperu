@@ -29,6 +29,11 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let native = zip.define_module("Native")?;
 
     let archive = native.define_class("Archive", ruby.class_object())?;
+    // What each position of an `each_entry_row` row holds, and the keys of
+    // the Hashes; `Entry::ROW_FIELDS` is checked against it.
+    let row_fields = ruby.ary_from_iter(archive::ROW_FIELDS.iter().map(|f| ruby.to_symbol(f)));
+    row_fields.freeze();
+    archive.const_set("ROW_FIELDS", row_fields)?;
     archive.define_singleton_method("open_path", function!(archive::Archive::open_path, 1))?;
     archive.define_singleton_method("open_bytes", function!(archive::Archive::open_bytes, 1))?;
     archive.define_singleton_method("open_io", function!(archive::Archive::open_io, 1))?;

@@ -25,11 +25,6 @@ module Ziperu
 
     IO_METHODS = %i[tell seek read eof close].freeze # :nodoc:
 
-    # Entries handed to the native extractor per call, so an interrupt is
-    # noticed between calls rather than after the whole archive.
-    NATIVE_EXTRACT_BATCH = 256
-    private_constant :NATIVE_EXTRACT_BATCH
-
     # The name of this zip archive.
     attr_reader :name
 
@@ -399,118 +394,6 @@ module Ziperu
       add(entry, src_path)
     end
 
-    # Extracts `entry` to a file at `entry_path`, with
-    # `destination_directory` as the base. The block (or Ziperu.on_exists_proc)
-    # decides whether an existing file is overwritten.
-    def extract(entry, entry_path = nil, destination_directory: '.', symlinks: :skip, on_exists: nil,
-                &block)
-      found_entry = get_entry(entry)
-      entry_path ||= found_entry.name
-      found_entry.extract(entry_path, destination_directory: destination_directory,
-                                      symlinks: symlinks, on_exists: on_exists, &block)
-    end
-
-    # Extracts every entry in the archive into `destination_directory`,
-    # preserving the archive's directory structure. Symlink entries are
-    # skipped with a warning; see `Entry#extract` for the path-safety checks
-    # applied to every other entry.
-    #
-    # `symlinks:` is `:skip` (the default, with a warning per link, as in
-    # rubyzip 3) or `:create`, which creates links whose target stays inside
-    # `destination_directory`. `progress:` is called with
-    # `(entry, done, total)` after each entry.
-    # `threads: n` extracts the files on that many threads (the archive is
-    # read through one handle per thread); a file or String archive only,
-    # since an IO is driven from Ruby. Directories are made first, links
-    # last, as before. An error is raised for the first entry (in archive
-    # order) that failed, once every thread has stopped.
-    #
-    # The policies `unzip` has: `on_exists:` is `:raise` (the default),
-    # `:overwrite` (`unzip -o`) or `:skip` (`unzip -n`) for a path already
-    # taken, where rubyzip only offers a block; `exclude:` lists globs (or
-    # Regexps) of entry names to leave out (`unzip -x`), matched against
-    # the whole name, so `"*.log"` matches at any depth; `junk_paths: true`
-    # drops the directories and puts every file in `destination_directory`
-    # itself (`unzip -j`); `sanitize: :windows` rewrites names that Windows
-    # refuses (`<>:"|?*`, control characters, a trailing dot or space,
-    # `CON`, `NUL` and the like) so the archive extracts there at all.
-    def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, threads: 1,
-                    on_exists: nil, exclude: nil, junk_paths: false, sanitize: nil, &block)
-      # Directories first, so files have somewhere to go; links last, so
-      # nothing is written through one. Of several records under one name
-      # only the last is extracted, which is the one rubyzip would know.
-      dirs, rest = @cdir.writable_entries.partition(&:directory?)
-      links, others = rest.partition(&:symlink?)
-      ordered = dirs + others + links
-      ordered = ordered.reject { |e| excluded?(e.name, exclude) } if exclude
-      ordered = ordered.reject(&:directory?) if junk_paths
-      targets = ordered.map { |e| [e, extract_target(e.name, junk_paths, sanitize)] }
-      report = progress_reporter(progress, targets.size)
-
-      # With no block to consult about paths already taken (the policy
-      # says, or Ziperu.on_exists_proc), the native core extracts every
-      # qualifying entry in one call; the rest take the per-entry path.
-      policy = on_exists || (@settings.on_exists_proc ? :overwrite : :raise)
-      slow = if block.nil? && !@restore_ownership
-               extract_all_native(targets, destination_directory, report, threads, policy)
-             else
-               targets
-             end
-
-      slow.each do |entry, target|
-        if entry.symlink? && symlinks != :create
-          warn "WARNING: skipped symlink '#{entry.name}' during extract_all."
-        else
-          entry.extract(target, destination_directory:     destination_directory,
-                                create_parent_directories: true,
-                                symlinks:                  symlinks,
-                                on_exists:                 on_exists, &block)
-        end
-        report.call(entry)
-      end
-
-      self
-    end
-
-    # Whether `name` matches one of `patterns`: a glob (`File.fnmatch`
-    # with `*` crossing `/`, as `unzip -x` has it) or a Regexp.
-    def excluded?(name, patterns)
-      Array(patterns).any? do |pattern|
-        case pattern
-        when ::Regexp then pattern.match?(name)
-        else ::File.fnmatch?(pattern.to_s, name, ::File::FNM_EXTGLOB | ::File::FNM_DOTMATCH)
-        end
-      end
-    end
-    private :excluded?
-
-    # The path under the destination an entry goes to.
-    def extract_target(name, junk_paths, sanitize)
-      name = ::File.basename(name) if junk_paths
-      case sanitize
-      when nil, false then name
-      when :windows then self.class.sanitize_windows_name(name)
-      else raise ArgumentError, "sanitize: takes :windows, not #{sanitize.inspect}"
-      end
-    end
-    private :extract_target
-
-    WINDOWS_RESERVED_NAMES = /\A(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|\z)/i # :nodoc:
-
-    # `name` as Windows will take it: in each component the characters it
-    # refuses (`<>:"|?*` and controls) become `_`, a trailing dot or space
-    # goes, and a reserved device name gets a leading `_`.
-    # Not in rubyzip.
-    def self.sanitize_windows_name(name)
-      trailing = name.end_with?('/') ? '/' : ''
-      parts = name.split('/').map do |part|
-        part = part.gsub(/[<>:"|?*\x00-\x1f]/, '_').sub(/[. ]+\z/, '')
-        part = "_#{part}" if part.match?(WINDOWS_RESERVED_NAMES)
-        part.empty? ? '_' : part
-      end
-      parts.join('/') + trailing
-    end
-
     # Inflates every entry (without writing anything) so that the CRC of
     # each is checked. Returns a Hash of the entries that failed to the
     # exception raised for them; empty when the archive is sound. Encrypted
@@ -539,184 +422,6 @@ module Ziperu
       failures
     end
 
-    # Commits changes made since the previous commit to the zip archive: a
-    # new archive is written beside the old one and renamed over it.
-    def commit
-      return if name.kind_of?(StringIO) || !commit_required?
-
-      appended = write_changes
-      # Only now are the changes on disk; until here the entries keep
-      # their dirty state so a failed commit can be retried.
-      @cdir.each(&:clean_up)
-      if @write_to
-        # From here on this object works on the archive just written:
-        # what it holds now includes the changes, and a later commit
-        # updates it rather than starting again from the original (which
-        # would drop what this commit wrote).
-        @name = @write_to
-        @write_to = nil
-      end
-      initialize_cdir(@name) unless appended && refresh_after_append(appended)
-    end
-
-    # Writes the archive out with its changes. Returns the entries added
-    # when they were appended in place, nil when the archive was written
-    # whole.
-    def write_changes
-      if @write_to
-        # The changes go to a new archive; the one opened is not touched,
-        # and keeps being what this object reads. It is written beside
-        # its path and renamed into place once complete, so a failure
-        # leaves whatever was at the path as it was.
-        dirname, basename = ::File.split(@write_to)
-        ::Dir::Tmpname.create(basename, dirname) do |tmp_filename|
-          write_all_entries(tmp_filename)
-          ::File.rename(tmp_filename, @write_to)
-        ensure
-          FileUtils.rm_f(tmp_filename)
-        end
-        nil
-      elsif (appended = appended_entries)
-        # Only additions: they go after the entries already there, which
-        # are left untouched (see Ziperu.append_in_place). A failure puts
-        # the archive back as it was.
-        ::Ziperu::OutputStream.open(@name, append: true, **stream_options) do |zos|
-          zos.put_entries(appended, threads: @threads)
-        end
-        appended
-      else
-        learn_raw_copy_losses
-        on_success_replace do |tmp_file|
-          write_all_entries(tmp_file)
-          true
-        end
-        nil
-      end
-    end
-    private :write_changes
-
-    def write_all_entries(target)
-      ::Ziperu::OutputStream.open(target, **stream_options) do |zos|
-        zos.put_entries(@cdir.writable_entries, threads: @threads)
-        zos.comment = comment
-      end
-    end
-    private :write_all_entries
-
-    # Before a rewrite: which entries a raw copy would lose fields of, asked
-    # of the native core for all of them at once rather than by reading
-    # each one's local header into Ruby (see Entry#loses_fields_on_raw_copy?).
-    def learn_raw_copy_losses
-      return unless @native
-
-      candidates = @cdir.entries.select do |e|
-        e.index && !e.pending_data? && e.backed_by?(@native) && e.restreamable?
-      end
-      return if candidates.empty?
-
-      lossy = @native.indices_with_extra_fields(candidates.map(&:index), Entry::RAW_COPY_LOSES_IDS)
-      lossy = lossy.to_h { |i| [i, true] }
-      candidates.each { |e| e.raw_copy_loses = lossy.key?(e.index) }
-    rescue Error
-      # Only a shortcut: should the archive no longer read as it did (the
-      # file changed under it, say), each entry is asked the long way.
-      nil
-    end
-    private :learn_raw_copy_losses
-
-    # After an append: the entries already there are where they were, so
-    # they are kept (pointed at the archive reopened) and only the new
-    # records are read, rather than every entry built again. False, with
-    # nothing changed, when the archive does not hold what was expected;
-    # `initialize_cdir` then reads it all.
-    def refresh_after_append(appended)
-      held = @native.entry_count
-      native = InputStream.open_archive(@name, @settings)
-      unless native.entry_count == held + appended.size && !native.duplicate_names?
-        native.close
-        return false
-      end
-
-      fresh = native.entry_metas(held, appended.size).map do |meta|
-        Entry.from_meta(native, meta, self, metadata_encoding: @metadata_encoding, settings: @settings)
-      end
-      unless fresh.map { |e| e.name.b } == appended.map { |e| e.name.b }
-        native.close
-        return false
-      end
-
-      kept = @cdir.entries.first(held)
-      kept.each { |e| e.rebind_native(native) }
-      fresh.each { |e| @cdir << e }
-      @native.close
-      @native = native
-      @dirty = false
-      @file_permissions = ::File.stat(@name).mode
-      true
-    end
-    private :refresh_after_append
-
-    # The entries to append, when the pending changes are additions and
-    # nothing else: every entry the archive holds is still listed, in
-    # place, unchanged, and the comment is as it was. Nil otherwise, and
-    # the archive is rewritten.
-    def appended_entries
-      return nil if @create || @buffer || @native.nil? || @comment_changed || @settings.sort_entries
-      return nil unless @settings.append_in_place && appendable_in_place?
-
-      all = @cdir.entries
-      held = @native.entry_count
-      # The local headers there stay as they are; the crate writes the
-      # central directory again, which loses some fields, so those decide
-      # (without reading every local header, as `needs_restream?` would).
-      return nil if all.size <= held || all.first(held).each_with_index.any? do |e, i|
-        !(e.index == i && e.backed_by?(@native) && !e.dirty? && !e.changed? &&
-          !e.central_fields_lost_on_append? && !@cdir.shadowed?(e))
-      end
-
-      all.drop(held)
-    end
-    private :appended_entries
-
-    # Whether the archive's file can take an append: one that is read-only
-    # can still be replaced (the rewrite renames a new file over it), and
-    # one with other hard links must be, or the append would change what
-    # they hold too.
-    def appendable_in_place?
-      stat = ::File.stat(@name)
-      stat.file? && stat.writable? && stat.nlink <= 1
-    rescue SystemCallError
-      false
-    end
-    private :appendable_in_place?
-
-    # Writes the archive, with any changes, to `io` and returns it. `io`
-    # may be a pipe, socket or response body: entries are streamed to it
-    # as they are written, unless the archive holds ZipCrypto entries,
-    # whose headers are patched at the end; such an archive is built in
-    # memory first.
-    def write_buffer(io = ::StringIO.new)
-      return io unless commit_required?
-
-      # Rewriting the archive into the very IO it is read from would
-      # overwrite entries still to be copied; build it aside first.
-      if @buffer && io.equal?(@io) && !io.kind_of?(::StringIO)
-        built = write_buffer(::StringIO.new).string
-        io.rewind
-        io.write(built)
-        io.truncate(built.bytesize) if io.respond_to?(:truncate)
-        return io
-      end
-
-      # ZipCrypto entries are copied with patched headers, which a stream
-      # (a pipe, say) cannot take: such an archive is built in memory first.
-      memory = @cdir.writable_entries.any?(&:zipcrypto?)
-      ::Ziperu::OutputStream.write_buffer(io, memory: memory, **stream_options) do |zos|
-        @cdir.writable_entries.each { |e| e.write_to_zip_output_stream(zos) }
-        zos.comment = comment
-      end
-    end
-
     # Closes the zip file committing any changes that has been made.
     def close
       commit
@@ -741,12 +446,6 @@ module Ziperu
       raise Error, "#{name} was opened read-only (write: false)" if @read_only
     end
     private :check_writable!
-
-    # Returns true if any changes has been made to this archive since the
-    # previous commit
-    def commit_required?
-      @create || @dirty || @cdir.any?(&:dirty?)
-    end
 
     # Searches for entry with the specified name. Returns nil if no entry is
     # found. See also get_entry
@@ -784,43 +483,6 @@ module Ziperu
 
     private
 
-    # Entries the native core cannot take are returned for the Ruby loop:
-    # symlinks (skipped there with a warning), encrypted entries, entries
-    # not read from this archive, and names it cannot represent.
-    def extract_all_native(targets, destination_directory, report, threads, on_exists)
-      native = native_archive
-      dest = ::File.absolute_path(destination_directory || '.')
-      code = Entry.on_exists_code(on_exists)
-      slow = []
-      specs = []
-      by_index = {}
-      targets.each do |entry, target|
-        if native_extractable?(entry, native)
-          specs << native_extract_spec(entry, target)
-          by_index[entry.index] = entry
-        else
-          slow << [entry, target]
-        end
-      end
-
-      specs.each_slice(NATIVE_EXTRACT_BATCH) do |batch|
-        native.extract_entries(dest, batch, @settings.validate_entry_sizes, threads, code).each do |index, kind, path|
-          entry = by_index[index]
-          case kind
-          when :unsafe
-            warn "WARNING: skipped extracting '#{entry.name}' to '#{path}' as unsafe."
-          when :link
-            warn "WARNING: skipped extracting '#{entry.name}' through the link '#{path}'."
-          when :oversize
-            warn "WARNING: #{EntrySizeError.new(entry).message}"
-          end
-        end
-        batch.each { |spec| report.call(spec[0]) }
-      end
-
-      slow
-    end
-
     # Counts entries as they are done and tells `progress`, if there is one.
     def progress_reporter(progress, total = nil)
       done = 0
@@ -828,25 +490,6 @@ module Ziperu
         done += 1
         progress&.call(entry, done, total)
       end
-    end
-
-    def native_extractable?(entry, native)
-      return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.backed_by?(native)
-      # An encrypted entry goes through the Ruby path, which has the password.
-      return false if entry.encrypted?
-      return false unless entry.file? || entry.directory?
-
-      IOExtras.native_text?(entry.name)
-    end
-
-    # What `Entry#extract` would do for the entry, as plain values:
-    # [entry, index, name, mtime seconds, mtime nanoseconds, unix mode, directory?].
-    def native_extract_spec(entry, target)
-      mtime = entry.time if @restore_times
-      if @restore_permissions && entry.fstype == FSTYPE_UNIX && entry.unix_perms
-        mode = entry.unix_perms & Entry::SAFE_PERMISSION_BITS
-      end
-      [entry, entry.index, target, mtime&.to_i, mtime&.nsec, mode, entry.directory?]
     end
 
     def add_recursive_dir(entry_prefix, src_dir, depth, max_depth, continue_on_exists_proc, report, symlinks)
@@ -921,53 +564,6 @@ module Ziperu
       @native = nil
     end
 
-    # Windows refuses to replace a file that is still open. A stream the
-    # caller forgot to close holds its own handle until the GC frees it, so
-    # on failure collect garbage once and try again.
-    def rename_over_original(tmp_filename)
-      ::File.rename(tmp_filename, name)
-    rescue Errno::EACCES
-      raise unless ::Ziperu::RUNNING_ON_WINDOWS
-
-      GC.start
-      begin
-        ::File.rename(tmp_filename, name)
-      rescue Errno::EACCES
-        # A directory (or anything but a file) at the path is not ours to
-        # move: the commit fails, as rubyzip's does.
-        raise unless ::File.file?(name)
-
-        # Something else (another Ziperu::File, say) still has the archive
-        # open. Renaming an open file is allowed where replacing one is
-        # not, so move the old archive aside first; that handle keeps
-        # reading the old bytes, as it would on Unix.
-        aside = "#{name}.#{Process.pid}.#{rand(1 << 32).to_s(36)}.old"
-        ::File.rename(name, aside)
-        begin
-          ::File.rename(tmp_filename, name)
-        rescue SystemCallError => e
-          # The original goes back, so a failed commit leaves an archive
-          # at the path.
-          begin
-            ::File.rename(aside, name)
-          rescue SystemCallError
-            raise Error, "could not replace #{name} (#{e.message}), nor put it back: the original is at #{aside}"
-          end
-          raise
-        end
-        begin
-          ::File.delete(aside)
-        rescue SystemCallError
-          warn "WARNING: could not remove '#{aside}' (still open elsewhere); delete it once it is closed."
-        end
-      end
-    end
-
-    # What every stream this archive is written through is opened with.
-    def stream_options
-      { suppress_extra_fields: @suppress_extra_fields, **Settings.overrides(@settings) }
-    end
-
     def check_entry_exists(entry_name, continue_on_exists_proc, proc_name)
       return unless @cdir.include?(entry_name)
 
@@ -980,19 +576,8 @@ module Ziperu
     def check_file(path)
       raise Errno::ENOENT, path unless ::File.readable?(path)
     end
-
-    def on_success_replace
-      dirname, basename = ::File.split(name)
-      ::Dir::Tmpname.create(basename, dirname) do |tmp_filename|
-        if yield tmp_filename
-          # The native handle must be gone before the rename on Windows.
-          release_native
-          rename_over_original(tmp_filename)
-          ::File.chmod(@file_permissions, name) unless @create
-        end
-      ensure
-        FileUtils.rm_f(tmp_filename)
-      end
-    end
   end
 end
+
+require_relative 'file/commit'
+require_relative 'file/extraction'

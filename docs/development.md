@@ -49,11 +49,16 @@ oracle on anything both still accept. CI runs three minutes of it per push
 with a fresh seed; a failure is saved under `tmp/fuzz/failures/` with the
 seed that reproduces it (`SEED=n ITERATIONS=m rake fuzz`).
 
-There is deliberately no cargo-fuzz harness: the Rust layer is thin
-wrappers over the `zip` crate, which has its own fuzzing, and the code
-that is ours (entry ownership, the chunked reader, the Ruby IO source) is
-only reachable through the Ruby API, which is what the differential fuzzer
-drives.
+The Rust layer is not thin. Beyond the `zip` crate (which has its own
+fuzzing) it holds a raw central-directory parser, a streaming reader with
+its own descriptor handling, a writer with ZipCrypto and in-place append,
+and the native extractor's path checks (`extract.rs`, `place.rs`). Most
+of it is reachable only through the Ruby API, which is what the
+differential fuzzer drives. The pure pieces have seeded property tests
+under `cargo test`: the path check, the zip64 extra field parser and the
+ZipCrypto round trip. The Linux `openat2` containment is tested there
+against a real swapped-in link. A cargo-fuzz harness for the raw parsers
+would be the next step.
 
 ## Memory checks
 

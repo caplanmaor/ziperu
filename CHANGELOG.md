@@ -93,6 +93,17 @@ Internal:
 - Seeded property tests in the Rust crate (`cargo test`) for the
   extraction path check, the zip64 extra field parser and the ZipCrypto
   round trip, 5,000 cases each.
+- The native core exports the layout of its entry rows
+  (`Native::Archive::ROW_FIELDS`), built from one list on the Rust side
+  for both the rows and the Hashes; a test checks it against
+  `Entry::ROW_FIELDS`.
+- `File` is split by job: committing lives in `file/commit.rb`,
+  extraction in `file/extraction.rb`, and which entries `extract_all`
+  writes, in what order and under which names, is an `ExtractionPlan`.
+  An unknown `sanitize:` now raises even for an empty archive.
+- The regression tests that were filed by release (0.2.1, 0.2.2, the code
+  review, the quality pass) are regrouped by behaviour: failure
+  recovery, IO semantics, names and metadata, archive options.
 
 ## 0.2.3 (2026-11-11)
 
