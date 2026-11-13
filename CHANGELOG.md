@@ -21,6 +21,27 @@ Security:
   go only to the origin of the URL given, unless `forward_headers: true`;
   an https-to-http redirect raises, and only http and https URLs are
   accepted.
+- `RemoteIO` kept a whole file in memory, however large, when the server
+  ignored Range; past `max_full_download:` (64 MB by default, nil for no
+  limit) that now raises. Ranged answers must carry the Content-Range
+  asked for, and a file whose ETag (or Last-Modified) changes between
+  requests raises instead of being read as a mix of two versions; a
+  strong ETag is sent as If-Match.
+
+Fixed, failures that destroyed data:
+
+- An overwrite during extraction (`on_exists: :overwrite`, or a block
+  that says so) truncated the existing file, then deleted it if the
+  entry failed to extract (a bad CRC, a size limit, a full disk). The
+  new file is now written beside it and renamed over it once complete,
+  so the original survives a failure. The replacement is a new file:
+  it no longer keeps the old one's permissions or hard links.
+- `File.open(path, write: other)` wrote straight over `other`, so a
+  failed commit left a partial archive there. It is now written beside
+  it and renamed into place.
+- On Windows, a commit over an archive still open elsewhere moves the
+  old one aside first; if the new one then could not be renamed into
+  place, neither was left at the path. The old one is now put back.
 
 Faster (Windows, against 0.2.3):
 

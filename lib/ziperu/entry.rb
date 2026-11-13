@@ -40,6 +40,8 @@ module Ziperu
     # through a link put at the path after it was checked.
     WRITE_NO_FOLLOW = ::File::WRONLY | ::File::CREAT | ::File::TRUNC |
                       (defined?(::File::NOFOLLOW) ? ::File::NOFOLLOW : 0) # :nodoc:
+    # The same for a replacement written beside the file: always a new one.
+    STAGING_FLAGS = (WRITE_NO_FOLLOW & ~::File::TRUNC) | ::File::EXCL # :nodoc:
 
     # Compression level flags (bits 1 and 2 of the gp flags).
     COMPRESSION_LEVEL_SUPERFAST_GPFLAG = 0b110 # :nodoc:
@@ -889,32 +891,56 @@ module Ziperu
     end
 
     def create_file(dest_path)
-      if ::File.exist?(dest_path)
+      replace = ::File.exist?(dest_path)
+      if replace
         decision = yield(self, dest_path)
         return if decision == :skip
         raise DestinationExistsError, dest_path unless decision
       end
 
-      ::File.open(dest_path, WRITE_NO_FOLLOW, binmode: true) do |os|
-        if pending_data?
-          # Added or replaced from disk or an IO and not yet committed:
-          # the data is that source's, not the archive's.
-          get_input_stream { |is| ::IO.copy_stream(is, os) }
-        else
-          open_input_stream(decrypter: default_decrypter) do |is|
-            bytes_written = 0
-            while (buf = is.sysread(IOExtras::CHUNK_SIZE))
-              os << buf
-              bytes_written += buf.bytesize
-            end
-            # With enforcement on, the native reader has already raised
-            # EntrySizeError; without it, warn as rubyzip does.
-            warn "WARNING: #{EntrySizeError.new(self).message}" if bytes_written > size
-          end
+      # A file being replaced is written beside it and renamed over it once
+      # complete, so a failure part-way leaves the original as it was.
+      if replace
+        staged = staging_path(dest_path)
+        done = false
+        begin
+          ::File.open(staged, STAGING_FLAGS, binmode: true) { |os| write_data_to(os) }
+          ::File.rename(staged, dest_path)
+          done = true
+        ensure
+          ::FileUtils.rm_f(staged) unless done
         end
+      else
+        ::File.open(dest_path, WRITE_NO_FOLLOW, binmode: true) { |os| write_data_to(os) }
       end
 
       set_extra_attributes_on_path(dest_path)
+    end
+
+    # A hidden name beside `path` for its replacement, on the same file
+    # system so the rename stays one step.
+    def staging_path(path)
+      ::File.join(::File.dirname(path), ".#{::File.basename(path)}.ziperu-#{::Process.pid}-#{rand(1 << 32).to_s(16)}")
+    end
+
+    # The entry's data, decompressed, into `os`.
+    def write_data_to(os)
+      if pending_data?
+        # Added or replaced from disk or an IO and not yet committed:
+        # the data is that source's, not the archive's.
+        get_input_stream { |is| ::IO.copy_stream(is, os) }
+      else
+        open_input_stream(decrypter: default_decrypter) do |is|
+          bytes_written = 0
+          while (buf = is.sysread(IOExtras::CHUNK_SIZE))
+            os << buf
+            bytes_written += buf.bytesize
+          end
+          # With enforcement on, the native reader has already raised
+          # EntrySizeError; without it, warn as rubyzip does.
+          warn "WARNING: #{EntrySizeError.new(self).message}" if bytes_written > size
+        end
+      end
     end
 
     def create_directory(dest_path)

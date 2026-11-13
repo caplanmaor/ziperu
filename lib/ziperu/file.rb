@@ -565,8 +565,16 @@ module Ziperu
     def write_changes
       if @write_to
         # The changes go to a new archive; the one opened is not touched,
-        # and keeps being what this object reads.
-        write_all_entries(@write_to)
+        # and keeps being what this object reads. It is written beside
+        # its path and renamed into place once complete, so a failure
+        # leaves whatever was at the path as it was.
+        dirname, basename = ::File.split(@write_to)
+        ::Dir::Tmpname.create(basename, dirname) do |tmp_filename|
+          write_all_entries(tmp_filename)
+          ::File.rename(tmp_filename, @write_to)
+        ensure
+          FileUtils.rm_f(tmp_filename)
+        end
         nil
       elsif (appended = appended_entries)
         # Only additions: they go after the entries already there, which
@@ -935,7 +943,18 @@ module Ziperu
         # reading the old bytes, as it would on Unix.
         aside = "#{name}.#{Process.pid}.#{rand(1 << 32).to_s(36)}.old"
         ::File.rename(name, aside)
-        ::File.rename(tmp_filename, name)
+        begin
+          ::File.rename(tmp_filename, name)
+        rescue SystemCallError => e
+          # The original goes back, so a failed commit leaves an archive
+          # at the path.
+          begin
+            ::File.rename(aside, name)
+          rescue SystemCallError
+            raise Error, "could not replace #{name} (#{e.message}), nor put it back: the original is at #{aside}"
+          end
+          raise
+        end
         begin
           ::File.delete(aside)
         rescue SystemCallError

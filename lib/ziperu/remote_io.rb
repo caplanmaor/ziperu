@@ -43,6 +43,9 @@ module Ziperu
     TAIL_SIZE = 64 * 1024
     MAX_REDIRECTS = 5
     HTTP_SCHEMES = %w[http https].freeze
+    DEFAULT_MAX_FULL_DOWNLOAD = 64 * 1024 * 1024
+    # How much of an answer that is neither data nor a redirect is read.
+    ERROR_BODY_LIMIT = 64 * 1024
     DEFAULT_OPEN_TIMEOUT = 10
     DEFAULT_READ_TIMEOUT = 60
 
@@ -58,9 +61,17 @@ module Ziperu
     # only to the scheme, host and port of `url`: not to another origin a
     # redirect leads to, unless `forward_headers: true`. A redirect from
     # https to http is refused.
+    #
+    # A server that ignores Range sends the whole file, which is kept in
+    # memory; past `max_full_download` bytes (64 MB; nil for no limit)
+    # that raises instead. Every ranged answer must carry the
+    # Content-Range asked for, and when the server gives an ETag (or a
+    # Last-Modified time) it must stay the same: a file changed between
+    # requests raises rather than being read as a mix of two versions.
     def initialize(url = nil, headers: {}, size: nil, block_size: DEFAULT_BLOCK_SIZE,
                    cache_blocks: DEFAULT_CACHE_BLOCKS, open_timeout: DEFAULT_OPEN_TIMEOUT,
-                   read_timeout: DEFAULT_READ_TIMEOUT, forward_headers: false, &fetch)
+                   read_timeout: DEFAULT_READ_TIMEOUT, forward_headers: false,
+                   max_full_download: DEFAULT_MAX_FULL_DOWNLOAD, &fetch)
       raise ArgumentError, 'give a url or a block, not both' if url && fetch
       raise ArgumentError, 'give a url, or size: and a block' unless url || (fetch && size)
       raise ArgumentError, 'block_size must be positive' unless block_size.positive?
@@ -82,6 +93,8 @@ module Ziperu
         @headers = headers
         @headers_origin = origin(@uri)
         @forward_headers = forward_headers
+        @max_full_download = max_full_download
+        @validator = nil
         @open_timeout = open_timeout
         @read_timeout = read_timeout
         @size = discover_size
@@ -214,7 +227,7 @@ module Ziperu
         if @fetch
           @fetch.call(offset, length).to_s.b
         else
-          http_range("bytes=#{offset}-#{offset + length - 1}", offset)
+          http_range(offset, length)
         end
       raise Error, "asked for #{length} bytes at offset #{offset}, got #{data.bytesize}" unless data.bytesize == length
 
@@ -226,50 +239,145 @@ module Ziperu
     # being what opening an archive reads first.
     def discover_size
       @requests += 1
-      response = request("bytes=-#{TAIL_SIZE}")
+      response, body = request("bytes=-#{TAIL_SIZE}", TAIL_SIZE, full: true)
+      @validator = validator_of(response)
       case response
       when Net::HTTPPartialContent
-        total = response['content-range'].to_s[%r{/(\d+)\z}, 1]
-        raise Error, "#{@uri} answered without a usable Content-Range" unless total
+        first, last, total = content_range(response)
+        unless total && last == total - 1 && last - first + 1 == body.bytesize
+          raise Error, "#{@uri} answered a request for its last bytes with " \
+                       "Content-Range #{response['content-range'].inspect} and #{body.bytesize} bytes"
+        end
 
-        keep_tail(response.body.to_s.b, Integer(total))
+        keep_tail(body, total)
       when Net::HTTPRequestedRangeNotSatisfiable
         # An empty file has no last bytes.
         0
       when Net::HTTPOK
         # The server ignores Range: the whole file came back; keep it.
-        body = response.body.to_s.b
         keep_tail(body, body.bytesize)
       else
         raise Error, "#{@uri} answered #{response.code} #{response.message}"
       end
     end
 
-    def http_range(range, offset)
-      response = request(range)
+    def http_range(offset, length)
+      last = offset + length - 1
+      response, body = request("bytes=#{offset}-#{last}", length)
+      if response.kind_of?(Net::HTTPPreconditionFailed)
+        raise Error, "#{@uri} changed since it was opened (its ETag no longer matches)"
+      end
       unless response.kind_of?(Net::HTTPPartialContent)
         raise Error, "#{@uri} answered #{response.code} to a Range request at offset #{offset}"
       end
 
-      response.body.to_s.b
+      check_unchanged(response)
+      first, got_last, total = content_range(response)
+      unless first == offset && got_last == last && (total.nil? || total == @size)
+        raise Error, "#{@uri} answered a request for bytes #{offset}-#{last} of #{@size} " \
+                     "with Content-Range #{response['content-range'].inspect}"
+      end
+
+      body
+    end
+
+    # `[first, last, total]` from a 206's Content-Range, total nil for
+    # `*`; nil when there is none or it does not parse.
+    def content_range(response)
+      match = %r{\Abytes (\d+)-(\d+)/(\d+|\*)\z}.match(response['content-range'].to_s.strip)
+      return unless match
+
+      [Integer(match[1]), Integer(match[2]), match[3] == '*' ? nil : Integer(match[3])]
+    end
+
+    # What identifies the version of the file first read: its ETag, or
+    # failing that its Last-Modified time.
+    def validator_of(response)
+      if (etag = response['etag'])
+        [:etag, etag]
+      elsif (modified = response['last-modified'])
+        [:last_modified, modified]
+      end
+    end
+
+    # Raises when an answer names a different version than the first one.
+    def check_unchanged(response)
+      kind, value = @validator
+      now = kind == :etag ? response['etag'] : response['last-modified'] if kind
+      return if now.nil? || weak_etag_equal?(now, value)
+
+      raise Error, "#{@uri} changed since it was opened (#{kind} was #{value}, now #{now})"
+    end
+
+    def weak_etag_equal?(one, other)
+      one.delete_prefix('W/') == other.delete_prefix('W/')
     end
 
     # A GET with `Range: range`, following redirects (the URL redirected
     # to is used from then on, as a presigned S3 link redirects once).
-    def request(range, redirects = MAX_REDIRECTS)
+    # Returns the response and its body, read no further than a range of
+    # `wanted` bytes can be, or, with `full:` true, a whole file of
+    # `max_full_download`.
+    def request(range, wanted, full: false, redirects: MAX_REDIRECTS)
       http = connection
       get = Net::HTTP::Get.new(@uri)
       @headers.each { |k, v| get[k.to_s] = v.to_s } if @forward_headers || origin(@uri) == @headers_origin
       get['range'] = range
       get['accept-encoding'] = 'identity'
-      response = http.request(get)
-      return response unless response.kind_of?(Net::HTTPRedirection)
+      # A strong ETag pins the version: a server that has a newer one
+      # answers 412 rather than its bytes.
+      kind, value = @validator
+      get['if-match'] = value if kind == :etag && !value.start_with?('W/')
+      response = body = nil
+      http.request(get) do |res|
+        response = res
+        body = read_limited(res, wanted, full) unless res.kind_of?(Net::HTTPRedirection)
+      end
+      return [response, body] unless response.kind_of?(Net::HTTPRedirection)
       raise Error, "too many redirects from #{@uri}" if redirects.zero?
 
       location = redirect_target(response['location'])
       disconnect if origin(location) != origin(@uri)
       @uri = location
-      request(range, redirects - 1)
+      request(range, wanted, full: full, redirects: redirects - 1)
+    rescue Error
+      # A body left half read cannot be followed by another request.
+      disconnect
+      raise
+    end
+
+    # The body of `response`, raising once it is longer than it can be.
+    def read_limited(response, wanted, full)
+      limit =
+        case response
+        when Net::HTTPPartialContent then wanted
+        when Net::HTTPOK then full ? @max_full_download : ERROR_BODY_LIMIT
+        else ERROR_BODY_LIMIT
+        end
+      body = +''.b
+      check_length = lambda do |length|
+        return if limit.nil? || length <= limit
+
+        raise Error, too_long(response, limit)
+      end
+      check_length.call(response.content_length) if response.content_length
+      response.read_body do |chunk|
+        body << chunk
+        check_length.call(body.bytesize)
+      end
+      body
+    end
+
+    def too_long(response, limit)
+      case response
+      when Net::HTTPOK
+        "#{@uri} ignores Range requests and sent the whole file, which is over max_full_download " \
+        "(#{limit} bytes); raise that limit, or download the file first"
+      when Net::HTTPPartialContent
+        "#{@uri} sent more than the #{limit} bytes asked for"
+      else
+        "#{@uri} answered #{response.code} #{response.message}"
+      end
     end
 
     # Where a redirect leads, if it may be followed: http or https only,

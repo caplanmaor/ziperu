@@ -4,10 +4,13 @@ require "socket"
 
 # A one-file HTTP server that answers Range requests (and, to check
 # redirects, sends /moved to /a.zip and /away to `redirect_to`). Counts
-# what it sends and keeps the headers of every request.
+# what it sends and keeps the headers of every request. With `etag` set
+# it sends one and answers 412 to an If-Match that differs; `body` can be
+# swapped to stand for a file that changed; `range_shift` moves the
+# Content-Range it claims away from the bytes it sends.
 class RangeServer
   attr_reader :port, :bytes_sent, :hits, :seen_headers
-  attr_accessor :redirect_to
+  attr_accessor :redirect_to, :etag, :body, :range_shift
 
   def initialize(body, ranges: true)
     @body = body
@@ -15,6 +18,7 @@ class RangeServer
     @bytes_sent = 0
     @hits = 0
     @seen_headers = Queue.new
+    @range_shift = 0
     @server = TCPServer.new("127.0.0.1", 0)
     @port = @server.addr[1]
     @thread = Thread.new { loop { serve(@server.accept) } }
@@ -45,7 +49,12 @@ class RangeServer
         respond(client, "302 Found", { "location" => path == "/away" ? @redirect_to : "/a.zip" }, "")
         next
       end
+      if @etag && headers["if-match"] && headers["if-match"] != @etag
+        respond(client, "412 Precondition Failed", {}, "")
+        next
+      end
       range = headers["range"]
+      tag = @etag ? { "etag" => @etag } : {}
       if @ranges && range
         first, last = parse(range)
         if first.nil?
@@ -54,9 +63,10 @@ class RangeServer
         end
         part = @body.byteslice(first..last)
         respond(client, "206 Partial Content",
-                { "content-range" => "bytes #{first}-#{last}/#{@body.bytesize}" }, part)
+                { "content-range" => "bytes #{first + @range_shift}-#{last + @range_shift}/#{@body.bytesize}",
+                  **tag }, part)
       else
-        respond(client, "200 OK", {}, @body)
+        respond(client, "200 OK", tag, @body)
       end
     end
   rescue IOError, SystemCallError

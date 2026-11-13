@@ -575,40 +575,63 @@ impl<'a> Extractor<'a> {
             return Ok(());
         }
         let path = Path::new(name);
-        let mut options = OpenOptions::new();
-        options.write(true);
-        match (on_disk(path).map_err(at(path))?, self.on_exists) {
+        let replace = match (on_disk(path).map_err(at(path))?, self.on_exists) {
             // Never written through, whatever the policy.
             (OnDisk::Link, _) => {
                 self.notices
                     .push((spec.index, Notice::Link(name.to_string())));
                 return Ok(());
             }
-            (OnDisk::Missing, _) => options.create_new(true),
+            (OnDisk::Missing, _) => false,
             (_, OnExists::Raise) => return Err(Failure::Exists(path_string(path))),
             (_, OnExists::Skip) => return Ok(()),
             // A directory in the way is not overwritten by a file.
             (OnDisk::Directory, OnExists::Overwrite) => {
                 return Err(Failure::Exists(path_string(path)))
             }
-            (OnDisk::Other, OnExists::Overwrite) => options.create(true).truncate(true),
+            (OnDisk::Other, OnExists::Overwrite) => true,
         };
-        no_follow(&mut options);
-        let mut file = match options.open(path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {
-                return Err(Failure::Exists(path_string(path)));
+        // A file being replaced is written beside it and renamed over it
+        // once complete, so a failure part-way leaves the original as it
+        // was; a new one is written in place.
+        let (target, mut file) = if replace {
+            staging_file(path).map_err(at(path))?
+        } else {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            no_follow(&mut options);
+            match options.open(path) {
+                Ok(f) => (path.to_path_buf(), f),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {
+                    return Err(Failure::Exists(path_string(path)));
+                }
+                Err(e) => return Err(at(path)(e)),
             }
-            Err(e) => return Err(at(path)(e)),
         };
-        let written = match self.copy_entry(spec.index, &mut file) {
+        let outcome = self.copy_entry(spec.index, &mut file).and_then(|written| {
+            if let Some(mtime) = spec.mtime {
+                file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
+                    .map_err(at(path))?;
+            }
+            if let Some(mode) = spec.mode {
+                set_file_mode(&file, mode).map_err(at(path))?;
+            }
+            Ok(written)
+        });
+        drop(file);
+        let outcome = outcome.and_then(|written| {
+            if replace {
+                fs::rename(&target, path).map_err(at(path))?;
+            }
+            Ok(written)
+        });
+        let written = match outcome {
             Ok(n) => n,
             Err(failure) => {
                 // Interrupted or failed part-way: a half-written file
                 // would pass for the entry, and stand in the way of a
-                // second run.
-                drop(file);
-                let _ = fs::remove_file(path);
+                // second run. What it replaces is still there.
+                let _ = fs::remove_file(&target);
                 return Err(match failure {
                     // Reading the entry is the entry's problem; writing is
                     // the path's.
@@ -622,14 +645,6 @@ impl<'a> Extractor<'a> {
                 });
             }
         };
-        if let Some(mtime) = spec.mtime {
-            file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
-                .map_err(at(path))?;
-        }
-        if let Some(mode) = spec.mode {
-            set_file_mode(&file, mode).map_err(at(path))?;
-        }
-        drop(file);
         if !self.enforce_size {
             let declared = self.archive.metadata().entry(spec.index)?.size();
             if written > declared {
@@ -679,6 +694,28 @@ impl<'a> Extractor<'a> {
             copy(&mut entry)?;
         }
         Ok(written)
+    }
+}
+
+/// A new file beside `path` to write its replacement into: a hidden name
+/// in the same directory, so the rename that puts it in place stays on
+/// one file system.
+fn staging_file(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let leaf = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let staged = path.with_file_name(format!(".{leaf}.ziperu-{}-{n}", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        no_follow(&mut options);
+        match options.open(&staged) {
+            Ok(file) => return Ok((staged, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
     }
 }
 

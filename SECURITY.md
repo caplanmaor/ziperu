@@ -30,7 +30,14 @@ where rubyzip leaves most of it to the caller:
 - **Remote archives.** `RemoteIO` fetches http and https URLs only,
   sends its `headers:` only to the origin of the URL it was given (not
   to another host a redirect leads to, unless `forward_headers: true`),
-  and refuses a redirect from https to http.
+  and refuses a redirect from https to http. A server that ignores Range
+  cannot make it hold more than `max_full_download:` bytes (64 MB), a
+  ranged answer must be for the range asked, and a file that changes
+  between requests (by ETag or Last-Modified) raises.
+- **Failed writes.** A file replaced during extraction, an archive
+  rewritten on commit, and a `write: path` target are all written
+  beside their path and renamed into place once complete, so a failure
+  leaves what was there.
 - **Lying headers.** No entry inflates past its declared size
   (`Ziperu::EntrySizeError`); a CRC mismatch raises; the sizes and CRC
   come from the central directory, never from a local header or data

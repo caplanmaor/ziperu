@@ -118,6 +118,44 @@ class RemoteIOTest < Minitest::Test
     end
   end
 
+  def test_a_full_download_past_the_cap_raises
+    plain = RangeServer.new(@zip, ranges: false)
+    error = assert_raises(Ziperu::RemoteIO::Error) { Ziperu::RemoteIO.new(plain.url, max_full_download: 1_000_000) }
+    assert_match(/max_full_download/, error.message)
+    assert_equal @zip.bytesize, Ziperu::RemoteIO.new(plain.url, max_full_download: nil).size
+  ensure
+    plain&.stop
+  end
+
+  def test_a_content_range_other_than_the_one_asked_for_raises
+    io = Ziperu::RemoteIO.new(@server.url)
+    @server.range_shift = 1
+    error = assert_raises(Ziperu::RemoteIO::Error) { io.read(10) }
+    assert_match(/Content-Range/, error.message)
+  end
+
+  def test_a_file_changed_since_opening_raises
+    @server.etag = '"v1"'
+    io = Ziperu::RemoteIO.new(@server.url)
+    assert_equal @zip.byteslice(0, 10), io.read(10)
+    headers_seen_by(@server)
+    @server.etag = '"v2"'
+    @server.body = @zip.reverse
+    io.seek(1_000_000)
+    error = assert_raises(Ziperu::RemoteIO::Error) { io.read(10) }
+    assert_match(/changed since it was opened/, error.message)
+    assert_equal(['"v1"'], headers_seen_by(@server).map { |h| h["if-match"] })
+  end
+
+  def test_a_weak_etag_is_compared_not_sent
+    @server.etag = 'W/"v1"'
+    io = Ziperu::RemoteIO.new(@server.url)
+    @server.etag = 'W/"v2"'
+    error = assert_raises(Ziperu::RemoteIO::Error) { io.read(10) }
+    assert_match(/changed since it was opened/, error.message)
+    assert(headers_seen_by(@server).none? { |h| h.key?("if-match") })
+  end
+
   def test_io_behaviour
     io = Ziperu::RemoteIO.new(@server.url, block_size: 1000)
     assert_equal 0, io.pos
