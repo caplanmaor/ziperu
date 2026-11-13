@@ -16,12 +16,12 @@
 //! disk (a symlink, or on Windows a junction): every directory on the way
 //! to an entry, and the entry's own path, must be a real directory or
 //! file, or the entry is skipped with a warning. The destination itself is
-//! taken as given, link or not. This is checked before each path is used,
-//! so it does not hold against someone swapping a directory for a link
-//! while the extraction runs.
+//! taken as given, link or not. This is checked before each path is used;
+//! on Linux, `place.rs` also opens each file's directory beneath the
+//! destination so that the kernel refuses a link swapped in meanwhile.
 
 use std::collections::HashSet;
-use std::fs::{self, FileTimes, OpenOptions};
+use std::fs::{self, FileTimes};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,7 @@ use zip::ZipArchive;
 
 use crate::errors::{io_error, read_error, zip_error, DESTINATION_EXISTS_ERROR, ENTRY_SIZE_ERROR};
 use crate::gvl::maybe_without_gvl;
+use crate::place::{is_link_error, Beneath};
 use crate::reader::{open_local_entry, EntryInfo};
 use crate::source::Source;
 
@@ -370,18 +371,6 @@ fn on_disk(path: &Path) -> io::Result<OnDisk> {
     }
 }
 
-/// Opens without following a link at the path itself, where the OS can:
-/// a link put there after `on_disk` looked fails the open instead of
-/// being written through.
-#[cfg(unix)]
-fn no_follow(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NOFOLLOW);
-}
-
-#[cfg(not(unix))]
-fn no_follow(_options: &mut OpenOptions) {}
-
 struct Extractor<'a> {
     archive: ZipArchive<Source>,
     dest: &'a str,
@@ -397,6 +386,9 @@ struct Extractor<'a> {
     /// Directories made for an entry, with the times and mode to give
     /// them once their files are in.
     stamp: Vec<(usize, PathBuf, Option<SystemTime>, Option<u32>)>,
+    /// The destination opened for kernel-checked lookups beneath it;
+    /// made once the destination exists.
+    beneath: Option<Beneath>,
     /// The place in the batch of the spec being extracted.
     at: usize,
     buf: Vec<u8>,
@@ -425,6 +417,7 @@ impl<'a> Extractor<'a> {
             on_exists,
             made: HashSet::new(),
             stamp: Vec::new(),
+            beneath: None,
             at: 0,
             buf: vec![0; CHUNK],
             notices: Vec::new(),
@@ -452,6 +445,22 @@ impl<'a> Extractor<'a> {
         } else {
             self.create_file(&path, spec)
         }
+    }
+
+    /// `dir` relative to the destination, `/`-separated; empty for the
+    /// destination itself.
+    fn below<'p>(&self, dir: &'p str) -> &'p str {
+        if dir == self.root || format!("{dir}/") == self.prefix {
+            return "";
+        }
+        dir.strip_prefix(self.prefix.as_str()).unwrap_or(dir)
+    }
+
+    /// The destination, opened on first use (it exists by then).
+    fn beneath(&mut self) -> &Beneath {
+        let root = &self.root;
+        self.beneath
+            .get_or_insert_with(|| Beneath::new(Path::new(root)))
     }
 
     /// Makes sure every directory between the destination and `path` (not
@@ -556,15 +565,20 @@ impl<'a> Extractor<'a> {
         let mut stamp = std::mem::take(&mut self.stamp);
         stamp.sort_by_key(|(_, path, _, _)| std::cmp::Reverse(path.components().count()));
         for (i, path, mtime, mode) in stamp {
+            let below = self.below(&path_string(&path)).to_string();
             let path = path.as_path();
+            // Through a handle opened beneath the destination where the
+            // OS can, so a link swapped in cannot redirect a chmod.
+            let dir = self
+                .beneath()
+                .directory_handle(path, &below)
+                .map_err(|e| (i, at(path)(e)))?;
             if let Some(mtime) = mtime {
                 let times = FileTimes::new().set_accessed(mtime).set_modified(mtime);
-                open_directory(path)
-                    .and_then(|dir| dir.set_times(times))
-                    .map_err(|e| (i, at(path)(e)))?;
+                dir.set_times(times).map_err(|e| (i, at(path)(e)))?;
             }
             if let Some(mode) = mode {
-                set_mode(path, mode).map_err(|e| (i, at(path)(e)))?;
+                set_directory_mode(&dir, path, mode).map_err(|e| (i, at(path)(e)))?;
             }
         }
         Ok(())
@@ -591,17 +605,33 @@ impl<'a> Extractor<'a> {
             }
             (OnDisk::Other, OnExists::Overwrite) => true,
         };
+        // The directory it goes in, opened beneath the destination where
+        // the OS can: a link swapped in since the walk is refused here.
+        let (parent, leaf) = name.rsplit_once('/').unwrap_or(("", name));
+        let parent = if parent.is_empty() { "/" } else { parent };
+        let below = self.below(parent).to_string();
+        let place = match self.beneath().place(Path::new(parent), &below) {
+            Ok(place) => place,
+            Err(e) if is_link_error(&e) => {
+                self.notices
+                    .push((spec.index, Notice::Link(parent.to_string())));
+                return Ok(());
+            }
+            Err(e) => return Err(at(Path::new(parent))(e)),
+        };
         // A file being replaced is written beside it and renamed over it
         // once complete, so a failure part-way leaves the original as it
         // was; a new one is written in place.
         let (target, mut file) = if replace {
-            staging_file(path).map_err(at(path))?
+            place.staging(leaf).map_err(at(path))?
         } else {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            no_follow(&mut options);
-            match options.open(path) {
-                Ok(f) => (path.to_path_buf(), f),
+            match place.create_new(leaf) {
+                Ok(f) => (leaf.to_string(), f),
+                Err(e) if is_link_error(&e) => {
+                    self.notices
+                        .push((spec.index, Notice::Link(name.to_string())));
+                    return Ok(());
+                }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {
                     return Err(Failure::Exists(path_string(path)));
                 }
@@ -621,7 +651,7 @@ impl<'a> Extractor<'a> {
         drop(file);
         let outcome = outcome.and_then(|written| {
             if replace {
-                fs::rename(&target, path).map_err(at(path))?;
+                place.rename(&target, leaf).map_err(at(path))?;
             }
             Ok(written)
         });
@@ -631,7 +661,7 @@ impl<'a> Extractor<'a> {
                 // Interrupted or failed part-way: a half-written file
                 // would pass for the entry, and stand in the way of a
                 // second run. What it replaces is still there.
-                let _ = fs::remove_file(&target);
+                let _ = place.remove(&target);
                 return Err(match failure {
                     // Reading the entry is the entry's problem; writing is
                     // the path's.
@@ -694,28 +724,6 @@ impl<'a> Extractor<'a> {
             copy(&mut entry)?;
         }
         Ok(written)
-    }
-}
-
-/// A new file beside `path` to write its replacement into: a hidden name
-/// in the same directory, so the rename that puts it in place stays on
-/// one file system.
-fn staging_file(path: &Path) -> io::Result<(PathBuf, fs::File)> {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let leaf = path
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let staged = path.with_file_name(format!(".{leaf}.ziperu-{}-{n}", std::process::id()));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        no_follow(&mut options);
-        match options.open(&staged) {
-            Ok(file) => return Ok((staged, file)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
     }
 }
 
@@ -805,35 +813,16 @@ fn is_sep(b: u8) -> bool {
     b == b'/' || b == b'\\'
 }
 
-/// A directory handle that `set_times` accepts: on Windows that means
-/// backup semantics and write-attributes access, which a plain `open`
-/// does not ask for.
-#[cfg(windows)]
-fn open_directory(path: &Path) -> io::Result<fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .access_mode(FILE_WRITE_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-}
-
-#[cfg(not(windows))]
-fn open_directory(path: &Path) -> io::Result<fs::File> {
-    fs::File::open(path)
-}
-
 #[cfg(unix)]
 fn set_file_mode(file: &fs::File, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(fs::Permissions::from_mode(mode))
 }
 
+/// Sets a directory's mode through its handle (fchmod).
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+fn set_directory_mode(dir: &fs::File, _path: &Path, mode: u32) -> io::Result<()> {
+    set_file_mode(dir, mode)
 }
 
 /// Ruby's `File.chmod` on Windows only knows the read-only attribute,
@@ -848,8 +837,10 @@ fn set_file_mode(file: &fs::File, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// On Windows by path: the handle opened for times cannot change the
+/// read-only attribute.
 #[cfg(not(unix))]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+fn set_directory_mode(_dir: &fs::File, path: &Path, mode: u32) -> io::Result<()> {
     if mode & 0o200 == 0 {
         let mut perms = fs::metadata(path)?.permissions();
         perms.set_readonly(true);

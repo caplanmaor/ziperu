@@ -9,6 +9,7 @@ mod entry_options;
 mod errors;
 mod extract;
 mod gvl;
+mod place;
 mod rb;
 mod reader;
 mod sink;

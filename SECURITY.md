@@ -63,11 +63,19 @@ where rubyzip leaves most of it to the caller:
 
 ## What it does not
 
-- **A destination someone else can write to while you extract.** The
-  link check is made just before each path is used, so a local user who
-  swaps a directory for a link in between can still redirect a write.
-  Extract into a directory only you can write to (a fresh
-  `Dir.mktmpdir`, say) and move the result.
+- **A destination someone else can write to while you extract**, except
+  in one case. On Linux 5.6 and later, the native `extract_all` opens the
+  directory of every file it writes with `openat2(RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS)`, so the kernel refuses a link swapped in at any
+  point. It creates, replaces and stamps files through that handle, and
+  stamps directories through one too. Even there, a directory it creates
+  can still land through a swapped link, as an empty directory. Everywhere
+  else the link check is made just before each path is used, so a local
+  user who swaps a directory for a link in between can still redirect a
+  write. That covers Windows, macOS, older kernels, sandboxes that refuse
+  the call, and the Ruby per-entry path (encrypted entries, symlinks, an
+  `extract_all` block). Extract into a directory only you can write to
+  (a fresh `Dir.mktmpdir`, say) and move the result.
 - **ZipCrypto** is written and read because tools still expect it, but it
   is a broken cipher: a few bytes of known plaintext recover the keys.
   Use `AESEncrypter` for anything that matters.

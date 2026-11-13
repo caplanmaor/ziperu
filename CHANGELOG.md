@@ -11,7 +11,11 @@ Security:
   file symlink at an entry's path had its target overwritten. Both
   `extract_all` (native and Ruby paths) and `Entry#extract` now skip,
   with a warning, an entry whose path has a link on the way or is one.
-  The destination itself may still be a link.
+  The destination itself may still be a link. On Linux 5.6 and later the
+  native extractor also opens each file's directory with `openat2`
+  (`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), so a link swapped in after
+  the check is refused by the kernel; other systems, and the Ruby path,
+  check just before each write (see SECURITY.md).
 - `symlinks: :create` accepted a chain of links that each looked inside
   the destination (`b -> .`, then `c -> b/..`, which is really the
   destination's parent). A link target with `..` after a name is now
