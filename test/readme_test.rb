@@ -161,7 +161,7 @@ class ReadmeTest < Minitest::Test
     define_method("test_readme_block_at_line_#{line}") do
       code = code.gsub(/\{ \|(\w+)\| \.\.\. \}/) { "{ |#{Regexp.last_match(1)}| }" }
                  .gsub('"/var/log/', '"var/log/')
-                 .gsub('require "ziperu/replace_rubyzip"', 'nil')
+                 .gsub('require "ziperu/replace_rubyzip"', "nil")
       ctx = Context.new(@dir)
       result = nil
       begin
@@ -209,7 +209,7 @@ class ReadmeTest < Minitest::Test
       end
       Ziperu::OutputStream.open("scans.zip") do |z|
         z.put_next_entry("scan.pdf", nil, nil, Ziperu::Entry::STORED)
-        z.write("%PDF" + ("." * 4000))
+        z.write("%PDF#{"." * 4000}")
       end
       FileUtils.mkdir_p("var/log/app")
       File.write("var/log/app/today.log", "today")
@@ -218,7 +218,7 @@ class ReadmeTest < Minitest::Test
 
   # A Rack response triple's body is consumed, and must be an archive.
   def check_result(result)
-    return unless result.is_a?(Array) && result.size == 3 && result[2].respond_to?(:each)
+    return unless result.kind_of?(Array) && result.size == 3 && result[2].respond_to?(:each)
 
     assert_equal 200, result[0]
     bytes = result[2].to_a.join

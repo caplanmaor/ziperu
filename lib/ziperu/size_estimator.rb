@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Ziperu
-  class OutputStream
+  class OutputStream # rubocop:disable Style/Documentation -- documented in output_stream.rb
     # Works out, to the byte, how large an archive will be when streamed
     # (`OutputStream.body`, `write_buffer` to a pipe or socket), from the
     # names and sizes of its entries, so a download can carry a
@@ -25,12 +25,21 @@ module Ziperu
     # for a stream: a data descriptor after every file's data, zip64
     # records only for a 4 GiB entry or 65,535 entries.
     class SizeEstimator
-      LOCAL_HEADER = 30
-      CENTRAL_HEADER = 46
+      LOCAL_HEADER = LOCAL_ENTRY_STATIC_HEADER_LENGTH
+      CENTRAL_HEADER = CDIR_ENTRY_STATIC_HEADER_LENGTH
       END_OF_CENTRAL_DIRECTORY = 22
       ZIP64_END_OF_CENTRAL_DIRECTORY = 56 + 20 # the record and its locator
-      ZIP64_THRESHOLD = 0xFFFFFFFF
+      ZIP64_THRESHOLD = ZIP64_SIZE_LIMIT
       ZIP64_ENTRY_THRESHOLD = 0xFFFF
+      # After a file's data: signature, CRC and two sizes, 32-bit or 64-bit.
+      DATA_DESCRIPTOR = 16
+      ZIP64_DATA_DESCRIPTOR = 24
+      # Every extra field starts with an ID and a length.
+      EXTRA_FIELD_HEADER = 4
+      # A local header's zip64 field: its header and two 8-byte sizes.
+      ZIP64_LOCAL_EXTRA = EXTRA_FIELD_HEADER + 16
+      # The extended timestamp field: its header, flags and the mtime.
+      EXTENDED_TIMESTAMP = EXTRA_FIELD_HEADER + 1 + 4
 
       def initialize(settings = ::Ziperu)
         @settings = settings
@@ -52,7 +61,7 @@ module Ziperu
 
       # A directory entry (`name` ends with `/`).
       def add_directory(name)
-        fields = default_fields(name)
+        fields = default_fields
         name = name.to_s.b
         @entries += 1
         @data += LOCAL_HEADER + name.bytesize + fields
@@ -68,8 +77,8 @@ module Ziperu
 
       # The archive's size in bytes.
       def size
-        central_start = @data
-        zip64 = @entries > ZIP64_ENTRY_THRESHOLD || central_start > ZIP64_THRESHOLD ||
+        # `@data` is also where the central directory starts.
+        zip64 = @entries > ZIP64_ENTRY_THRESHOLD || @data > ZIP64_THRESHOLD ||
                 @central > ZIP64_THRESHOLD
         total = @data + @central + END_OF_CENTRAL_DIRECTORY + @comment
         total += ZIP64_END_OF_CENTRAL_DIRECTORY if zip64
@@ -79,29 +88,28 @@ module Ziperu
       private
 
       def add_file(name, size, compressed_size)
-        fields = default_fields(name)
+        fields = default_fields
         name = name.to_s.b
         large = size >= ZIP64_THRESHOLD || compressed_size >= ZIP64_THRESHOLD
         offset_large = @data >= ZIP64_THRESHOLD
         @entries += 1
-        # The local header, with a zip64 extra (two 8-byte sizes) for a
-        # large entry; the data; the descriptor, 16 bytes or 24 with
-        # 64-bit sizes.
-        @data += LOCAL_HEADER + name.bytesize + fields + (large ? 20 : 0) + compressed_size + (large ? 24 : 16)
-        # The central record: a zip64 extra holds the sizes for a large
-        # entry and the offset for one past 4 GiB.
+        # The local header, with a zip64 extra for a large entry; the data;
+        # the descriptor.
+        @data += LOCAL_HEADER + name.bytesize + fields + (large ? ZIP64_LOCAL_EXTRA : 0) +
+                 compressed_size + (large ? ZIP64_DATA_DESCRIPTOR : DATA_DESCRIPTOR)
+        # The central record: a zip64 extra holds the two 8-byte sizes for a
+        # large entry and the 8-byte offset for one past 4 GiB.
         zip64_extra = 0
         zip64_extra += 16 if large
         zip64_extra += 8 if offset_large
-        zip64_extra += 4 unless zip64_extra.zero?
+        zip64_extra += EXTRA_FIELD_HEADER unless zip64_extra.zero?
         @central += CENTRAL_HEADER + name.bytesize + fields + zip64_extra
         self
       end
 
-      # The extra field the writer adds by default: the extended timestamp
-      # (4 + 1 + 4 bytes).
-      def default_fields(_name)
-        @settings.write_extended_timestamps ? 9 : 0
+      # The size of the extra field the writer adds by default.
+      def default_fields
+        @settings.write_extended_timestamps ? EXTENDED_TIMESTAMP : 0
       end
     end
 

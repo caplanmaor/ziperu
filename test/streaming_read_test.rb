@@ -7,10 +7,10 @@ require "tmpdir"
 # header by local header.
 class StreamingReadTest < Minitest::Test
   FILES = {
-    "a.txt" => "hello " * 1000,
+    "a.txt"     => "hello " * 1000,
     "dir/b.bin" => Random.new(3).bytes(200_000),
     "empty.txt" => "",
-    "c.txt" => "the end"
+    "c.txt"     => "the end"
   }.freeze
 
   def setup
@@ -133,7 +133,7 @@ class StreamingReadTest < Minitest::Test
 
   def test_corrupt_data_is_caught
     bytes = streamed_archive.b
-    at = bytes.index("hello".b) || bytes.index("PK\x03\x04".b, 40) + 60
+    at = bytes.index("hello".b) || (bytes.index("PK\x03\x04".b, 40) + 60)
     bytes[at + 20, 4] = "XXXX"
     assert_raises(Ziperu::Error) { read_all(bytes) }
   end

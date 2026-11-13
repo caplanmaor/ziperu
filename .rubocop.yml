@@ -1,0 +1,111 @@
+AllCops:
+  NewCops: enable
+  TargetRubyVersion: 3.1
+  SuggestExtensions: false
+  Exclude:
+    - "compat/**/*"
+    - "pkg/**/*"
+    - "target/**/*"
+    - "tmp/**/*"
+    - "vendor/**/*"
+    - ".claude/**/*"
+
+# Line endings are git's business (.gitattributes), not the checkout's.
+Layout/EndOfLine:
+  Enabled: false
+
+Layout/HashAlignment:
+  EnforcedColonStyle: table
+  EnforcedHashRocketStyle: table
+
+# The library keeps rubyzip's public API, names and shapes included.
+Naming/AccessorMethodName:
+  Enabled: false
+
+Naming/PredicateMethod:
+  Enabled: false
+
+Naming/MethodParameterName:
+  MinNameLength: 1
+
+Lint/MissingSuper:
+  Exclude:
+    - "lib/ziperu/extra_field.rb"
+    - "lib/ziperu/extra_field/*.rb"
+
+# Sizes are judged in review: the ported classes are long, and splitting
+# them to satisfy a count would move them away from rubyzip's layout.
+Metrics:
+  Enabled: false
+
+Style/ClassCheck:
+  EnforcedStyle: kind_of?
+
+Style/Documentation:
+  Exclude:
+    - "bench/**/*"
+    - "fuzz/**/*"
+    - "test/**/*"
+
+Style/ModuleFunction:
+  Enabled: false
+
+# `x == 0` and `(flags & BIT) != 0` read fine next to the format's own
+# arithmetic.
+Style/NumericPredicate:
+  Enabled: false
+
+Style/BitwisePredicate:
+  Enabled: false
+
+Style/FormatStringToken:
+  Enabled: false
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# A named block says what it is for.
+Naming/BlockForwarding:
+  EnforcedStyle: explicit
+
+Style/ArgumentsForwarding:
+  Enabled: false
+
+Lint/EmptyBlock:
+  Exclude:
+    - "test/**/*"
+    - "bench/**/*"
+    - "fuzz/**/*"
+
+# A `# :nodoc:` on an accessor line covers the whole line, so the
+# documented and the internal ones stay apart.
+Style/AccessorGrouping:
+  Enabled: false
+
+Style/MultilineBlockChain:
+  Enabled: false
+
+# Scripts and tests: long literal lines, `$!` in a rescue, and existence
+# checks before a delete are fine there.
+Layout/LineLength:
+  Max: 120
+  Exclude:
+    - "bench/**/*"
+    - "fuzz/**/*"
+    - "test/**/*"
+
+Lint/NonAtomicFileOperation:
+  Exclude:
+    - "fuzz/**/*"
+    - "test/**/*"
+
+Style/GlobalVars:
+  Exclude:
+    - "test/interop/run.rb"
+
+Style/SpecialGlobalVars:
+  Exclude:
+    - "test/**/*"

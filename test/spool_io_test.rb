@@ -30,7 +30,7 @@ class SpoolIOTest < Minitest::Test
   end
 
   def test_spills_to_a_tempfile_past_the_budget
-    big = Random.new(1).bytes(Ziperu::SpoolIO::BUDGET / 3 + 1)
+    big = Random.new(1).bytes((Ziperu::SpoolIO::BUDGET / 3) + 1)
     streams = []
     Ziperu::File.open(@zip, create: true) do |zf|
       4.times do |i|
@@ -54,7 +54,7 @@ class SpoolIOTest < Minitest::Test
   end
 
   def test_budget_is_given_back_at_commit
-    big = "z" * (Ziperu::SpoolIO::BUDGET / 2 + 1)
+    big = "z" * ((Ziperu::SpoolIO::BUDGET / 2) + 1)
     kinds = []
     Ziperu::File.open(@zip, create: true) do |zf|
       2.times do |round|

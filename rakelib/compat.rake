@@ -1,9 +1,5 @@
 # frozen_string_literal: true
 
-require "rubygems/package"
-require "stringio"
-require "zlib"
-
 # Runs rubyzip's own test suite against this gem and reports how much of it
 # passes. `rake compat` fetches rubyzip's source into tmp/, generates its
 # fixtures with the real rubyzip, then runs each test file in a subprocess
@@ -12,13 +8,19 @@ require "zlib"
 require "fileutils"
 require "json"
 require "open3"
+require "rubygems/package"
+require "stringio"
 require "timeout"
+require "zlib"
 
 RUBYZIP_VERSION = "3.7.0"
 RUBYZIP_DIR = File.expand_path("../tmp/rubyzip", __dir__)
-RUBYZIP_TARBALL = "https://github.com/rubyzip/rubyzip/archive/refs/tags/v#{RUBYZIP_VERSION}.tar.gz"
+RUBYZIP_TARBALL = "https://github.com/rubyzip/rubyzip/archive/refs/tags/v#{RUBYZIP_VERSION}.tar.gz".freeze
 COMPAT_DIR = File.expand_path("../compat", __dir__)
 OUR_LIB = File.expand_path("../lib", __dir__)
+COMPAT_REPORT = File.expand_path("../COMPAT.md", __dir__)
+COMPAT_LOG_DIR = File.expand_path("../tmp/compat-logs", __dir__)
+COMPAT_RESULTS = File.expand_path("../tmp/compat-results.json", __dir__)
 PER_FILE_TIMEOUT = 300
 
 namespace :compat do
@@ -26,8 +28,6 @@ namespace :compat do
   task :fetch do
     unless File.exist?(File.join(RUBYZIP_DIR, "test", "gentestfiles.rb"))
       require "net/http"
-      require "rubygems/package"
-      require "zlib"
 
       puts "Fetching #{RUBYZIP_TARBALL}"
       FileUtils.mkdir_p(File.dirname(RUBYZIP_DIR))
@@ -70,9 +70,9 @@ namespace :compat do
   desc "Run rubyzip's tests against ziperu and write COMPAT.md"
   task run: :fixtures do
     files = Dir.glob("test/**/*_test.rb", base: RUBYZIP_DIR).sort
-    only = ENV["ONLY"]
+    only = ENV.fetch("ONLY", nil)
     files.select! { |f| only.split.any? { |sub| f.include?(sub) } } if only
-    FileUtils.mkdir_p(File.join(RUBYZIP_DIR, "..", "compat-logs"))
+    FileUtils.mkdir_p(COMPAT_LOG_DIR)
 
     results = files.map do |file|
       print format("%-55s", file)
@@ -83,7 +83,7 @@ namespace :compat do
 
     # The committed COMPAT.md is the baseline: fewer passes than it
     # records is a regression (COMPAT_ACCEPT=1 to take a new, lower one).
-    baseline = File.read("COMPAT.md")[/\*\*(\d+) of \d+ tests pass/, 1]&.to_i if File.exist?("COMPAT.md")
+    baseline = File.read(COMPAT_REPORT)[/\*\*(\d+) of \d+ tests pass/, 1]&.to_i if File.exist?(COMPAT_REPORT)
     write_report(results)
     totals = totals_for(results)
     puts
@@ -131,7 +131,7 @@ end
 def run_test_file(file)
   cmd = [Gem.ruby, "-I", OUR_LIB, "-I", File.join(RUBYZIP_DIR, "test"), file]
   out, status = run_unbundled(cmd, chdir: RUBYZIP_DIR)
-  File.write(File.join(RUBYZIP_DIR, "..", "compat-logs", "#{file.tr('/', '_')}.log"), out)
+  File.write(File.join(COMPAT_LOG_DIR, "#{file.tr("/", "_")}.log"), out)
 
   if out.include?("COMPAT LEAK")
     return { file: file, load_error: true, exit: 99, failed_tests: [],
@@ -159,11 +159,11 @@ end
 def totals_for(results)
   ran = results.reject { |r| r[:load_error] }
   {
-    runs: ran.sum { |r| r[:runs] },
-    passed: ran.sum { |r| r[:passed] },
-    failures: ran.sum { |r| r[:failures] },
-    errors: ran.sum { |r| r[:errors] },
-    skips: ran.sum { |r| r[:skips] },
+    runs:        ran.sum { |r| r[:runs] },
+    passed:      ran.sum { |r| r[:passed] },
+    failures:    ran.sum { |r| r[:failures] },
+    errors:      ran.sum { |r| r[:errors] },
+    skips:       ran.sum { |r| r[:skips] },
     load_errors: results.count { |r| r[:load_error] }
   }
 end
@@ -177,7 +177,7 @@ def write_report(results)
   lines = []
   lines << "# rubyzip compatibility"
   lines << ""
-  lines << "rubyzip #{RUBYZIP_VERSION}'s own test suite run against ziperu #{Ziperu::VERSION rescue "?"} " \
+  lines << "rubyzip #{RUBYZIP_VERSION}'s own test suite run against ziperu #{Ziperu::VERSION} " \
            "(`rake compat`, #{Time.now.utc.strftime("%Y-%m-%d")})."
   lines << ""
   lines << "**#{totals[:passed]} of #{totals[:runs]} tests pass (#{percent(totals[:passed], totals[:runs])}%)** " \
@@ -203,6 +203,6 @@ def write_report(results)
     r[:failed_tests].uniq.sort.each { |t| lines << "- `#{t}`" }
     lines << ""
   end
-  File.write(File.expand_path("../COMPAT.md", __dir__), lines.join("\n") + "\n", mode: "wb")
-  File.write(File.join(RUBYZIP_DIR, "..", "compat-results.json"), JSON.pretty_generate(results))
+  File.write(COMPAT_REPORT, "#{lines.join("\n")}\n", mode: "wb")
+  File.write(COMPAT_RESULTS, JSON.pretty_generate(results))
 end

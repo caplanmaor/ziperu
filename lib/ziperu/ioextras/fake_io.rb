@@ -19,9 +19,7 @@ module Ziperu
       end
 
       def set_encoding(ext_enc, int_enc = nil)
-        if ext_enc.kind_of?(String) && ext_enc.include?(':')
-          _ext_enc, int_enc = ext_enc.split(':', 2)
-        end
+        _ext_enc, int_enc = ext_enc.split(':', 2) if ext_enc.kind_of?(String) && ext_enc.include?(':')
 
         begin
           @internal_encoding = Encoding.find(int_enc) if int_enc

@@ -21,6 +21,7 @@ use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RArray, RHash, RString, Ruby,
     TryConvert, TypedData, Value,
 };
+use zip::read::ZipFile;
 use zip::result::{ZipError, ZipResult};
 use zip::write::StreamWriter;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -147,6 +148,22 @@ struct State {
 const INLINE_WRITE: usize = 16 * 1024;
 /// How much of a large write goes in between checks for an interrupt.
 const WRITE_CHUNK: usize = 1024 * 1024;
+/// `write_file` reads the file through a buffer of this size.
+const FILE_READ_BUF: usize = 256 * 1024;
+
+/// Encrypted with the traditional PKWARE cipher (anything but AES).
+fn is_zipcrypto<R: Read>(file: &ZipFile<'_, R>) -> bool {
+    file.encrypted() && file.compression() != CompressionMethod::Aes
+}
+
+/// What a raw copy of `file` adds: its sizes and CRC are the source's.
+fn known_of<R: Read>(file: &ZipFile<'_, R>) -> Begun {
+    Begun::Known {
+        size: file.size(),
+        csize: file.compressed_size(),
+        crc: file.crc32(),
+    }
+}
 /// `add_files_parallel` hands the crate this many files per thread at a
 /// time, checking for an interrupt in between.
 const PARALLEL_PART_PER_THREAD: usize = 4;
@@ -293,9 +310,9 @@ impl Writer {
     /// that no reader takes for a complete one. Any other writer is just
     /// dropped.
     pub fn abort(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
-        let (zip, append) = {
+        let (zip, append, count) = {
             let mut state = rb_self.borrow(ruby)?;
-            (state.zip.take(), state.append.take())
+            (state.zip.take(), state.append.take(), state.count)
         };
         if append.is_none() {
             if let Some(attached) = &rb_self.attached {
@@ -309,8 +326,13 @@ impl Writer {
         };
         maybe_without_gvl(rb_self.needs_gvl(), || -> ZipResult<()> {
             // The crate's `finish` is the only way to the sink; what it
-            // writes is overwritten or cut off just below.
-            zip.abort_file()?;
+            // writes is overwritten or cut off just below. `abort_file`
+            // takes out the last entry whichever it is, so it is only for
+            // one added here: with none, it would rewind over an entry the
+            // archive already had, which the tail does not cover.
+            if count > append.base {
+                zip.abort_file()?;
+            }
             let mut sink = zip.finish()?;
             sink.seek(SeekFrom::Start(append.tail_start))?;
             sink.write_all(&append.tail)?;
@@ -340,7 +362,7 @@ impl Writer {
             ));
         }
         let file_options = options.to_file_options(ruby)?;
-        let index = rb_self.add_entry(ruby, rb_self.needs_gvl(), &name, |state, zip| {
+        let index = rb_self.add_entry(ruby, rb_self.needs_gvl(), &name, |_, zip| {
             if options.zipcrypto && zip.is_stream() {
                 return Err(stream_error(ruby, "ZipCrypto entries"));
             }
@@ -348,7 +370,6 @@ impl Writer {
                 with_zip!(zip, |w| w.start_file_with_options(file_options.name(&name)))
             })
             .map_err(|e| entry_error(ruby, &name, e))?;
-            let _ = state;
             Ok(Begun::Hashed)
         })?;
         let extra_flags = if options.efs {
@@ -505,7 +526,7 @@ impl Writer {
             .rb(ruby)?;
         rb_self.with_state(ruby, |state, zip| {
             maybe_without_gvl(rb_self.needs_gvl(), || {
-                let mut buf = vec![0u8; WRITE_CHUNK.min(1 << 18)];
+                let mut buf = vec![0u8; FILE_READ_BUF];
                 let mut total = 0u64;
                 loop {
                     crate::gvl::check()?;
@@ -521,6 +542,38 @@ impl Writer {
             })
             .rb(ruby)
         })
+    }
+
+    /// `raw_copy` of entries `indices` of `archive` in turn, each under
+    /// its own name and fields, in one call: a commit that rewrites an
+    /// archive copies most entries this way, and one call each (with a
+    /// source and its read buffer set up for every one) cost more than
+    /// the copying. None may be a ZipCrypto entry (see `copy_zipcrypto`).
+    pub fn raw_copy_many(
+        ruby: &Ruby,
+        rb_self: &Self,
+        archive: &Archive,
+        indices: Vec<usize>,
+    ) -> Result<(), Error> {
+        let needs_gvl = archive.needs_gvl() || rb_self.needs_gvl();
+        let mut source = archive.archive(ruby)?.clone();
+        for index in indices {
+            let file = source.by_index_raw(index).rb(ruby)?;
+            if is_zipcrypto(&file) {
+                return Err(Error::new(
+                    ruby.exception_arg_error(),
+                    format!("entry {index} is a ZipCrypto entry; copy it with copy_zipcrypto"),
+                ));
+            }
+            let known = known_of(&file);
+            let name = file.name_raw().to_vec();
+            rb_self.add_entry(ruby, needs_gvl, &name, |_, zip| {
+                maybe_without_gvl(needs_gvl, || with_zip!(zip, |w| w.raw_copy_file(file)))
+                    .rb(ruby)?;
+                Ok(known)
+            })?;
+        }
+        Ok(())
     }
 
     /// Copies entry `index` of `archive` without decompressing it, under
@@ -540,12 +593,8 @@ impl Writer {
         // A clone, so the archive's borrow is released before the GVL is.
         let mut source = archive.archive(ruby)?.clone();
         let file = source.by_index_raw(index).rb(ruby)?;
-        let zipcrypto = file.encrypted() && file.compression() != CompressionMethod::Aes;
-        let known = Begun::Known {
-            size: file.size(),
-            csize: file.compressed_size(),
-            crc: file.crc32(),
-        };
+        let zipcrypto = is_zipcrypto(&file);
+        let known = known_of(&file);
         let name = file.name_raw().to_vec();
         let touch = touch
             .map(|h| EntryOptions::from_hash(ruby, h))
@@ -680,6 +729,7 @@ impl Writer {
             path: String,
             options: EntryOptions,
         }
+        let threads = threads.max(1);
         let mut parsed = Vec::with_capacity(items.len());
         for item in items.into_iter() {
             let item = RArray::try_convert(item)?;
@@ -707,7 +757,7 @@ impl Writer {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.max(1))
+            .num_threads(threads)
             .build()
             .map_err(|e| Error::new(ruby.exception_arg_error(), e.to_string()))?;
         rb_self.with_state(ruby, |state, zip| {
@@ -719,8 +769,8 @@ impl Writer {
             // interrupt (see `gvl`) between them. Should a part fail or the
             // call be interrupted, the parts already in are taken back out
             // again, last first, so the batch is added whole or not at all.
-            let part_len = threads.max(1) * PARALLEL_PART_PER_THREAD;
-            let part_bytes = threads.max(1) as u64 * PARALLEL_PART_BYTES_PER_THREAD;
+            let part_len = threads * PARALLEL_PART_PER_THREAD;
+            let part_bytes = threads as u64 * PARALLEL_PART_BYTES_PER_THREAD;
             maybe_without_gvl(rb_self.needs_gvl(), || -> ZipResult<()> {
                 state.crypto.seal_pending(w)?;
                 let mut added = 0;
@@ -730,9 +780,7 @@ impl Writer {
                     // files or `part_bytes`, whichever comes first.
                     let mut part = Vec::new();
                     let mut bytes = 0u64;
-                    while part.len() < part_len
-                        && (part.len() < threads.max(1) || bytes < part_bytes)
-                    {
+                    while part.len() < part_len && (part.len() < threads || bytes < part_bytes) {
                         let Some(item) = rest.next() else { break };
                         bytes += fs::metadata(item.1).map_or(0, |m| m.len());
                         part.push(item);
@@ -769,12 +817,13 @@ impl Writer {
     /// by deferring the start (see `OutputStream#rollback_entry`).
     pub fn rollback_entry(ruby: &Ruby, rb_self: &Self) -> Result<(), Error> {
         rb_self.with_state(ruby, |state, zip| {
-            if zip.is_stream() {
+            let Zip::Seekable(w) = zip else {
                 return Err(Error::new(
                     ruby.get_inner(&crate::errors::ERROR),
-                    "the entry's data has already gone out on a stream that cannot seek,                      and cannot be taken back",
+                    "the entry's data has already gone out on a stream that cannot seek, \
+                     and cannot be taken back",
                 ));
-            }
+            };
             let base = state.append.as_ref().map_or(0, |a| a.base);
             if state.count <= base {
                 return Err(Error::new(
@@ -787,9 +836,6 @@ impl Writer {
             // no header patch of the entry may land on the next one.
             state.crypto.pending = None;
             state.crypto.patches.retain(|p| p.index != index);
-            let Zip::Seekable(w) = zip else {
-                unreachable!("a stream was refused above")
-            };
             maybe_without_gvl(rb_self.needs_gvl(), || discard_last(w)).rb(ruby)?;
             state.count = index;
             Ok(())

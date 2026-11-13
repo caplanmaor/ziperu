@@ -24,8 +24,17 @@ module Ziperu
     XZ = ::Ziperu::COMPRESSION_METHOD_XZ
     PPMD = ::Ziperu::COMPRESSION_METHOD_PPMD
 
-    # Language encoding flag (EFS) bit
-    EFS = 0b100000000000 # :nodoc:
+    # General-purpose flag bits: the entry is encrypted; its sizes and CRC
+    # follow the data (it was written in streaming mode); its name and
+    # comment are UTF-8 (the language encoding flag, EFS).
+    ENCRYPTED_GPFLAG = 0b1          # :nodoc:
+    DATA_DESCRIPTOR_GPFLAG = 0b1000 # :nodoc:
+    EFS = 0b100000000000            # :nodoc:
+
+    # The permission bits of a Unix mode, and those kept when ownership is
+    # not being restored (setuid and setgid are dropped).
+    PERMISSION_BITS = 0o7777      # :nodoc:
+    SAFE_PERMISSION_BITS = 0o1777 # :nodoc:
 
     # Compression level flags (bits 1 and 2 of the gp flags).
     COMPRESSION_LEVEL_SUPERFAST_GPFLAG = 0b110 # :nodoc:
@@ -104,7 +113,7 @@ module Ziperu
     # The central directory's extra fields, parsed on first use: most
     # entries of a large archive are only ever listed.
     def parsed_extra
-      @extra ||= ExtraField.new(@extra_raw)
+      @extra ||= ExtraField.new(@extra_raw) # rubocop:disable Naming/MemoizedInstanceVariableName
     end
     private :parsed_extra
 
@@ -136,9 +145,17 @@ module Ziperu
     # Ziperu::File has released it (rubyzip lets entries be read after `close`).
     def archive # :nodoc:
       @source.native(@local_header_offset)
-    end
+    end # :nodoc:
 
     attr_writer :size # :nodoc:
+
+    # What the data of an entry read from a stream comes to: unknown (a
+    # nil size) until it has been read, when its header leaves that to the
+    # descriptor. Not an edit, so the entry is not marked dirty.
+    def learn_data(size, crc) # :nodoc:
+      @size = size
+      @crc = crc
+    end
 
     # Reads from `native` from now on, which holds the entry's record at
     # the same index (see Ziperu::File#refresh_after_append).
@@ -164,8 +181,8 @@ module Ziperu
 
     def comment=(comment)
       comment = comment.to_s
-      if comment.bytesize > 0xFFFF
-        raise Error, "entry comment is #{comment.bytesize} bytes; the limit is 65535"
+      if comment.bytesize > MAX_FIELD_LENGTH
+        raise Error, "entry comment is #{comment.bytesize} bytes; the limit is #{MAX_FIELD_LENGTH}"
       end
 
       @comment = comment
@@ -231,14 +248,26 @@ module Ziperu
     # Build an entry from the metadata Hash the native core produces for
     # one central-directory record.
     def self.from_meta(archive, meta, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu) # :nodoc:
+      from_row(archive, meta.values_at(*ROW_FIELDS), zipfile, metadata_encoding: metadata_encoding,
+                                                              settings:          settings)
+    end
+
+    # The fields of a row from `Native::Archive#each_entry_row`, in order:
+    # what `from_meta`'s Hash holds under these keys. In a row an empty
+    # comment or extra field may be nil.
+    ROW_FIELDS = %i[index name size compressed_size crc compression_method flags external_attributes
+                    fstype version_made_by dos_date dos_time comment extra header_offset].freeze # :nodoc:
+
+    # Build an entry from one row (see ROW_FIELDS).
+    def self.from_row(archive, row, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu) # :nodoc:
       entry = allocate
-      entry.send(:init_from_meta, archive, meta, zipfile, metadata_encoding, settings)
+      entry.send(:init_from_row, archive, row, zipfile, metadata_encoding, settings)
       entry
     end
 
     # Is this entry encrypted?
     def encrypted?
-      gp_flags & 1 == 1
+      gp_flags.anybits?(ENCRYPTED_GPFLAG)
     end
 
     # Encrypted with the traditional PKWARE cipher (anything but AES).
@@ -250,7 +279,7 @@ module Ziperu
     # Only informational here: reading goes through the central directory,
     # so an incomplete local header does not stop `get_input_stream`.
     def incomplete? # :nodoc:
-      (gp_flags & 8 == 8) && (crc == 0 || size == 0 || compressed_size == 0)
+      gp_flags.anybits?(DATA_DESCRIPTOR_GPFLAG) && (crc == 0 || size == 0 || compressed_size == 0)
     end
 
     # Was a size given, or is it still unknown (as for an entry that is
@@ -310,13 +339,11 @@ module Ziperu
 
     def time=(value, component: :mtime)
       mark_dirty!(:time=)
-      unless extra.member?(:universaltime) || extra.member?(:ntfs)
-        extra.create(:universaltime)
-      end
+      extra.create(:universaltime) unless extra.member?(:universaltime) || extra.member?(:ntfs)
 
       value = DOSTime.from_time(value)
-      comp = "#{component}=" unless component.to_s.end_with?('=')
-      (extra[:universaltime] || extra[:ntfs]).send(comp, value)
+      setter = component.to_s.end_with?('=') ? component : "#{component}="
+      (extra[:universaltime] || extra[:ntfs]).send(setter, value)
       @time = value if component == :mtime
     end
 
@@ -488,7 +515,7 @@ module Ziperu
       end
     end
 
-    # The native extractor's code for the policy; nil when a block decides.
+    # The native extractor's code for the policy.
     def self.on_exists_code(policy) # :nodoc:
       { raise: 0, overwrite: 1, skip: 2 }.fetch(policy) do
         raise ArgumentError, "on_exists: takes :raise, :overwrite or :skip, not #{policy.inspect}"
@@ -518,21 +545,13 @@ module Ziperu
       stat   = file_stat(src_path)
       @ftype = case stat.ftype
                when 'file'
-                 if name_is_directory?
-                   raise ArgumentError,
-                         "entry name '#{@name}' indicates a directory entry, but " \
-                         "'#{src_path}' is not a directory"
-                 end
+                 check_not_directory_name!(src_path)
                  :file
                when 'directory'
                  @name += '/' unless name_is_directory?
                  :directory
                when 'link'
-                 if name_is_directory?
-                   raise ArgumentError,
-                         "entry name '#{@name}' indicates a directory entry, but " \
-                         "'#{src_path}' is not a directory"
-                 end
+                 check_not_directory_name!(src_path)
                  :symlink
                else
                  raise "unknown file type: #{src_path.inspect} #{stat.inspect}"
@@ -590,18 +609,11 @@ module Ziperu
       when :copy_encrypted
         zip_output_stream.copy_encrypted_entry(self)
       else
-        renamed = @name.b != @original_name.b.tr('\\', '/')
+        renamed = renamed?
         zip_output_stream.copy_raw_entry(self, (@name if renamed), touch: dirty? && !renamed)
       end
     end
 
-    # How the entry reaches an output stream: `:header` for a directory or
-    # a symlink (nothing to stream), `:restream` to decompress and write
-    # afresh (a new entry, or one edited beyond what a raw copy carries),
-    # `:copy_encrypted` for a ZipCrypto entry copied byte for byte under
-    # its own headers, `:copy_raw` otherwise. Raises, with the reason, for
-    # an entry that would have to be restreamed but cannot be (encrypted,
-    # or a compression method the writer lacks).
     # The file on disk a regular file entry added from a path is written
     # from, when the native core can open it by name; nil otherwise.
     def native_source_path # :nodoc:
@@ -612,9 +624,23 @@ module Ziperu
 
       path = path.to_path if path.respond_to?(:to_path)
       path = path.to_s
-      path if path.ascii_only? || (path.encoding == ::Encoding::UTF_8 && path.valid_encoding?)
+      path if IOExtras.native_text?(path)
     end
 
+    # Whether committing the entry is a raw copy of it as it is: no new
+    # name, nothing touched, not ZipCrypto (see `write_to_zip_output_stream`).
+    # Such entries are copied in runs (OutputStream#put_entries).
+    def plain_raw_copy? # :nodoc:
+      write_plan == :copy_raw && !dirty? && !renamed?
+    end
+
+    # How the entry reaches an output stream: `:header` for a directory or
+    # a symlink (nothing to stream), `:restream` to decompress and write
+    # afresh (a new entry, or one edited beyond what a raw copy carries),
+    # `:copy_encrypted` for a ZipCrypto entry copied byte for byte under
+    # its own headers, `:copy_raw` otherwise. Raises, with the reason, for
+    # an entry that would have to be restreamed but cannot be (encrypted,
+    # or a compression method the writer lacks).
     def write_plan # :nodoc:
       # A symlink's target goes into the header call, whether the link is
       # new or a copy that has to be written afresh (an edit, or extra
@@ -655,15 +681,25 @@ module Ziperu
     end
 
     def loses_fields_on_raw_copy? # :nodoc:
-      restreamable? && (extra.keys & RAW_COPY_LOSES).any?
+      return false unless restreamable?
+      # Asked of the whole archive at once before a commit (see
+      # File#learn_raw_copy_losses), for an entry whose fields are as read.
+      return @raw_copy_loses if !@raw_copy_loses.nil? && !@local_extra_merged
+
+      extra.keys.intersect?(RAW_COPY_LOSES)
     end
+
+    # The header IDs of RAW_COPY_LOSES, for the native core.
+    RAW_COPY_LOSES_IDS = [0x5455, 0x000A, 0x5855, 0x7855].freeze # :nodoc:
+
+    attr_writer :raw_copy_loses # :nodoc:
 
     # Whether appending to the archive, which leaves this entry's local
     # header alone but has the crate write its central record again,
     # would lose fields of that record.
     def central_fields_lost_on_append? # :nodoc:
       fields = central_extra
-      !fields.nil? && restreamable? && (fields.keys & RAW_COPY_LOSES).any?
+      !fields.nil? && restreamable? && fields.keys.intersect?(RAW_COPY_LOSES)
     end
 
     # Whether the writer can decompress and rewrite the entry: it is not
@@ -725,10 +761,9 @@ module Ziperu
 
       @unix_uid   = stat.uid
       @unix_gid   = stat.gid
-      @unix_perms = stat.mode & 0o7777
+      @unix_perms = stat.mode & PERMISSION_BITS
     end
 
-    # Decompressed contents as a binary String, in one native call.
     # Yields (or returns) an IO over the whole archive this entry is in,
     # as rubyzip does: a fresh File for an archive on disk, the buffer
     # itself (rewound) for one in memory.
@@ -766,8 +801,10 @@ module Ziperu
       @source.local_extra(@local_header_offset).bytesize
     end
 
+    # Decompressed contents as a binary String, in one native call.
     def get_raw_input_string # :nodoc:
       return ''.b if ftype == :directory
+
       check_in_archive!(archive)
       # A record without an index is read through the stream.
       return open_input_stream(enforce_size: true, &:read) if index.nil?
@@ -794,6 +831,19 @@ module Ziperu
 
     private
 
+    # Whether the entry's name is no longer the one the archive has it under.
+    def renamed?
+      @name.b != @original_name.b.tr('\\', '/')
+    end
+
+    def check_not_directory_name!(src_path)
+      return unless name_is_directory?
+
+      raise ArgumentError,
+            "entry name '#{@name}' indicates a directory entry, but " \
+            "'#{src_path}' is not a directory"
+    end
+
     # Like get_input_stream, with `enforce_size: false` reading past a
     # declared size that is too small (what rubyzip does when
     # Ziperu.validate_entry_sizes is off) instead of stopping at it.
@@ -819,7 +869,7 @@ module Ziperu
       end
     end
 
-    def create_file(dest_path, _continue_on_exists_proc = proc { Ziperu.continue_on_exists_proc })
+    def create_file(dest_path)
       if ::File.exist?(dest_path)
         decision = yield(self, dest_path)
         return if decision == :skip
@@ -863,8 +913,9 @@ module Ziperu
       set_extra_attributes_on_path(dest_path)
     end
 
-    # Symlinks are never created on extraction: a link pointing outside the
-    # destination would let a later entry write through it.
+    # Created only with `symlinks: :create`, and only when the target
+    # resolves inside the destination: a link pointing outside would let a
+    # later entry write through it.
     def create_symlink(dest_path, dest_dir, mode)
       unless mode == :create
         warn "WARNING: skipped symlink '#{dest_path}'."
@@ -892,10 +943,8 @@ module Ziperu
 
     def set_unix_attributes_on_path(dest_path) # :nodoc:
       # Ignore setuid/setgid bits by default. Honour if @restore_ownership.
-      unix_perms_mask = (@restore_ownership ? 0o7777 : 0o1777)
-      if @restore_permissions && @unix_perms
-        ::FileUtils.chmod(@unix_perms & unix_perms_mask, dest_path)
-      end
+      unix_perms_mask = @restore_ownership ? PERMISSION_BITS : SAFE_PERMISSION_BITS
+      ::FileUtils.chmod(@unix_perms & unix_perms_mask, dest_path) if @restore_permissions && @unix_perms
       return unless @restore_ownership && @unix_uid && @unix_gid && ::Process.egid == 0
 
       ::FileUtils.chown(@unix_uid, @unix_gid, dest_path)
@@ -917,15 +966,8 @@ module Ziperu
       @internal_file_attributes = 1
       @external_file_attributes = 0
 
-      @version_needed_to_extract = VERSION_NEEDED_TO_EXTRACT
-      @version                   = VERSION_MADE_BY
-
       @ftype           = nil
-      @gp_flags        = 0
-      if @settings.unicode_names
-        @gp_flags |= EFS
-        @version = 63
-      end
+      @gp_flags        = @settings.unicode_names ? EFS : 0
       @follow_symlinks = false
 
       @restore_times       = DEFAULT_RESTORE_OPTIONS[:restore_times]
@@ -938,10 +980,12 @@ module Ziperu
 
     def check_name(name) # :nodoc:
       raise EntryNameError, name if name.start_with?('/')
-      raise EntryNameError if name.length > 65_535
+      raise EntryNameError if name.length > MAX_FIELD_LENGTH
     end
 
-    def init_from_meta(archive, meta, zipfile, metadata_encoding = nil, settings = ::Ziperu)
+    def init_from_row(archive, row, zipfile, metadata_encoding, settings)
+      index, name, size, compressed_size, crc, method, flags, external_attributes, fstype, _version,
+        dos_date, dos_time, comment, extra, header_offset = row
       @settings = settings
       @dirty = false
       @zip64 = nil
@@ -953,29 +997,26 @@ module Ziperu
       # they stay binary. A lookup finds a name in any encoding with the
       # same bytes. The raw name, before separators are normalised, is what
       # the archive knows the entry by.
-      @gp_flags = meta[:flags]
-      @original_name = meta[:name]
-      @source = archive ? Source::Archive.new(archive, zipfile, meta[:index], @original_name) : Source::NONE
-      @name = decode_stored_text(@original_name.dup, metadata_encoding, meta[:extra])
-      @name.tr!('\\', '/')
-      @size = meta[:size]
-      @compressed_size = meta[:compressed_size]
-      @crc = meta[:crc]
-      @compression_method = meta[:compression_method]
-      @compression_level = @settings.default_compression
-      @fstype = meta[:fstype]
-      @version = meta[:version_made_by]
-      @external_file_attributes = meta[:external_attributes]
-      set_time(meta[:dos_date], meta[:dos_time])
+      @gp_flags = flags
+      @original_name = name
+      @source = archive ? Source::Archive.new(archive, zipfile, index, @original_name) : Source::NONE
       # Most entries have no comment and many no extra fields: those share
       # one empty String rather than carrying their own.
-      comment = meta[:comment]
-      @comment = comment.empty? ? '' : decode_stored_text(comment, metadata_encoding)
       @extra = nil
-      extra = meta[:extra]
-      @extra_raw = extra.empty? ? '' : extra
+      @extra_raw = extra.nil? || extra.empty? ? '' : extra
       @local_extra_merged = false
-      @local_header_offset = meta[:header_offset]
+      @name = decode_stored_text(@original_name.dup, metadata_encoding, name: true)
+      @name.tr!('\\', '/')
+      @size = size
+      @compressed_size = compressed_size
+      @crc = crc
+      @compression_method = method
+      @compression_level = @settings.default_compression
+      @fstype = fstype
+      @external_file_attributes = external_attributes
+      set_time(dos_date, dos_time)
+      @comment = comment.nil? || comment.empty? ? '' : decode_stored_text(comment, metadata_encoding)
+      @local_header_offset = header_offset
       set_ftype_from_c_dir_entry
     end
 
@@ -983,16 +1024,16 @@ module Ziperu
     # `encoding` is the archive's `metadata_encoding:`, for a name or
     # comment stored without the language encoding flag: the bytes are
     # read in it and transcoded to UTF-8 (left as bytes when they do not
-    # decode). `raw_extra`, for a name, is checked for Info-ZIP's Unicode
-    # Path field first, which carries the UTF-8 name outright.
-    def decode_stored_text(text, encoding = nil, raw_extra = nil) # :nodoc:
+    # decode). For a name, Info-ZIP's Unicode Path extra field is checked
+    # first, which carries the UTF-8 name outright.
+    def decode_stored_text(text, encoding = nil, name: false) # :nodoc:
       forced = @settings.force_entry_names_encoding
       if forced
         text.force_encoding(forced)
       elsif (@gp_flags & EFS).nonzero?
         text.force_encoding(::Encoding::UTF_8)
         text.force_encoding(::Encoding::BINARY) unless text.valid_encoding?
-      elsif raw_extra && (utf8 = unicode_path_name(raw_extra, text))
+      elsif name && (utf8 = unicode_path_name(text))
         return utf8
       elsif encoding
         return transcode(text, encoding)
@@ -1002,17 +1043,12 @@ module Ziperu
 
     # The name the Unicode Path extra field carries for `stored`, if there
     # is one and it is for this name (its CRC matches).
-    def unicode_path_name(raw_extra, stored)
-      return unless raw_extra.include?(ExtraField::UnicodePath::HEADER_ID)
+    # The extra fields are parsed for it now rather than on first use.
+    def unicode_path_name(stored)
+      return unless @extra_raw.include?(ExtraField::UnicodePath::HEADER_ID)
 
-      field = parsed_extra_from(raw_extra)[:unicodepath]
+      field = parsed_extra[:unicodepath]
       field.name.dup if field&.for?(stored)
-    end
-
-    # Parses the central directory's extra fields now rather than on first
-    # use (the parse is needed for the name).
-    def parsed_extra_from(raw_extra)
-      @extra ||= ExtraField.new(raw_extra)
     end
 
     def transcode(text, encoding)
@@ -1058,7 +1094,7 @@ module Ziperu
     def set_ftype_from_c_dir_entry # :nodoc:
       @ftype = case @fstype
                when ::Ziperu::FSTYPE_UNIX
-                 @unix_perms = (@external_file_attributes >> 16) & 0o7777
+                 @unix_perms = (@external_file_attributes >> 16) & PERMISSION_BITS
                  case (@external_file_attributes >> 28)
                  when ::Ziperu::FILE_TYPE_DIR
                    :directory
@@ -1074,7 +1110,7 @@ module Ziperu
                  # bits. The native writer stamps the host of the machine it
                  # runs on, so archives written here on Windows would lose
                  # their permissions on reread; a non-zero mode is kept.
-                 perms = (@external_file_attributes >> 16) & 0o7777
+                 perms = (@external_file_attributes >> 16) & PERMISSION_BITS
                  @unix_perms = perms unless perms.zero?
                  name_is_directory? ? :directory : :file
                end

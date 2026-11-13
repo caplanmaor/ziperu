@@ -34,7 +34,7 @@ class ComfortTest < Minitest::Test
 
   def each_cipher
     { "zipcrypto" => Ziperu::TraditionalEncrypter.new(PASSWORD),
-      "aes" => Ziperu::AESEncrypter.new(PASSWORD) }.each do |kind, enc|
+      "aes"       => Ziperu::AESEncrypter.new(PASSWORD) }.each do |kind, enc|
       file = path("#{kind}.zip")
       write_encrypted(file, enc)
       yield kind, file
@@ -72,7 +72,7 @@ class ComfortTest < Minitest::Test
     each_cipher do |kind, file|
       Ziperu::File.open(file) do |zf|
         assert_raises(Ziperu::Error) { zf.read("a.txt") }
-        assert_equal 2, zf.verify.size, "#{kind}: verify reports what it cannot check" if false
+        nil
       end
       Ziperu::File.open(file, password: "wrong") do |zf|
         assert_raises(Ziperu::Error) { zf.read("a.txt") }
@@ -139,7 +139,11 @@ class ComfortTest < Minitest::Test
     w.close
     io = Ziperu::File.open_buffer(StringIO.new(+""), create: true) do |zf|
       zf.add("piped.txt", r)
-      zf.add("dir/", StringIO.new("")) rescue assert_instance_of(ArgumentError, $!)
+      begin
+        zf.add("dir/", StringIO.new(""))
+      rescue StandardError
+        assert_instance_of(ArgumentError, $!)
+      end
     end
     Ziperu::File.open_buffer(io.string) do |zf|
       assert_equal "piped", zf.read("piped.txt")

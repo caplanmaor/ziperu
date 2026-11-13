@@ -45,9 +45,7 @@ module Ziperu
       ssegment_size  = segment_size if ssegment_size > segment_size
       szip_file_name = "#{partial_zip_file_name}.#{format('%03d', szip_file_index)}"
       ::File.open(szip_file_name, 'wb') do |szip_file|
-        if szip_file_index == 1
-          ssegment_size = put_split_signature(szip_file, segment_size)
-        end
+        ssegment_size = put_split_signature(szip_file, segment_size) if szip_file_index == 1
         chunk_bytes = 0
         until ssegment_size == chunk_bytes || zip_file.eof?
           segment_bytes_left = ssegment_size - chunk_bytes

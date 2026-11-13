@@ -14,3 +14,6 @@ Thumbs.db
 /ext/ziperu/Makefile
 /ext/ziperu/*.so
 /ext/ziperu/target
+mkmf.log
+/.yardoc
+/vendor/bundle

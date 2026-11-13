@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Ziperu
-  # Writes zip archives entry by entry, with rubyzip's `Ziperu::OutputStream`
+  # Writes zip archives entry by entry, with rubyzip's `Zip::OutputStream`
   # API: `put_next_entry` opens an entry, then the IO-like methods (`<<`,
   # `write`, `puts`, `print`) fill it.
   #
@@ -53,6 +53,7 @@ module Ziperu
         # stay as they are and the new ones follow them. Its comment is
         # kept unless `comment=` is called.
         raise ArgumentError, 'append: takes a path, not an IO' if stream
+
         @writer = Native::Writer.open_append(file_name.to_s)
       elsif stream
         @io = file_name
@@ -80,6 +81,7 @@ module Ziperu
       # An append keeps the archive's own comment unless one is set.
       @keep_comment = append
       @closed = false
+      @aborted = false
       @current_entry = nil
       @written = []
       # On a stream, a file entry is begun in the native writer only when
@@ -145,7 +147,7 @@ module Ziperu
       # as with #open and #write_buffer.
       # Not in rubyzip.
       def body(**opts, &block)
-        raise ArgumentError, "a block that writes the entries is required" unless block
+        raise ArgumentError, 'a block that writes the entries is required' unless block
 
         Enumerator.new { |yielder| write_buffer(Yielder.new(yielder), **opts, &block) }
       end
@@ -170,7 +172,7 @@ module Ziperu
       return if @closed
 
       finish_archive
-      @io.close if @io && @io.respond_to?(:close)
+      @io.close if @io.respond_to?(:close)
       @closed = true
       nil
     end
@@ -184,6 +186,7 @@ module Ziperu
     # does.
     def abort # :nodoc:
       @aborted = true
+      discard_writes
       if @append || @io
         @writer.abort
         @closed = true
@@ -255,6 +258,7 @@ module Ziperu
       entry = @current_entry
       raise Error, 'there is no entry being written to take back' if entry.nil? || !@written.last.equal?(entry)
 
+      discard_writes
       if @deferred
         @deferred = nil
       else
@@ -304,16 +308,59 @@ module Ziperu
     # take it (seekable sink, no encryption).
     def put_entries(entries, threads: 1) # :nodoc:
       parallel = threads > 1 && !@streamed && @encrypter.kind_of?(NullEncrypter)
-      entries.chunk { |e| parallel && e.write_plan == :restream && e.file? && !e.filepath.nil? }
-             .each do |from_disk, run|
-        if from_disk && run.size > 1
+      entries.chunk { |e| put_kind(e, parallel) }.each do |kind, run|
+        if kind == :from_disk && run.size > 1
           add_from_disk_parallel(run, threads)
+        elsif kind.kind_of?(Native::Archive) && run.size > 1
+          copy_raw_entries(kind, run)
         else
           run.each { |e| e.write_to_zip_output_stream(self) }
         end
       end
       nil
     end
+
+    # How `put_entries` writes `entry`: :from_disk (compressed on the
+    # pool), the native archive it is copied raw from as it is (runs of
+    # those go in one call), or :one (by itself).
+    def put_kind(entry, parallel)
+      return :from_disk if parallel && entry.write_plan == :restream && entry.file? && !entry.filepath.nil?
+      return entry.archive if entry.plain_raw_copy?
+
+      :one
+    end
+    private :put_kind
+
+    # Copies `entries`, all of `archive` and each as it is, in one call to
+    # the native writer.
+    def copy_raw_entries(archive, entries)
+      check_open!
+      start_deferred
+      flush_writes
+      if @stream_names
+        entries.each do |e|
+          name = e.name.b
+          raise EntryExistsError.new('put_next_entry', e.name) if @stream_names.key?(name)
+
+          @stream_names[name] = true
+        end
+      end
+      @writer.raw_copy_many(archive, entries.map(&:index))
+      @written.concat(entries)
+      @current_entry = nil
+    rescue Native::DuplicateEntryError
+      raise_duplicate_among(entries)
+    end
+    private :copy_raw_entries
+
+    # The native core refused a name already in the archive without saying
+    # which; the names written so far and those of `entries` tell.
+    def raise_duplicate_among(entries)
+      names = @written.map(&:name) + entries.map(&:name)
+      name = names.tally.find { |_, count| count > 1 }&.first || entries.first.name
+      raise EntryExistsError.new('put_next_entry', name)
+    end
+    private :raise_duplicate_among
 
     # A batch is compressed to memory in full before it is appended, so
     # the batches are bounded by the bytes they read.
@@ -325,6 +372,7 @@ module Ziperu
       bytes = 0
       flush = lambda do
         items = batch.map { |e| [e.name.b, e.filepath.to_s, native_entry_options(e)] }
+        flush_writes
         @writer.add_files_parallel(items, threads)
         @written.concat(batch)
         batch = []
@@ -338,10 +386,7 @@ module Ziperu
       flush.call unless batch.empty?
       @current_entry = nil
     rescue Native::DuplicateEntryError
-      # The native core does not say which; the names tell.
-      names = @written.map(&:name) + entries.map(&:name)
-      name = names.tally.find { |_, count| count > 1 }&.first || entries.first.name
-      raise EntryExistsError.new('put_next_entry', name)
+      raise_duplicate_among(entries)
     end
     private :add_from_disk_parallel
 
@@ -363,6 +408,7 @@ module Ziperu
             unix_perms: entry.unix_perms }
         end
       start_deferred
+      flush_writes
       @stream_names[(new_name || entry.name).to_s.b] = true if @stream_names
       @writer.raw_copy(entry.archive, entry.index, new_name, touch_opts)
       @written << entry
@@ -377,22 +423,40 @@ module Ziperu
     def copy_encrypted_entry(entry, new_name = nil) # :nodoc:
       check_copyable!(entry)
       opts = native_entry_options(entry).merge(
-        zipcrypto: true, descriptor: entry.gp_flags & 8 != 0 # bit 3: data descriptor follows
+        zipcrypto: true, descriptor: entry.gp_flags.anybits?(Entry::DATA_DESCRIPTOR_GPFLAG)
       )
+      start_deferred
+      flush_writes
       @writer.copy_zipcrypto(entry.archive, entry.index, (new_name || entry.name).b, opts)
       @written << entry
       @current_entry = nil
     end
 
+    # Writes shorter than this are gathered (see `<<`).
+    SMALL_WRITE = 16 * 1024 # :nodoc:
+    # Gathered writes go to the native writer once they reach this.
+    WRITE_BUFFER = 64 * 1024 # :nodoc:
+
     # Modeled after IO.<<
+    #
+    # Small writes (`puts` of a line, `<<` of a field) are gathered here
+    # and handed to the native writer 64 KB at a time: one call into it
+    # costs about what deflating a few KB does. Whatever is gathered goes
+    # in before anything else the writer does.
     def <<(data)
       raise IOError, 'closed stream' if @closed || @current_entry.nil?
-      if @current_entry.directory?
-        raise Error, "cannot write data to directory entry '#{@current_entry.name}'"
-      end
+      raise Error, "cannot write data to directory entry '#{@current_entry.name}'" if @current_entry.directory?
 
       start_deferred
-      @writer.write(data.to_s.b)
+      data = data.to_s
+      if data.bytesize >= SMALL_WRITE
+        flush_writes
+        @writer.write(data.b)
+      else
+        gathered = (@gathered ||= +''.b)
+        gathered << (data.encoding == ::Encoding::BINARY || data.ascii_only? ? data : data.b)
+        flush_writes if gathered.bytesize >= WRITE_BUFFER
+      end
       self
     end
 
@@ -402,22 +466,42 @@ module Ziperu
       raise IOError, 'closed stream' if @closed || @current_entry.nil?
 
       start_deferred
+      flush_writes
       @writer.write_file(path)
       self
     end
 
     private
 
+    # Hands the gathered small writes (see `<<`) to the native writer.
+    def flush_writes
+      gathered = @gathered
+      return if gathered.nil? || gathered.empty?
+
+      # Taken first: should the write raise, the bytes are not written
+      # again by the next flush.
+      @gathered = nil
+      @writer.write(gathered)
+    end
+
+    # Drops the gathered small writes, which belong to the entry being
+    # taken back or abandoned.
+    def discard_writes
+      @gathered = nil
+    end
+
     def finish_archive
       unless @keep_comment
         comment = @comment.to_s.b
-        if comment.bytesize > 0xFFFF
-          raise ArgumentError, "archive comment is #{comment.bytesize} bytes; the limit is 65535"
+        if comment.bytesize > MAX_FIELD_LENGTH
+          raise ArgumentError,
+                "archive comment is #{comment.bytesize} bytes; the limit is #{MAX_FIELD_LENGTH}"
         end
 
         @writer.comment = comment
       end
       start_deferred
+      flush_writes
       @current_entry = nil
       begin
         bytes, stats = @writer.finish
@@ -449,6 +533,7 @@ module Ziperu
       end
 
       start_deferred
+      flush_writes
       opts = native_entry_options(entry)
       if @stream_names
         # The native writer would catch a second entry under a name only
@@ -495,7 +580,6 @@ module Ziperu
 
       raise Error, "entry '#{entry.name}' shares its name with another record and cannot be copied raw"
     end
-    private :check_open!, :check_copyable!
 
     # Translate a Ziperu::Entry into the Hash the native writer takes.
     def native_entry_options(entry)
@@ -513,23 +597,27 @@ module Ziperu
       # An empty XZ or PPMd entry is a stream with no blocks, which 7-Zip
       # refuses ("data after the end of the payload"); an empty file is
       # stored, as Info-ZIP stores every empty file.
-      method = Entry::STORED if entry.size_known? && entry.size.zero? && [Entry::XZ, Entry::PPMD].include?(method)
+      method = Entry::STORED if empty_entry?(entry) && [Entry::XZ, Entry::PPMD].include?(method)
       {
-        method: method,
-        level: (level if method != Entry::STORED && level && level != Zlib::DEFAULT_COMPRESSION),
-        dos_date: time.to_binary_dos_date,
-        dos_time: time.to_binary_dos_time,
-        unix_perms: entry.unix_perms,
-        fstype: entry.fstype,
-        large_file: zip64_needed?(entry, zip64_suppressed),
-        comment: entry.comment.to_s.b,
-        extra: extra.to_local_bin.b,
+        method:        method,
+        level:         (level if method != Entry::STORED && level && level != Zlib::DEFAULT_COMPRESSION),
+        dos_date:      time.to_binary_dos_date,
+        dos_time:      time.to_binary_dos_time,
+        unix_perms:    entry.unix_perms,
+        fstype:        entry.fstype,
+        large_file:    zip64_needed?(entry, zip64_suppressed),
+        comment:       entry.comment.to_s.b,
+        extra:         extra.to_local_bin.b,
         central_extra: extra.to_c_dir_bin.b,
         # The language encoding flag on every entry (`Ziperu.unicode_names`),
         # which the native writer sets by patching the headers; a non-ASCII
         # UTF-8 name gets it from the native core regardless.
-        efs: (entry.gp_flags & Entry::EFS) != 0
+        efs:           entry.gp_flags.anybits?(Entry::EFS)
       }
+    end
+
+    def empty_entry?(entry)
+      entry.size_known? && entry.size.zero? # rubocop:disable Style/ZeroLengthPredicate -- an Integer
     end
 
     # The fields a new entry gets unless it has them (see
@@ -542,7 +630,6 @@ module Ziperu
 
       extra.create(:universaltime).mtime = DOSTime.from_time(entry.time)
     end
-    private :add_default_fields
 
     # rubyzip writes a zip64 extra for a file entry only when it has to:
     # the size is unknown up front (it may turn out huge) or is already
@@ -552,7 +639,7 @@ module Ziperu
     # `Ziperu.write_zip64_support = :always` makes every file entry
     # zip64-ready, for testing readers.
     def zip64_needed?(entry, suppressed)
-      return true if entry.size >= 0xFFFFFFFF || entry.compressed_size >= 0xFFFFFFFF
+      return true if entry.size >= ZIP64_SIZE_LIMIT || entry.compressed_size >= ZIP64_SIZE_LIMIT
       return false unless entry.file?
       return entry.zip64 unless entry.zip64.nil?
       return true if @settings.write_zip64_support == :always && !suppressed

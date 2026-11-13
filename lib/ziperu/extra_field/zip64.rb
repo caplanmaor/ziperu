@@ -42,9 +42,7 @@ module Ziperu
     def parse(original_size, compressed_size, relative_header_offset = nil, disk_start_number = nil)
       @original_size = extract(8, 'Q<') if original_size == 0xFFFFFFFF
       @compressed_size = extract(8, 'Q<') if compressed_size == 0xFFFFFFFF
-      if relative_header_offset && relative_header_offset == 0xFFFFFFFF
-        @relative_header_offset = extract(8, 'Q<')
-      end
+      @relative_header_offset = extract(8, 'Q<') if relative_header_offset && relative_header_offset == 0xFFFFFFFF
       @disk_start_number = extract(4, 'V') if disk_start_number && disk_start_number == 0xFFFF
       @content = nil
       [@original_size || original_size,

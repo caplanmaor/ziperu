@@ -26,7 +26,7 @@ module Ziperu
       end
 
       def each(*_args, **_opts)
-        return to_enum(:each) unless block_given?
+        to_enum(:each) unless block_given? # rubocop:disable Lint/ToEnumArguments -- nothing to enumerate
       end
       alias each_line each
 

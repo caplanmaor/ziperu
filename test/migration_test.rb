@@ -52,7 +52,9 @@ class MigrationTest < Minitest::Test
       path = copy_fixture(name)
       snapshot = lambda do
         Ziperu::File.open(path) do |zf|
-          zf.entries.reject(&:directory?).map { |e| [e.name, e.extra.keys.sort, e.mtime.to_i, e.extra[field]&.to_local_bin] }
+          zf.entries.reject(&:directory?).map do |e|
+            [e.name, e.extra.keys.sort, e.mtime.to_i, e.extra[field]&.to_local_bin]
+          end
         end
       end
       before = snapshot.call
@@ -150,8 +152,8 @@ class MigrationTest < Minitest::Test
   end
 
   def test_input_stream_over_a_non_archive_yields_nothing
-    assert_nil Ziperu::InputStream.open(StringIO.new("")) { |zis| zis.get_next_entry }
-    assert_nil Ziperu::InputStream.open(StringIO.new("just text")) { |zis| zis.get_next_entry }
+    assert_nil Ziperu::InputStream.open(StringIO.new(""), &:get_next_entry)
+    assert_nil Ziperu::InputStream.open(StringIO.new("just text"), &:get_next_entry)
     # An offset that is not an entry's is an error, as in rubyzip.
     assert_raises(Ziperu::Error) { Ziperu::InputStream.open(fixture("text.zip"), offset: 7) }
     # A missing file is still an error, as is a closed stream.
@@ -187,13 +189,13 @@ class MigrationTest < Minitest::Test
 
   def test_central_only_custom_extra_fields_are_written
     entry = Ziperu::Entry.new("", "f.txt")
-    entry.extra.merge([0x7777, 4].pack("vv") + "ABCD")
+    entry.extra.merge("#{[0x7777, 4].pack("vv")}ABCD")
     archive = Ziperu::OutputStream.write_buffer do |zos|
       zos.put_next_entry(entry)
       zos.write("x")
     end.string
     central = archive[archive.index("PK\x01\x02".b)..]
-    assert_includes central, [0x7777, 4].pack("vv") + "ABCD"
+    assert_includes central, "#{[0x7777, 4].pack("vv")}ABCD"
     Ziperu::File.open_buffer(archive) do |zf|
       assert_includes zf.entries.first.extra.keys, :unknown
     end

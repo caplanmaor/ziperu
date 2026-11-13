@@ -59,7 +59,10 @@ Dir.mktmpdir("ziperu-growth") do |dir|
     # Read: list, read, verify, foreach, InputStream, open_buffer, a stream
     # to a write-only IO, extract on threads, a raw copy.
     Ziperu::File.open(zip, password: "pw") do |zf|
-      zf.entries.each { |e| e.time; e.extra }
+      zf.entries.each do |e|
+        e.time
+        e.extra
+      end
       zf.read("in/f3.bin")
       zf.read("secret.txt")
       zf.read("big.bin")
@@ -68,7 +71,7 @@ Dir.mktmpdir("ziperu-growth") do |dir|
       FileUtils.rm_rf(out)
       zf.extract_all(out, threads: 2)
     end
-    Ziperu::File.foreach(zip) { |e| e.name }
+    Ziperu::File.foreach(zip, &:name)
     Ziperu::InputStream.open(zip, password: "pw") { |is| is.read while is.get_next_entry }
     Ziperu::File.open_buffer(File.binread(zip)) { |zf| zf.read("in/f1.bin") }
     Ziperu::File.open_buffer(zc.string, password: "pw") { |zf| zf.read("zc.txt") }
@@ -81,7 +84,10 @@ Dir.mktmpdir("ziperu-growth") do |dir|
         zos.write("x")
       end
     end
-    Ziperu::OutputStream.body { |zos| zos.put_next_entry("b"); zos.write("b") }.each { |_| }
+    Ziperu::OutputStream.body do |zos|
+      zos.put_next_entry("b")
+      zos.write("b")
+    end.each { |_| }
   end
 
   samples = []

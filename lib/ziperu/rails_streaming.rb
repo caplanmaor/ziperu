@@ -45,12 +45,12 @@ module Ziperu
       #   [200, Ziperu::RailsStreaming.headers("export.zip"), Ziperu::OutputStream.body { ... }]
       def headers(filename, size: nil, type: 'application/zip')
         h = {
-          'content-type' => type,
+          'content-type'        => type,
           'content-disposition' => content_disposition(filename),
           # Proxies (nginx) and Rack::ETag must not hold the body back.
-          'x-accel-buffering' => 'no',
-          'cache-control' => 'no-cache',
-          'last-modified' => Time.now.httpdate
+          'x-accel-buffering'   => 'no',
+          'cache-control'       => 'no-cache',
+          'last-modified'       => Time.now.httpdate
         }
         h['content-length'] = size.to_s if size
         h
@@ -61,7 +61,7 @@ module Ziperu
       def content_disposition(filename)
         name = filename.to_s
         ascii = name.encode('US-ASCII', undef: :replace, invalid: :replace, replace: '_').delete('"\\')
-        encoded = name.b.gsub(/[^A-Za-z0-9!#$&+.^_`|~-]/) { |c| format('%%%02X', c.ord) }
+        encoded = name.b.gsub(/[^A-Za-z0-9!#{::Regexp.last_match(0)}+.^_`|~-]/) { |c| format('%%%02X', c.ord) }
         "attachment; filename=\"#{ascii}\"; filename*=UTF-8''#{encoded}"
       end
     end

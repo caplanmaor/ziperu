@@ -32,8 +32,8 @@ class CompatCornersTest < Minitest::Test
   def test_compression_level_sets_gp_flag_bits
     assert_equal 0b110, (Ziperu::Entry.new("", "a", compression_level: 1).gp_flags & 0b110)
     assert_equal 0b010, (Ziperu::Entry.new("", "a", compression_level: 9).gp_flags & 0b110)
-    assert_equal 0, (Ziperu::Entry.new("", "a", compression_level: 1,
-                                             compression_method: Ziperu::Entry::STORED).gp_flags & 0b110)
+    assert_equal 0, (Ziperu::Entry.new("", "a", compression_level:  1,
+                                                compression_method: Ziperu::Entry::STORED).gp_flags & 0b110)
   end
 
   def test_zip64_extra_only_when_size_is_unknown
@@ -57,7 +57,7 @@ class CompatCornersTest < Minitest::Test
     path = File.join(@tmp, "stored.zip")
     Ziperu::File.open(path, create: true) do |zf|
       zf.get_output_stream("s.txt", compression_method: Ziperu::Entry::STORED,
-                                    compression_level: Zlib::BEST_SPEED) { |os| os.write "x" * 100 }
+                                    compression_level:  Zlib::BEST_SPEED) { |os| os.write "x" * 100 }
     end
     Ziperu::File.open(path) do |zf|
       entry = zf.get_entry("s.txt")
@@ -102,7 +102,7 @@ class CompatCornersTest < Minitest::Test
     joined = File.join(@tmp, "joined.zip")
     File.open(joined, "wb") do |out|
       (1..segments).each do |i|
-        data = File.binread("#{big}.#{format('%03d', i)}")
+        data = File.binread("#{big}.#{format("%03d", i)}")
         data = data.byteslice(4..) if i == 1 # split signature
         out.write(data)
       end
@@ -113,7 +113,7 @@ class CompatCornersTest < Minitest::Test
   def test_wrong_password_error_classes_match_rubyzip
     error = assert_raises(Ziperu::DecompressionError) do
       Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"),
-                            decrypter: Ziperu::TraditionalDecrypter.new("wrong")) do |zis|
+                               decrypter: Ziperu::TraditionalDecrypter.new("wrong")) do |zis|
         zis.get_next_entry
         zis.read
       end
@@ -122,7 +122,7 @@ class CompatCornersTest < Minitest::Test
 
     error = assert_raises(Ziperu::Error) do
       Ziperu::InputStream.open(fixture("rubyzip/zip-aes-256.zip"),
-                            decrypter: Ziperu::AESDecrypter.new("wrong")) do |zis|
+                               decrypter: Ziperu::AESDecrypter.new("wrong")) do |zis|
         zis.get_next_entry
         zis.read
       end

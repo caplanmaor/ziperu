@@ -4,7 +4,7 @@
 
 module Ziperu
   class ExtraField < Hash # :nodoc:all
-    ID_MAP = {}
+    ID_MAP = {} # rubocop:disable Style/MutableConstant -- the registry the field classes add themselves to
 
     def initialize(binstr = nil, local: false)
       merge(binstr, local: local) if binstr
@@ -95,15 +95,15 @@ module Ziperu
   end
 end
 
-require 'ziperu/extra_field/unknown'
-require 'ziperu/extra_field/generic'
-require 'ziperu/extra_field/universal_time'
-require 'ziperu/extra_field/unicode_path'
-require 'ziperu/extra_field/old_unix'
-require 'ziperu/extra_field/unix'
-require 'ziperu/extra_field/zip64'
-require 'ziperu/extra_field/ntfs'
-require 'ziperu/extra_field/aes'
+require_relative 'extra_field/unknown'
+require_relative 'extra_field/generic'
+require_relative 'extra_field/universal_time'
+require_relative 'extra_field/unicode_path'
+require_relative 'extra_field/old_unix'
+require_relative 'extra_field/unix'
+require_relative 'extra_field/zip64'
+require_relative 'extra_field/ntfs'
+require_relative 'extra_field/aes'
 
 # Copyright (C) 2002, 2003 Thomas Sondergaard
 # rubyzip is free software; you can redistribute it and/or

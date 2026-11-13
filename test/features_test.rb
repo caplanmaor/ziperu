@@ -211,7 +211,9 @@ class FeaturesTest < Minitest::Test
         assert_raises(Ziperu::Error) { entry.get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("no"), &:read) }
         # The stream's encrypter applies to every entry, as in rubyzip.
         assert_predicate zf.get_entry("plain.txt"), :encrypted?
-        assert_equal "x", zf.get_entry("plain.txt").get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("pw"), &:read)
+        assert_equal "x",
+                     zf.get_entry("plain.txt").get_input_stream(decrypter: Ziperu::TraditionalDecrypter.new("pw"),
+&:read)
         assert_empty zf.verify(decrypter: Ziperu::TraditionalDecrypter.new("pw"))
       end
       Ziperu::InputStream.open(path, decrypter: Ziperu::TraditionalDecrypter.new("pw")) do |zis|

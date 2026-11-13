@@ -77,7 +77,7 @@ class RangeServer
 
   def respond(client, status, headers, body)
     @bytes_sent += body.bytesize
-    head = +"HTTP/1.1 #{status}\r\ncontent-length: #{body.bytesize}\r\n"
+    head = "HTTP/1.1 #{status}\r\ncontent-length: #{body.bytesize}\r\n"
     headers.each { |k, v| head << "#{k}: #{v}\r\n" }
     client.write(head << "\r\n" << body)
   end

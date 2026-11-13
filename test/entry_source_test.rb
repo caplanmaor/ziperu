@@ -12,7 +12,10 @@ class EntrySourceTest < Minitest::Test
     @path = File.join(@dir, "a.zip")
     @file = File.join(@dir, "f.txt")
     File.binwrite(@file, "from disk")
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a.txt"); z.write("stored") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("stored")
+    end
   end
 
   def teardown
@@ -53,7 +56,7 @@ class EntrySourceTest < Minitest::Test
       assert_equal "from io", zf.read("io.txt")
       assert_equal "from io", zf.read("io.txt"), "a seekable IO is read from the top each time"
     end
-    Ziperu::File.open(@path) { |zf| assert_equal ["stored", "from disk", "from io"], zf.entries.map { |e| zf.read(e) } }
+    Ziperu::File.open(@path) { |zf| assert_equal(["stored", "from disk", "from io"], zf.entries.map { |e| zf.read(e) }) }
   end
 
   def test_data_replaced_on_an_archive_entry_keeps_the_record_behind_it

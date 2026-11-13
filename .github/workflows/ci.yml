@@ -13,10 +13,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: ${{ matrix.os }} / ruby ${{ matrix.ruby }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +59,7 @@ jobs:
   # the native-boundary tests, once.
   gc-stress:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
@@ -128,8 +133,22 @@ jobs:
       - run: bundle exec rake compile
       - run: bundle exec ruby -Ilib test/interop/run.rb
 
+  rubocop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BUNDLE_WITH: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - run: bundle exec rubocop
+
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1

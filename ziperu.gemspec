@@ -19,19 +19,25 @@ Gem::Specification.new do |spec|
 
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = spec.homepage
+  spec.metadata["bug_tracker_uri"] = "#{spec.homepage}/issues"
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
   spec.metadata["rubygems_mfa_required"] = "true"
 
-  spec.files = Dir[
-    "lib/**/*.rb",
-    "ext/**/*.{rs,rb,toml}",
-    "Cargo.toml",
-    "Cargo.lock",
-    "LICENSE.txt",
-    "LICENSE-rubyzip.txt",
-    "README.md",
-    "CHANGELOG.md"
-  ]
+  # Named one by one under ext/, so a build directory there is never swept in.
+  spec.files = Dir.glob(
+    [
+      "lib/**/*.rb",
+      "ext/ziperu/{extconf.rb,build.rs,Cargo.toml}",
+      "ext/ziperu/src/**/*.rs",
+      "Cargo.toml",
+      "Cargo.lock",
+      "LICENSE.txt",
+      "LICENSE-rubyzip.txt",
+      "README.md",
+      "CHANGELOG.md"
+    ],
+    base: __dir__
+  )
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/ziperu/extconf.rb"]
 

@@ -13,9 +13,7 @@ module Ziperu
     def read(maxlen = nil)
       return (maxlen.nil? || maxlen.zero? ? '' : nil) if eof?
 
-      if maxlen.nil? || (@read_so_far + maxlen) > decompressed_size
-        maxlen = decompressed_size - @read_so_far
-      end
+      maxlen = decompressed_size - @read_so_far if maxlen.nil? || (@read_so_far + maxlen) > decompressed_size
 
       @read_so_far += maxlen
       input_stream.read(maxlen)

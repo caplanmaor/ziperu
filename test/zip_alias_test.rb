@@ -43,16 +43,16 @@ class ZipAliasTest < Minitest::Test
     assert_match(/-e/, err, "should name where Zip was defined")
   end
 
-def test_rubyzip_file_paths_still_load
-  out, err, status = run_ruby(<<~RUBY)
-    require "zip/filesystem"
-    require "zip/version"
-    require "zip/ioextras/fake_io"
-    print [Zip::FileSystem.equal?(Ziperu::FileSystem), Zip::VERSION == Ziperu::VERSION].inspect
-  RUBY
-  assert status.success?, err
-  assert_equal "[true, true]", out
-end
+  def test_rubyzip_file_paths_still_load
+    out, err, status = run_ruby(<<~RUBY)
+      require "zip/filesystem"
+      require "zip/version"
+      require "zip/ioextras/fake_io"
+      print [Zip::FileSystem.equal?(Ziperu::FileSystem), Zip::VERSION == Ziperu::VERSION].inspect
+    RUBY
+    assert status.success?, err
+    assert_equal "[true, true]", out
+  end
 
   def test_rubyzip_api_works_through_the_alias
     out, err, status = run_ruby(<<~RUBY)

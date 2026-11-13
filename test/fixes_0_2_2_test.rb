@@ -81,7 +81,16 @@ class Fixes022Test < Minitest::Test
       rescue poke
         retry
       end
-      poker = Thread.new { 30.times { sleep(0.002); reader.raise(poke) rescue nil } } # rubocop:disable Style/RescueModifier
+      poker = Thread.new do
+        30.times do
+          sleep(0.002)
+          begin
+            reader.raise(poke)
+          rescue StandardError
+            nil
+          end
+        end
+      end
       poker.join
       reader.join
       assert_equal data.bytesize, delivered, "the reader reached the end having handed out every byte"
@@ -110,7 +119,7 @@ class Fixes022Test < Minitest::Test
       sink = FailingSink.new(k)
       zos = Ziperu::OutputStream.new(sink, stream: true)
       raised = false
-      [["first", "hello"], ["big", big], ["after", "after"]].each do |name, data|
+      [%w[first hello], ["big", big], %w[after after]].each do |name, data|
         zos.put_next_entry(name)
         zos << data
       rescue IOError, Ziperu::Error
@@ -160,7 +169,10 @@ class Fixes022Test < Minitest::Test
   end
 
   def test_a_read_only_archive_can_still_be_added_to
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a"); z << "a" }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a")
+      z << "a"
+    end
     File.chmod(0o444, @path)
     Ziperu::File.open(@path) { |zf| zf.get_output_stream("b") { |o| o << "b" } }
     Ziperu::File.open(@path) { |zf| assert_equal %w[a b], zf.entries.map(&:name) }
@@ -172,7 +184,7 @@ class Fixes022Test < Minitest::Test
     [Ziperu::Entry::ZSTD, Ziperu::Entry::BZIP2, Ziperu::Entry::DEFLATED].each do |method|
       bytes = Ziperu::OutputStream.write_buffer do |zos|
         zos.put_next_entry("x", nil, nil, method)
-        zos << Random.new(method).bytes(50_000) * 2
+        zos << (Random.new(method).bytes(50_000) * 2)
       end.string.b
       data_at = 30 + 1 + bytes.byteslice(28, 2).unpack1("v")
       bytes[data_at + 100, 64] = "\xAA".b * 64
@@ -237,7 +249,7 @@ class Fixes022Test < Minitest::Test
       zos.put_next_entry(Ziperu::Entry.new("", "d/", time: when_))
       6.times do |i|
         zos.put_next_entry("d/f#{i}.txt")
-        zos << "x" * 1000
+        zos << ("x" * 1000)
       end
       zos.put_next_entry(Ziperu::Entry.new("", "late/", time: when_))
       zos.put_next_entry("late/g.txt")

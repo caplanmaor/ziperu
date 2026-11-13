@@ -12,9 +12,9 @@ module Ziperu
     end
   end
 
-  class TraditionalDecrypter < Decrypter; end
+  class TraditionalDecrypter < Decrypter; end # :nodoc:
 
-  class AESDecrypter < Decrypter
+  class AESDecrypter < Decrypter # :nodoc:
     def initialize(password, _strength = nil)
       super(password)
     end
@@ -39,9 +39,16 @@ module Ziperu
     end
   end
 
+  # No encryption.
   class NullEncrypter < Encrypter
     def initialize
       super(nil)
+    end
+
+    # rubyzip's compressors (Deflater, PassThruCompressor) pass their
+    # output through the encrypter.
+    def encrypt(data) # :nodoc:
+      data
     end
   end
 
@@ -55,6 +62,7 @@ module Ziperu
     end
   end
 
+  # WinZip AES; 256-bit unless another strength is given.
   class AESEncrypter < Encrypter
     include AESEncryption
 

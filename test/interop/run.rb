@@ -25,7 +25,7 @@ def check(name)
     $fails << "#{name}: #{r}"
     puts "FAIL #{name}: #{r}"
   end
-rescue => e
+rescue StandardError => e
   $fails << "#{name}: #{e.class}: #{e.message}"
   puts "FAIL #{name}: #{e.class}: #{e.message}\n  #{e.backtrace.first(3).join("\n  ")}"
 end
@@ -53,8 +53,23 @@ Dir.mktmpdir("interop") do |dir|
   File.write("src/ünïcödé-名前.txt", "utf8 name")
   File.write("src/spaces in name.txt", "sp")
   File.chmod(0o755, "src/hello.txt")
-  File.symlink("hello.txt", "src/link_to_hello") rescue nil
-  src_digest = ->(root) { Dir.glob("**/*", File::FNM_DOTMATCH, base: root).reject { |f| f == "." || f == ".." }.sort.map { |f| p = File.join(root, f); File.symlink?(p) ? [f, "L", File.readlink(p)] : File.directory?(p) ? [f, "D"] : [f, "F", Digest::SHA256.file(p).hexdigest] } }
+  begin
+    File.symlink("hello.txt", "src/link_to_hello")
+  rescue StandardError
+    nil
+  end
+  src_digest = lambda { |root|
+    Dir.glob("**/*", File::FNM_DOTMATCH, base: root).reject do |f|
+      [".", ".."].include?(f)
+    end.sort.map do |f|
+      p = File.join(root, f)
+      if File.symlink?(p)
+        [f, "L", File.readlink(p)]
+      else
+        File.directory?(p) ? [f, "D"] : [f, "F", Digest::SHA256.file(p).hexdigest]
+      end
+    end
+  }
   expected = src_digest.call("src").reject { |f, *| f == "link_to_hello" }
 
   compare_tree = lambda do |root, allow_missing_link: true|
@@ -63,22 +78,6 @@ Dir.mktmpdir("interop") do |dir|
   end
 
   # ---- ziperu writes, others read ---------------------------------------
-  write_with_ziperu = lambda do |path, **opts|
-    File.delete(path) if File.exist?(path)
-    Zip::File.open(path, create: true) do |zf|
-      Dir.glob("src/**/*", File::FNM_DOTMATCH).sort.each do |f|
-        next if File.basename(f) =~ /\A\.\.?\z/
-        name = f.sub(%r{\Asrc/}, "")
-        next if File.symlink?(f) && !opts[:symlinks]
-        if File.directory?(f)
-          zf.mkdir(name)
-        else
-          zf.add(name, f)
-        end
-      end
-      zf.comment = "ziperu comment"
-    end
-  end
 
   %i[deflate stored bzip2 zstd xz ppmd].each do |m|
     path = "z_#{m}.zip"
@@ -88,8 +87,9 @@ Dir.mktmpdir("interop") do |dir|
       method = { deflate: Zip::Entry::DEFLATED, stored: Zip::Entry::STORED, bzip2: Zip::Entry::BZIP2,
                  zstd: Zip::Entry::ZSTD, xz: Zip::Entry::XZ, ppmd: Zip::Entry::PPMD }[m]
       Zip::File.open(path, create: true) do |zf|
-        Dir.glob("src/**/*").sort.each do |f|
+        Dir.glob("src/**/*").each do |f|
           next if File.symlink?(f)
+
           name = f.sub(%r{\Asrc/}, "")
           if File.directory?(f) then zf.mkdir(name)
           else
@@ -101,91 +101,115 @@ Dir.mktmpdir("interop") do |dir|
       true
     end
     if have?("unzip") && %i[deflate stored bzip2].include?(m)
-      check("unzip -t #{m}") { ok, out = sh("unzip", "-t", path); ok || out }
+      check("unzip -t #{m}") do
+        ok, out = sh("unzip", "-t", path)
+        ok || out
+      end
       check("unzip extract #{m} matches") do
-        FileUtils.rm_rf("out_unzip"); ok, out = sh("unzip", "-q", path, "-d", "out_unzip")
+        FileUtils.rm_rf("out_unzip")
+        ok, out = sh("unzip", "-q", path, "-d", "out_unzip")
         ok ? compare_tree.call("out_unzip") : out
       end
     end
     if SEVEN && (m != :zstd || SEVEN_ZSTD)
-      check("7z t #{m}") { ok, out = sh(SEVEN, "t", path); ok || out }
+      check("7z t #{m}") do
+        ok, out = sh(SEVEN, "t", path)
+        ok || out
+      end
       check("7z extract #{m} matches") do
-        FileUtils.rm_rf("out_7z"); ok, out = sh(SEVEN, "x", "-y", "-oout_7z", path)
+        FileUtils.rm_rf("out_7z")
+        ok, out = sh(SEVEN, "x", "-y", "-oout_7z", path)
         ok ? compare_tree.call("out_7z") : out
       end
     end
-    if have?("python3") && %i[deflate stored bzip2].include?(m)
-      check("python zipfile #{m}") do
-        ok, out = sh("python3", "-I", "-c", <<~PY, path)
-          import sys, zipfile, hashlib
-          z = zipfile.ZipFile(sys.argv[1])
-          bad = z.testzip()
-          assert bad is None, bad
-          assert z.comment == b"", z.comment
-          names = z.namelist()
-          assert "sub/deep/z.txt" in names, names
-          assert "ünïcödé-名前.txt" in names, names
-          assert z.read("hello.txt") == b"hello world\\n"*100
-          print("ok")
-        PY
-        ok || out
-      end
+    next unless have?("python3") && %i[deflate stored bzip2].include?(m)
+
+    check("python zipfile #{m}") do
+      ok, out = sh("python3", "-I", "-c", <<~PY, path)
+        import sys, zipfile, hashlib
+        z = zipfile.ZipFile(sys.argv[1])
+        bad = z.testzip()
+        assert bad is None, bad
+        assert z.comment == b"", z.comment
+        names = z.namelist()
+        assert "sub/deep/z.txt" in names, names
+        assert "ünïcödé-名前.txt" in names, names
+        assert z.read("hello.txt") == b"hello world\\n"*100
+        print("ok")
+      PY
+      ok || out
     end
   end
 
   # ZipCrypto written by ziperu
   check("ziperu writes ZipCrypto, unzip/7z read") do
-    path = "z_crypt.zip"; File.delete(path) if File.exist?(path)
+    path = "z_crypt.zip"
+    File.delete(path) if File.exist?(path)
     enc = Zip::TraditionalEncrypter.new("s3cret")
     Zip::OutputStream.open(path, encrypter: enc) do |z|
-      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
-      z.put_next_entry("random.bin"); z.write(File.binread("src/random.bin"))
+      z.put_next_entry("hello.txt")
+      z.write(File.read("src/hello.txt"))
+      z.put_next_entry("random.bin")
+      z.write(File.binread("src/random.bin"))
     end
     r = []
     if have?("unzip")
-      ok, out = sh("unzip", "-P", "s3cret", "-t", path); r << "unzip: #{out}" unless ok
-      ok, out = sh("unzip", "-P", "wrong", "-t", path); r << "unzip accepted wrong pw" if ok
+      ok, out = sh("unzip", "-P", "s3cret", "-t", path)
+      r << "unzip: #{out}" unless ok
+      ok, out = sh("unzip", "-P", "wrong", "-t", path)
+      r << "unzip accepted wrong pw" if ok
     end
     if SEVEN
-      ok, out = sh(SEVEN, "t", "-ps3cret", path); r << "7z: #{out}" unless ok
+      ok, out = sh(SEVEN, "t", "-ps3cret", path)
+      r << "7z: #{out}" unless ok
     end
     if have?("python3")
-      ok, out = sh("python3", "-I", "-c", "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); z.setpassword(b's3cret'); assert z.read('hello.txt')==b'hello world\\n'*100; print('ok')", path)
+      ok, out = sh("python3", "-I", "-c",
+                   "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); z.setpassword(b's3cret'); assert z.read('hello.txt')==b'hello world\\n'*100; print('ok')", path)
       r << "python: #{out}" unless ok
     end
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   # AES written by ziperu
   check("ziperu writes AES-256, 7z/python read") do
-    path = "z_aes.zip"; File.delete(path) if File.exist?(path)
+    path = "z_aes.zip"
+    File.delete(path) if File.exist?(path)
     enc = Zip::AESEncrypter.new("s3cret", Zip::AESEncryption::STRENGTH_256_BIT)
     Zip::OutputStream.open(path, encrypter: enc) do |z|
-      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
+      z.put_next_entry("hello.txt")
+      z.write(File.read("src/hello.txt"))
     end
     r = []
     if SEVEN
-      ok, out = sh(SEVEN, "t", "-ps3cret", path); r << "7z: #{out}" unless ok
+      ok, out = sh(SEVEN, "t", "-ps3cret", path)
+      r << "7z: #{out}" unless ok
     end
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   # Symlink written by ziperu
   check("ziperu writes symlink, unzip/7z recognise it") do
-    path = "z_link.zip"; File.delete(path) if File.exist?(path)
-    Zip::File.open(path, create: true) { |zf| zf.add("hello.txt", "src/hello.txt"); zf.add("link_to_hello", "src/link_to_hello") }
+    path = "z_link.zip"
+    File.delete(path) if File.exist?(path)
+    Zip::File.open(path, create: true) do |zf|
+      zf.add("hello.txt", "src/hello.txt")
+      zf.add("link_to_hello", "src/link_to_hello")
+    end
     r = []
     if have?("unzip")
-      FileUtils.rm_rf("out_l"); ok, out = sh("unzip", "-q", path, "-d", "out_l")
+      FileUtils.rm_rf("out_l")
+      ok, out = sh("unzip", "-q", path, "-d", "out_l")
       r << "unzip: #{out}" unless ok
       r << "unzip did not create symlink" unless File.symlink?("out_l/link_to_hello")
     end
     if SEVEN
-      FileUtils.rm_rf("out_l7"); ok, out = sh(SEVEN, "x", "-y", "-oout_l7", path)
+      FileUtils.rm_rf("out_l7")
+      ok, out = sh(SEVEN, "x", "-y", "-oout_l7", path)
       r << "7z: #{out}" unless ok
       r << "7z did not create symlink" unless File.symlink?("out_l7/link_to_hello")
     end
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   # unix perms round trip
@@ -200,19 +224,26 @@ Dir.mktmpdir("interop") do |dir|
   check("ziperu write_buffer stream read by unzip/7z/python") do
     path = "z_stream.zip"
     buf = Zip::OutputStream.write_buffer do |z|
-      z.put_next_entry("a.txt"); z.write("A" * 100_000)
-      z.put_next_entry("dir/");
-      z.put_next_entry("dir/b.txt"); z.write("B")
+      z.put_next_entry("a.txt")
+      z.write("A" * 100_000)
+      z.put_next_entry("dir/")
+      z.put_next_entry("dir/b.txt")
+      z.write("B")
     end
     File.binwrite(path, buf.string)
     r = []
-    if have?("unzip") then ok, out = sh("unzip", "-t", path); r << "unzip: #{out}" unless ok end
-    if SEVEN then ok, out = sh(SEVEN, "t", path); r << "7z: #{out}" unless ok end
+    if have?("unzip") then ok, out = sh("unzip", "-t", path)
+                           r << "unzip: #{out}" unless ok
+    end
+    if SEVEN then ok, out = sh(SEVEN, "t", path)
+                  r << "7z: #{out}" unless ok
+    end
     if have?("python3")
-      ok, out = sh("python3", "-I", "-c", "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; assert z.read('a.txt')==b'A'*100000; print('ok')", path)
+      ok, out = sh("python3", "-I", "-c",
+                   "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; assert z.read('a.txt')==b'A'*100000; print('ok')", path)
       r << "python: #{out}" unless ok
     end
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   # write_buffer to an IO that cannot seek: entries go out as written, the
@@ -222,28 +253,36 @@ Dir.mktmpdir("interop") do |dir|
     path = "z_pipe.zip"
     sink = Object.new
     def sink.write(d) = (@out ||= +"".b) << d
-    def sink.out = @out
+    def sink.out = @out # rubocop:disable Style/TrivialAccessors
     Zip::OutputStream.write_buffer(sink) do |z|
-      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
+      z.put_next_entry("hello.txt")
+      z.write(File.read("src/hello.txt"))
       z.put_next_entry("sub/")
-      z.put_next_entry("random.bin"); z.write(File.binread("src/random.bin"))
-      z.put_next_entry("stored.bin", "", Zip::ExtraField.new, Zip::Entry::STORED); z.write("S" * 5000)
+      z.put_next_entry("random.bin")
+      z.write(File.binread("src/random.bin"))
+      z.put_next_entry("stored.bin", "", Zip::ExtraField.new, Zip::Entry::STORED)
+      z.write("S" * 5000)
       z.put_next_entry("empty.txt")
     end
     File.binwrite(path, sink.out)
     aes = "z_pipe_aes.zip"
     sink = Object.new
     def sink.write(d) = (@out ||= +"".b) << d
-    def sink.out = @out
+    def sink.out = @out # rubocop:disable Style/TrivialAccessors
     Zip::OutputStream.write_buffer(sink, encrypter: Zip::AESEncrypter.new("s3cret")) do |z|
-      z.put_next_entry("hello.txt"); z.write(File.read("src/hello.txt"))
+      z.put_next_entry("hello.txt")
+      z.write(File.read("src/hello.txt"))
     end
     File.binwrite(aes, sink.out)
     r = []
-    if have?("unzip") then ok, out = sh("unzip", "-t", path); r << "unzip: #{out}" unless ok end
+    if have?("unzip") then ok, out = sh("unzip", "-t", path)
+                           r << "unzip: #{out}" unless ok
+    end
     if SEVEN
-      ok, out = sh(SEVEN, "t", path); r << "7z: #{out}" unless ok
-      ok, out = sh(SEVEN, "t", "-ps3cret", aes); r << "7z aes: #{out}" unless ok
+      ok, out = sh(SEVEN, "t", path)
+      r << "7z: #{out}" unless ok
+      ok, out = sh(SEVEN, "t", "-ps3cret", aes)
+      r << "7z aes: #{out}" unless ok
     end
     if have?("python3")
       ok, out = sh("python3", "-I", "-c", <<~PY, path)
@@ -259,22 +298,34 @@ Dir.mktmpdir("interop") do |dir|
       r << "python: #{out}" unless ok
     end
     Zip::File.open(aes, password: "s3cret") { |zf| r << "ziperu aes: #{zf.verify}" unless zf.verify.empty? }
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   # ---- others write, ziperu reads ---------------------------------------
-  read_check = lambda do |path, pw: nil, expect_link: false|
+  read_check = lambda do |path, pw: nil|
     r = []
     Zip::File.open(path) do |zf|
       zf.each do |e|
         next if e.directory?
+
         if e.symlink?
-          r << "symlink target #{e.symlink_target.inspect}" unless e.symlink_target == "hello.txt" || e.symlink_target == "src/hello.txt"
+          unless ["hello.txt", "src/hello.txt"].include?(e.symlink_target)
+            r << "symlink target #{e.symlink_target.inspect}"
+          end
           next
         end
         src = "src/#{e.name.sub(%r{\Asrc/}, "")}"
-        data = pw ? e.get_input_stream(decrypter: Zip::TraditionalDecrypter.new(pw), &:read) : e.get_input_stream(&:read) rescue (r << "#{e.name}: #{$!.class}: #{$!.message}"; next)
-        data ||= pw ? zf.read(e) : zf.read(e)
+        data = begin
+          if pw
+            e.get_input_stream(decrypter: Zip::TraditionalDecrypter.new(pw), &:read)
+          else
+            e.get_input_stream(&:read)
+          end
+        rescue StandardError
+          r << "#{e.name}: #{$!.class}: #{$!.message}"
+          next
+        end
+        data ||= zf.read(e)
         r << "#{e.name}: content differs (#{e.compression_method})" unless data.b == File.binread(src)
         r << "#{e.name}: size #{e.size} != #{File.size(src)}" unless e.size == File.size(src)
       end
@@ -286,7 +337,7 @@ Dir.mktmpdir("interop") do |dir|
       got = compare_tree.call("out_z")
       r << got unless got == true
     end
-    r.empty? ? true : r.join("; ")
+    r.empty? || r.join("; ")
   end
 
   if have?("zip")
@@ -307,24 +358,22 @@ Dir.mktmpdir("interop") do |dir|
     check("ziperu reads Info-ZIP ZipCrypto with password") { read_check.call("i_zip_crypt.zip", pw: "pw") }
     check("ziperu rejects wrong ZipCrypto password") do
       Zip::File.open("i_zip_crypt.zip") do |zf|
-        begin
-          zf.find { |e| !e.directory? }.get_input_stream(decrypter: Zip::TraditionalDecrypter.new("nope"), &:read)
-          "no error raised"
-        rescue Zip::Error
-          true
-        end
+        zf.find { |e| !e.directory? }.get_input_stream(decrypter: Zip::TraditionalDecrypter.new("nope"), &:read)
+        "no error raised"
+      rescue Zip::Error
+        true
       end
     end
     check("Info-ZIP symlink entry attributes") do
       Zip::File.open("i_zip_default.zip") do |zf|
         e = zf.find_entry("link_to_hello")
-        e && e.symlink? && e.ftype == :symlink ? true : "#{e.inspect} ftype=#{e&.ftype}"
+        e&.symlink? && e.ftype == :symlink ? true : "#{e.inspect} ftype=#{e&.ftype}"
       end
     end
     check("Info-ZIP unix perms + mtime") do
       Zip::File.open("i_zip_default.zip") do |zf|
         e = zf.find_entry("hello.txt")
-        (e.unix_perms == 0o755 && (e.time.to_i - File.mtime("src/hello.txt").to_i).abs <= 2) ? true : "perms=#{e.unix_perms&.to_s(8)} time=#{e.time} mtime=#{File.mtime("src/hello.txt")}"
+        e.unix_perms == 0o755 && (e.time.to_i - File.mtime("src/hello.txt").to_i).abs <= 2 ? true : "perms=#{e.unix_perms&.to_s(8)} time=#{e.time} mtime=#{File.mtime("src/hello.txt")}"
       end
     end
     check("Info-ZIP archive modified by ziperu still valid for unzip") do
@@ -337,15 +386,25 @@ Dir.mktmpdir("interop") do |dir|
       end
       r = []
       if have?("unzip")
-        ok, out = sh("unzip", "-t", "mod.zip"); r << "unzip: #{out}" unless ok
-        ok, out = sh("unzip", "-Z1", "mod.zip"); r << "names: #{out}" unless out.include?("renamed.txt") && out.include?("new.txt") && !out.include?("random.bin")
-        ok, out = sh("unzip", "-p", "mod.zip", "renamed.txt"); r << "renamed content" unless out == "hello world\n" * 100
-        FileUtils.rm_rf("out_mod"); sh("unzip", "-q", "mod.zip", "-d", "out_mod")
+        ok, out = sh("unzip", "-t", "mod.zip")
+        r << "unzip: #{out}" unless ok
+        _, out = sh("unzip", "-Z1", "mod.zip")
+
+        unless out.include?("renamed.txt") && out.include?("new.txt") && !out.include?("random.bin")
+          r << "names: #{out}"
+        end
+        _, out = sh("unzip", "-p", "mod.zip", "renamed.txt")
+
+        r << "renamed content" unless out == "hello world\n" * 100
+        FileUtils.rm_rf("out_mod")
+        sh("unzip", "-q", "mod.zip", "-d", "out_mod")
         r << "symlink lost after modify" unless File.symlink?("out_mod/link_to_hello")
         r << "perms lost after modify" unless (File.stat("out_mod/renamed.txt").mode & 0o777) == 0o755
       end
-      if SEVEN then ok, out = sh(SEVEN, "t", "mod.zip"); r << "7z: #{out}" unless ok end
-      r.empty? ? true : r.join("; ")
+      if SEVEN then ok, out = sh(SEVEN, "t", "mod.zip")
+                    r << "7z: #{out}" unless ok
+      end
+      r.empty? || r.join("; ")
     end
   end
 
@@ -369,11 +428,13 @@ Dir.mktmpdir("interop") do |dir|
       Zip::File.open("i_7z_aes.zip") do |zf|
         zf.each do |e|
           next if e.directory?
-          data = e.get_input_stream(decrypter: Zip::AESDecrypter.new("pw", Zip::AESEncryption::STRENGTH_256_BIT), &:read)
+
+          data = e.get_input_stream(decrypter: Zip::AESDecrypter.new("pw", Zip::AESEncryption::STRENGTH_256_BIT),
+&:read)
           r << "#{e.name} differs" unless data.b == File.binread("src/#{e.name}")
         end
       end
-      r.empty? ? true : r.join("; ")
+      r.empty? || r.join("; ")
     end
     check("ziperu reads 7z ZipCrypto") { read_check.call("i_7z_zc.zip", pw: "pw") }
   end
@@ -413,7 +474,10 @@ Dir.mktmpdir("interop") do |dir|
     end
     check("ziperu InputStream over python streamed archive from a pipe") do
       r, w = IO.pipe
-      Thread.new { w.write(File.binread("i_py_stream.zip")); w.close }
+      Thread.new do
+        w.write(File.binread("i_py_stream.zip"))
+        w.close
+      end
       names = []
       Zip::InputStream.open(r) do |is|
         while (e = is.get_next_entry)
@@ -423,7 +487,7 @@ Dir.mktmpdir("interop") do |dir|
           next "#{e.name} differs via pipe" unless data.b == File.binread("src/#{e.name}")
         end
       end
-      names.include?("sub/deep/z.txt") ? true : names.inspect
+      names.include?("sub/deep/z.txt") || names.inspect
     end
   end
 
@@ -433,8 +497,11 @@ Dir.mktmpdir("interop") do |dir|
       Zip::File.open("i_zip_default.zip") do |zf|
         Zip::OutputStream.open("copied.zip") { |os| zf.each { |e| os.copy_raw_entry(e) } }
       end
-      ok, out = sh("unzip", "-t", "copied.zip"); next out unless ok
-      FileUtils.rm_rf("out_c"); sh("unzip", "-q", "copied.zip", "-d", "out_c")
+      ok, out = sh("unzip", "-t", "copied.zip")
+      next out unless ok
+
+      FileUtils.rm_rf("out_c")
+      sh("unzip", "-q", "copied.zip", "-d", "out_c")
       compare_tree.call("out_c")
     end
   end

@@ -2,17 +2,17 @@
 
 # Same standard-library surface rubyzip loads, since code downstream tends
 # to rely on it being there.
-require 'English'
-require 'delegate'
-require 'digest'
-require 'fileutils'
-require 'forwardable'
-require 'pathname'
-require 'rbconfig'
-require 'singleton'
-require 'stringio'
-require 'tempfile'
-require 'zlib'
+require "English"
+require "delegate"
+require "digest"
+require "fileutils"
+require "forwardable"
+require "pathname"
+require "rbconfig"
+require "singleton"
+require "stringio"
+require "tempfile"
+require "zlib"
 
 require_relative "ziperu/version"
 require_relative "ziperu/compat"
@@ -34,12 +34,12 @@ rescue LoadError => e
              " The native extension needs libgcc_s.so.1: on Alpine run `apk add libgcc`."
            elsif e.message.include?("ld-linux") || e.message.include?("musl")
              " The installed ziperu gem was built for another libc; on Alpine (musl) use " \
-             "`gem install ziperu --platform #{RUBY_PLATFORM}` or " \
-             "`bundle lock --add-platform #{RUBY_PLATFORM}`, or install the source gem with " \
-             "`gem install ziperu --platform ruby` (needs a Rust toolchain)."
+               "`gem install ziperu --platform #{RUBY_PLATFORM}` or " \
+               "`bundle lock --add-platform #{RUBY_PLATFORM}`, or install the source gem with " \
+               "`gem install ziperu --platform ruby` (needs a Rust toolchain)."
            else
              " The native extension for Ruby #{RUBY_VERSION} is missing from the installed gem; " \
-             "install the source gem with `gem install ziperu --platform ruby` (needs a Rust toolchain)."
+               "install the source gem with `gem install ziperu --platform ruby` (needs a Rust toolchain)."
            end
     raise LoadError, e.message + hint
   end
@@ -84,7 +84,7 @@ require_relative "ziperu/size_estimator"
 module Ziperu
   # Loaded on first use, so net/http is only required by those who read
   # archives over HTTP.
-  autoload :RemoteIO, ::File.expand_path('ziperu/remote_io', __dir__)
+  autoload :RemoteIO, ::File.expand_path("ziperu/remote_io", __dir__)
 
   # Used by the ported Deflater only; kept because rubyzip exposes it.
   ZLIB_FLUSHING_STRATEGY = defined?(JRUBY_VERSION) ? Zlib::SYNC_FLUSH : Zlib::NO_FLUSH
@@ -179,7 +179,7 @@ module Ziperu
     # every run and machine. Read from the SOURCE_DATE_EPOCH environment
     # variable, the convention build tools follow; set it here to apply
     # it without the variable, or to nil to ignore the variable.
-    @source_date_epoch = ENV['SOURCE_DATE_EPOCH']&.then { |v| Integer(v, exception: false) }
+    @source_date_epoch = ENV["SOURCE_DATE_EPOCH"]&.then { |v| Integer(v, exception: false) }
   end
 
   # The time a new entry gets by default: `source_date_epoch` when set,

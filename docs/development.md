@@ -7,6 +7,11 @@ bundle install
 bundle exec rake compile test
 ```
 
+`bundle exec rake rubocop` lints the Ruby code; it needs the optional
+`lint` group (`bundle config set with lint`, then `bundle install`). The
+Rust code is checked with `cargo fmt --all --check` and
+`cargo clippy --all-targets -- -D warnings`. CI runs all three.
+
 ## Windows
 
 RubyInstaller is MinGW-based, so the extension builds for the GNU Rust

@@ -19,7 +19,7 @@ class ParallelTest < Minitest::Test
       zf.mkdir("d1/sub")
       COUNT.times do |i|
         name = "d#{i % 3}/f#{i}.bin"
-        @data[name] = Random.new(i).bytes(1000 + (i * 997) % 50_000)
+        @data[name] = Random.new(i).bytes(1000 + ((i * 997) % 50_000))
         zf.get_output_stream(name) { |o| o.write @data[name] }
       end
     end
@@ -77,7 +77,7 @@ class ParallelTest < Minitest::Test
     FileUtils.mkdir_p(src)
     files = {}
     60.times do |i|
-      File.binwrite(File.join(src, "f#{i}.bin"), Random.new(100 + i).bytes(20_000 + i * 1000))
+      File.binwrite(File.join(src, "f#{i}.bin"), Random.new(100 + i).bytes(20_000 + (i * 1000)))
       files["in/f#{i}.bin"] = File.join(src, "f#{i}.bin")
     end
     one = File.join(@dir, "one.zip")

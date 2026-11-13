@@ -55,7 +55,7 @@ class LimitsZip64Test < Minitest::Test
   end
 
   def test_zip64_per_entry_and_always
-    zip64_extra = ->(path, name) do
+    zip64_extra = lambda do |path, name|
       bytes = File.binread(path)
       Ziperu::File.open(path) do |zf|
         e = zf.get_entry(name)
@@ -75,7 +75,7 @@ class LimitsZip64Test < Minitest::Test
     assert_equal [45, true], zip64_extra.call(@path, "forced.txt")
     assert_equal [20, false], zip64_extra.call(@path, "plain.txt"), "zip64: false, though the size is unknown"
     assert_equal [45, true], zip64_extra.call(@path, "known.txt"), "zip64: true, though the size is known"
-    Ziperu::File.open(@path) { |zf| assert_equal %w[a b c], %w[forced.txt plain.txt known.txt].map { |n| zf.read(n) } }
+    Ziperu::File.open(@path) { |zf| assert_equal(%w[a b c], %w[forced.txt plain.txt known.txt].map { |n| zf.read(n) }) }
 
     Ziperu::File.open(@path, create: true) do |zf|
       zf.get_output_stream("via_file.txt", zip64: true) { |o| o.write "d" }
@@ -83,13 +83,16 @@ class LimitsZip64Test < Minitest::Test
     assert_equal [45, true], zip64_extra.call(@path, "via_file.txt")
 
     Ziperu.write_zip64_support = :always
-    Ziperu::File.open(@path, create: true) { |zf| zf.add("k.txt", StringIO.new("k")); zf.mkdir("d") }
+    Ziperu::File.open(@path, create: true) do |zf|
+      zf.add("k.txt", StringIO.new("k"))
+      zf.mkdir("d")
+    end
     assert_equal [45, true], zip64_extra.call(@path, "k.txt"), ":always, though the size is known"
     Ziperu::File.open(@path) { |zf| assert_empty zf.verify }
   end
 
   def test_zip64_is_written_for_unknown_sizes_unless_turned_off
-    zip64_extra = ->(path, name) do
+    zip64_extra = lambda do |path, name|
       bytes = File.binread(path)
       Ziperu::File.open(path) do |zf|
         e = zf.get_entry(name)
@@ -98,14 +101,23 @@ class LimitsZip64Test < Minitest::Test
         [hdr[1], extra.include?("\x01\x00".b)]
       end
     end
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a.txt"); z.write("a") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("a")
+    end
     assert_equal [45, true], zip64_extra.call(@path, "a.txt"), "unknown size: zip64-ready, version 4.5"
 
-    Ziperu::OutputStream.open(@path, suppress_extra_fields: :zip64) { |z| z.put_next_entry("a.txt"); z.write("a") }
+    Ziperu::OutputStream.open(@path, suppress_extra_fields: :zip64) do |z|
+      z.put_next_entry("a.txt")
+      z.write("a")
+    end
     assert_equal [20, false], zip64_extra.call(@path, "a.txt")
 
     Ziperu.write_zip64_support = false
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a.txt"); z.write("a") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("a")
+    end
     assert_equal [20, false], zip64_extra.call(@path, "a.txt")
 
     # A size given up front needs no zip64 placeholder.

@@ -21,6 +21,8 @@ use magnus::{
     Error, RString, Ruby, Value,
 };
 
+use crate::rb::copy_chunk;
+
 const BUF_SIZE: usize = 64 * 1024;
 
 pub enum Source {
@@ -258,6 +260,7 @@ impl RubyError {
 // touched, nor the root registered or released, from another thread; the
 // bounds are only there to fit in `io::Error`.
 unsafe impl Send for RubyError {}
+// SAFETY: as for `Send` above.
 unsafe impl Sync for RubyError {}
 
 impl fmt::Debug for RubyError {
@@ -287,13 +290,7 @@ impl Read for RubyIo {
         io.funcall::<_, _, Value>("seek", (self.pos as i64, SEEK_SET))
             .map_err(ruby_io_error)?;
         let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(ruby_io_error)?;
-        let Some(chunk) = chunk else {
-            return Ok(0);
-        };
-        // SAFETY: the slice is copied out before any other Ruby call.
-        let bytes = unsafe { chunk.as_slice() };
-        let n = bytes.len().min(buf.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
+        let n = copy_chunk(chunk, buf);
         self.pos += n as u64;
         Ok(n)
     }

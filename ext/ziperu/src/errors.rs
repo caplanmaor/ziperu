@@ -226,21 +226,12 @@ pub fn read_error(ruby: &Ruby, err: io::Error) -> Error {
 /// Interrupt, the exception of a `Thread#raise`), which is what the
 /// caller should see. Should there be none, a plain `Ziperu::Error`.
 pub fn interrupted(ruby: &Ruby) -> Error {
-    use magnus::rb_sys::AsRawValue;
     if let Some(raised) = crate::gvl::take_raised() {
         return raised;
     }
-    let nil = ruby.qnil().as_raw();
-    // SAFETY: called with the GVL held; `protect` turns the exception that
-    // `rb_thread_check_ints` raises into an `Err` rather than a longjmp
-    // through Rust frames.
-    let pending = magnus::rb_sys::protect(|| {
-        unsafe { rb_sys::rb_thread_check_ints() };
-        nil
-    });
-    match pending {
+    match crate::gvl::check_ints(ruby) {
         Err(e) => e,
-        Ok(_) => Error::new(ruby.get_inner(&ERROR), "interrupted"),
+        Ok(()) => Error::new(ruby.get_inner(&ERROR), "interrupted"),
     }
 }
 

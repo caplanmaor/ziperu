@@ -26,7 +26,7 @@ class RollbackEntryTest < Minitest::Test
 
   def write_with_a_failure(zos)
     zos.put_next_entry("a.txt")
-    zos << "a" * 1000
+    zos << ("a" * 1000)
     zos.put_next_entry("broken.txt")
     zos.rollback_entry
     zos.put_next_entry("c.txt")
@@ -36,7 +36,7 @@ class RollbackEntryTest < Minitest::Test
   def test_a_file_on_disk
     Ziperu::OutputStream.open(@path) do |zos|
       zos.put_next_entry("a.txt")
-      zos << "a" * 1000
+      zos << ("a" * 1000)
       zos.put_next_entry("broken.txt")
       zos << Random.new(1).bytes(300_000)
       assert_equal "broken.txt", zos.rollback_entry.name
@@ -121,7 +121,7 @@ class RollbackEntryTest < Minitest::Test
       zos.put_next_entry("keep.txt")
       zos << "keep"
       zos.put_next_entry("secret.txt")
-      zos << "s" * 5000
+      zos << ("s" * 5000)
       zos.rollback_entry
       zos.put_next_entry("dir/")
       zos.rollback_entry

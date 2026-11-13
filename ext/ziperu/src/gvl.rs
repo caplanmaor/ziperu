@@ -29,15 +29,23 @@ use std::thread::Result as ThreadResult;
 /// `with_token`.
 pub type Token = Option<Arc<AtomicBool>>;
 
-// The initializer is already `const`; the lint misreads the macro.
+// The initializers are already `const`; the lint misreads the macro.
 #[allow(clippy::missing_const_for_thread_local)]
-mod token_slot {
+mod slots {
     use super::{RefCell, Token};
     thread_local! {
         pub(super) static TOKEN: RefCell<Token> = const { RefCell::new(None) };
+        /// An exception that handling routine interrupts raised, for
+        /// `errors::interrupted` to raise in its place. It is the thread's
+        /// `$!` meanwhile, which keeps it alive.
+        pub(super) static RAISED: RefCell<Option<magnus::Error>> = const { RefCell::new(None) };
     }
 }
-use token_slot::TOKEN;
+use slots::{RAISED, TOKEN};
+
+/// How often Ruby may decline to release the GVL (see `without_gvl`)
+/// before the work is run with it held.
+const MAX_REFUSALS: u32 = 3;
 
 /// The error a loop returns when its call has been asked to stop.
 #[derive(Debug)]
@@ -147,19 +155,17 @@ pub fn without_gvl<F: FnOnce() -> R, R>(f: F) -> R {
         f: Some(run),
         out: None,
     };
-    // SAFETY: `call` and `flag` live for the whole blocking call; the
-    // unblock function only stores to the flag. The `2` variant matters:
-    // plain `rb_thread_call_without_gvl` checks for pending interrupts on
+    // The `2` variant matters: plain `rb_thread_call_without_gvl` checks for pending interrupts on
     // the way out and raises them with a longjmp straight through these
     // Rust frames, skipping their destructors (a `RefCell` borrow left
     // held, a buffer leaked). This one leaves that to the caller, and the
     // `Cancelled` error our loops return gets the interrupt raised the
     // safe way (`errors::interrupted`), or Ruby raises it at its next
     // check once we are back in Ruby code.
-    // SAFETY (each call): `call` and `flag` outlive it, and the unblock
-    // function only stores to the flag.
     let mut refusals = 0;
     loop {
+        // SAFETY: `call` and `flag` outlive the blocking call, and the
+        // unblock function only stores to the flag.
         unsafe {
             rb_sys::rb_thread_call_without_gvl2(
                 Some(trampoline_for(&call)),
@@ -183,7 +189,7 @@ pub fn without_gvl<F: FnOnce() -> R, R>(f: F) -> R {
             return run();
         }
         refusals += 1;
-        if refusals > 3 {
+        if refusals > MAX_REFUSALS {
             // Refused again and again: run it here, as it always could.
             return run();
         }
@@ -220,16 +226,8 @@ fn handle_routine_interrupts() -> bool {
     let Ok(ruby) = magnus::Ruby::get() else {
         return false;
     };
-    use magnus::rb_sys::AsRawValue;
-    let nil = ruby.qnil().as_raw();
-    // SAFETY: the GVL is held; `protect` turns what `rb_thread_check_ints`
-    // raises into an `Err` rather than a longjmp through Rust frames.
-    let result = magnus::rb_sys::protect(|| {
-        unsafe { rb_sys::rb_thread_check_ints() };
-        nil
-    });
-    match result {
-        Ok(_) => true,
+    match check_ints(&ruby) {
+        Ok(()) => true,
         Err(e) => {
             RAISED.with(|r| *r.borrow_mut() = Some(e));
             false
@@ -237,11 +235,18 @@ fn handle_routine_interrupts() -> bool {
     }
 }
 
-thread_local! {
-    /// An exception that handling routine interrupts raised, for
-    /// `errors::interrupted` to raise in its place. It is the thread's
-    /// `$!` meanwhile, which keeps it alive.
-    static RAISED: RefCell<Option<magnus::Error>> = const { RefCell::new(None) };
+/// Has Ruby handle this thread's pending interrupts now. An exception
+/// among them comes back as the error instead of being raised.
+pub fn check_ints(ruby: &magnus::Ruby) -> Result<(), magnus::Error> {
+    use magnus::rb_sys::AsRawValue;
+    let nil = ruby.qnil().as_raw();
+    magnus::rb_sys::protect(|| {
+        // SAFETY: the GVL is held, and `protect` turns what this raises
+        // into an `Err` rather than a longjmp through Rust frames.
+        unsafe { rb_sys::rb_thread_check_ints() };
+        nil
+    })
+    .map(|_| ())
 }
 
 /// The exception `handle_routine_interrupts` caught, if any; taken.

@@ -73,7 +73,7 @@ pub(crate) fn fill_new_string<R: io::Read, T>(
     if out.capacity() < size {
         return (out, Err(io::Error::other("could not allocate the String")));
     }
-    // The String is new and unshared, with room for `size` bytes.
+    // SAFETY: the String is new and unshared, with room for `size` bytes.
     let base = unsafe { rb_sys::RSTRING_PTR(out.as_raw()) as usize };
     let mut filled = 0usize;
     let result = crate::gvl::maybe_without_gvl(needs_gvl, || -> io::Result<Option<T>> {
@@ -111,6 +111,19 @@ pub(crate) fn fill_new_string<R: io::Read, T>(
     // exceeds the capacity.
     unsafe { rb_sys::rb_str_set_len(out.as_raw(), filled as _) };
     (std::hint::black_box(out), result.map(|t| (filled, t)))
+}
+
+/// What a Ruby `read(buf.len())` returned, copied into `buf`: the number
+/// of bytes, 0 for nil (the end of the input).
+pub fn copy_chunk(chunk: Option<RString>, buf: &mut [u8]) -> usize {
+    let Some(chunk) = chunk else {
+        return 0;
+    };
+    // SAFETY: the slice is copied out before any other Ruby call.
+    let bytes = unsafe { chunk.as_slice() };
+    let n = bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&bytes[..n]);
+    n
 }
 
 /// Reads `reader` to its end into a new binary String, the first `size`

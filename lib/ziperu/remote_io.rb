@@ -42,6 +42,8 @@ module Ziperu
     # directory record, and for most archives the whole central directory.
     TAIL_SIZE = 64 * 1024
     MAX_REDIRECTS = 5
+    DEFAULT_OPEN_TIMEOUT = 10
+    DEFAULT_READ_TIMEOUT = 60
 
     attr_reader :size, :pos, :requests
     alias tell pos
@@ -51,7 +53,8 @@ module Ziperu
     # every request; or, with no url, `size:` and a block that returns
     # `length` bytes from `offset`.
     def initialize(url = nil, headers: {}, size: nil, block_size: DEFAULT_BLOCK_SIZE,
-                   cache_blocks: DEFAULT_CACHE_BLOCKS, open_timeout: 10, read_timeout: 60, &fetch)
+                   cache_blocks: DEFAULT_CACHE_BLOCKS, open_timeout: DEFAULT_OPEN_TIMEOUT,
+                   read_timeout: DEFAULT_READ_TIMEOUT, &fetch)
       raise ArgumentError, 'give a url or a block, not both' if url && fetch
       raise ArgumentError, 'give a url, or size: and a block' unless url || (fetch && size)
       raise ArgumentError, 'block_size must be positive' unless block_size.positive?
@@ -124,8 +127,7 @@ module Ziperu
 
     def close
       @closed = true
-      @http&.finish if @http&.started?
-      @http = nil
+      disconnect
       @blocks.clear
       nil
     end
@@ -152,7 +154,7 @@ module Ziperu
           piece = @tail.byteslice(at - @tail_start, finish - at)
         else
           index = at / @block_size
-          load_blocks(index, ((finish - 1) / @block_size))
+          load_blocks(index, (finish - 1) / @block_size)
           block = @blocks[index]
           offset = at - (index * @block_size)
           piece = block.byteslice(offset, finish - at)
@@ -175,6 +177,9 @@ module Ziperu
       index = first
       while index <= last
         if @blocks.key?(index)
+          # Kept as the most recently used: the caller reads it next, and
+          # fetching the blocks after it must not push it out.
+          @blocks[index] = @blocks.delete(index)
           index += 1
           next
         end
@@ -199,9 +204,7 @@ module Ziperu
         else
           http_range("bytes=#{offset}-#{offset + length - 1}", offset)
         end
-      unless data.bytesize == length
-        raise Error, "asked for #{length} bytes at offset #{offset}, got #{data.bytesize}"
-      end
+      raise Error, "asked for #{length} bytes at offset #{offset}, got #{data.bytesize}" unless data.bytesize == length
 
       data
     end
@@ -217,19 +220,14 @@ module Ziperu
         total = response['content-range'].to_s[%r{/(\d+)\z}, 1]
         raise Error, "#{@uri} answered without a usable Content-Range" unless total
 
-        body = response.body.to_s.b
-        @tail_start = Integer(total) - body.bytesize
-        @tail = body
-        Integer(total)
+        keep_tail(response.body.to_s.b, Integer(total))
       when Net::HTTPRequestedRangeNotSatisfiable
         # An empty file has no last bytes.
         0
       when Net::HTTPOK
         # The server ignores Range: the whole file came back; keep it.
         body = response.body.to_s.b
-        @tail_start = 0
-        @tail = body
-        body.bytesize
+        keep_tail(body, body.bytesize)
       else
         raise Error, "#{@uri} answered #{response.code} #{response.message}"
       end
@@ -257,12 +255,21 @@ module Ziperu
       raise Error, "too many redirects from #{@uri}" if redirects.zero?
 
       location = URI.join(@uri.to_s, response['location'].to_s)
-      if location.host != @uri.host || location.port != @uri.port || location.scheme != @uri.scheme
-        @http&.finish if @http&.started?
-        @http = nil
-      end
+      disconnect if location.host != @uri.host || location.port != @uri.port || location.scheme != @uri.scheme
       @uri = location
       request(range, redirects - 1)
+    end
+
+    # Keeps `body`, the last bytes of a file of `total` bytes. Returns `total`.
+    def keep_tail(body, total)
+      @tail_start = total - body.bytesize
+      @tail = body
+      total
+    end
+
+    def disconnect
+      @http&.finish if @http&.started?
+      @http = nil
     end
 
     def connection

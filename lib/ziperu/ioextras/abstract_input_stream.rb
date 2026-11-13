@@ -13,28 +13,39 @@ module Ziperu
       include Enumerable
       include FakeIO
 
+      # Past this many handed-out bytes (and half the buffer), they are
+      # dropped from it.
+      COMPACT_AT = 64 * 1024
+      private_constant :COMPACT_AT
+
       def initialize(**opts)
         super
         @lineno        = 0
         @pos           = 0
+        # Bytes produced but not yet handed out are those of
+        # `@output_buffer` from `@out_pos` on. Handing some out moves the
+        # offset rather than shifting the rest down (`slice!`), which for a
+        # line at a time from a 64 KB chunk copied most of the chunk per
+        # line; the consumed part is dropped once it is large.
         @output_buffer = +''.b
+        @out_pos       = 0
       end
 
       attr_accessor :lineno
       attr_reader :pos
 
-      def read(maxlen = nil, out_string = nil) # rubocop:disable Metrics/PerceivedComplexity,Metrics/CyclomaticComplexity
+      def read(maxlen = nil, out_string = nil)
         return (maxlen.nil? || maxlen.zero? ? '' : nil) if eof?
 
-        tbuf = if @output_buffer.bytesize > 0
-                 if maxlen && maxlen <= @output_buffer.bytesize
-                   @output_buffer.slice!(0, maxlen)
+        available = buffered_size
+        tbuf = if available > 0
+                 if maxlen && maxlen <= available
+                   take_buffered(maxlen)
                  else
-                   maxlen -= @output_buffer.bytesize if maxlen
+                   maxlen -= available if maxlen
                    rbuf = produce_input(maxlen)
-                   out  = @output_buffer
+                   out  = take_buffered(available)
                    out << rbuf if rbuf
-                   @output_buffer = +''.b
                    out
                  end
                else
@@ -61,7 +72,7 @@ module Ziperu
         each(sep, limit, chomp: chomp).to_a
       end
 
-      def gets(sep = $INPUT_RECORD_SEPARATOR, limit = nil, chomp: false) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
+      def gets(sep = $INPUT_RECORD_SEPARATOR, limit = nil, chomp: false)
         if sep.nil?
           return nil if eof?
 
@@ -69,41 +80,34 @@ module Ziperu
           return read(limit)
         end
 
-        if sep.respond_to?(:to_int)
-          limit = sep.to_int
-          sep   = $INPUT_RECORD_SEPARATOR
-        elsif sep&.empty?
-          sep = "#{$INPUT_RECORD_SEPARATOR}#{$INPUT_RECORD_SEPARATOR}"
-        end
-
+        sep, limit = separator_and_limit(sep, limit)
         encoding = @internal_encoding || @external_encoding
 
-        buffer_index = 0
+        # The buffer is binary, so `index` counts bytes.
+        buffer_index = @out_pos
         while (sep_index = @output_buffer.index(sep, buffer_index)).nil?
-          break if limit && @output_buffer.bytesize >= limit
+          break if limit && buffered_size >= limit
 
           # The input ends either before a read or, for an entry whose
           # data turns out empty, on the read itself (nil).
           chunk = input_finished? ? nil : produce_input
-          if chunk.nil?
-            return nil if @output_buffer.empty?
+          return take_last_line(encoding) if chunk.nil?
 
-            @lineno = @lineno.next
-            @pos += @output_buffer.bytesize
-            return @output_buffer.slice!(0..).force_encoding(encoding)
-          end
-
+          # A line runs on into the next chunk: drop what was handed out
+          # before appending, so the buffer holds only the unread bytes.
+          buffer_index -= @out_pos
+          drop_consumed
           buffer_index = [buffer_index, @output_buffer.bytesize - sep.bytesize].max
           @output_buffer << chunk
         end
 
-        limit ||= @output_buffer.bytesize
-        cut_index = sep_index ? [sep_index + sep.bytesize, limit].min : limit
+        limit ||= buffered_size
+        cut_index = sep_index ? [sep_index - @out_pos + sep.bytesize, limit].min : limit
         @lineno = @lineno.next
         @pos += cut_index
-        data = @output_buffer.slice!(0, cut_index)
-        data&.chomp!(sep) if chomp
-        data&.force_encoding(encoding)
+        data = take_buffered(cut_index)
+        data.chomp!(sep) if chomp
+        data.force_encoding(encoding)
       end
 
       # Half-open style: the bytes read here are what read(maxlen) gives, so
@@ -158,7 +162,9 @@ module Ziperu
       def ungetc(char)
         return if char.nil?
 
+        drop_consumed
         @output_buffer = pushback_bytes(char) + @output_buffer
+        nil
       end
 
       alias ungetbyte ungetc
@@ -188,7 +194,7 @@ module Ziperu
       end
 
       def flush # :nodoc:
-        @output_buffer.slice!(0..)
+        take_buffered(buffered_size)
       end
 
       def readline(sep = $INPUT_RECORD_SEPARATOR, limit = nil, chomp: false)
@@ -208,12 +214,58 @@ module Ziperu
       alias each_line each
 
       def eof?
-        @output_buffer.empty? && input_finished?
+        buffered_size.zero? && input_finished?
       end
 
       alias eof eof? # :nodoc:
 
       private
+
+      # `gets(limit)` and `gets('')` (paragraphs), as IO#gets reads them.
+      def separator_and_limit(sep, limit)
+        if sep.respond_to?(:to_int)
+          [$INPUT_RECORD_SEPARATOR, sep.to_int]
+        elsif sep.empty?
+          ["#{$INPUT_RECORD_SEPARATOR}#{$INPUT_RECORD_SEPARATOR}", limit]
+        else
+          [sep, limit]
+        end
+      end
+
+      # What is left when the input ends without a separator; nil when
+      # nothing is.
+      def take_last_line(encoding)
+        return nil if buffered_size.zero?
+
+        @lineno = @lineno.next
+        @pos += buffered_size
+        take_buffered(buffered_size).force_encoding(encoding)
+      end
+
+      # Bytes produced and not yet handed out.
+      def buffered_size
+        @output_buffer.bytesize - @out_pos
+      end
+
+      # The next `count` buffered bytes, as a String of their own.
+      def take_buffered(count)
+        data = @output_buffer.byteslice(@out_pos, count) || +''.b
+        @out_pos += data.bytesize
+        if @out_pos == @output_buffer.bytesize
+          @output_buffer = +''.b
+          @out_pos = 0
+        elsif @out_pos > COMPACT_AT && @out_pos * 2 > @output_buffer.bytesize
+          drop_consumed
+        end
+        data
+      end
+
+      def drop_consumed
+        return if @out_pos.zero?
+
+        @output_buffer = @output_buffer.byteslice(@out_pos..)
+        @out_pos = 0
+      end
 
       def pushback_bytes(char)
         char.kind_of?(::Integer) ? char.chr.b : char.to_str.b

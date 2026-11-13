@@ -13,7 +13,10 @@ class PerArchiveSettingsTest < Minitest::Test
     @dir = Dir.mktmpdir("ziperu-settings")
     @path = File.join(@dir, "a.zip")
     Ziperu::OutputStream.open(@path) do |z|
-      %w[b.txt a.txt C.txt].each { |n| z.put_next_entry(n); z.write("x" * 1000) }
+      %w[b.txt a.txt C.txt].each do |n|
+        z.put_next_entry(n)
+        z.write("x" * 1000)
+      end
     end
   end
 
@@ -69,7 +72,8 @@ class PerArchiveSettingsTest < Minitest::Test
       zf.get_output_stream("new.txt") { |o| o.write "n" }
     end
     Ziperu::File.open(@path) do |zf|
-      assert zf.get_entry("new.txt").extra.member?(:universaltime), "the file's settings reach the stream it commits through"
+      assert zf.get_entry("new.txt").extra.member?(:universaltime),
+             "the file's settings reach the stream it commits through"
       refute_equal 0, zf.get_entry("new.txt").gp_flags & Ziperu::Entry::EFS
       assert_equal 4, zf.size
     end

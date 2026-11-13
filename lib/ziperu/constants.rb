@@ -20,6 +20,14 @@ module Ziperu
 
   SPLIT_FILE_SIGNATURE = 0x08074b50
 
+  # The longest a name, comment or extra field can be: each length is a
+  # 16-bit field.
+  MAX_FIELD_LENGTH = 0xFFFF
+
+  # A size or offset from here up does not fit its 32-bit field and needs
+  # the zip64 form.
+  ZIP64_SIZE_LIMIT = 0xFFFFFFFF
+
   FILE_TYPE_FILE    = 0o10
   FILE_TYPE_DIR     = 0o04
   FILE_TYPE_SYMLINK = 0o12

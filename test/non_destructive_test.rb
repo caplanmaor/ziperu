@@ -70,7 +70,7 @@ class NonDestructiveTest < Minitest::Test
   end
 
   def test_write_to_accepts_a_pathname
-    other = Pathname.new(@dir) + "c.zip"
+    other = "#{Pathname.new(@dir)}c.zip"
     Ziperu::File.open(@path, write: other) { |zf| zf.get_output_stream("x") { |o| o.write "x" } }
     assert File.exist?(other)
     assert_equal @before, File.binread(@path)

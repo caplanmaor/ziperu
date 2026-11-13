@@ -20,9 +20,7 @@ module Ziperu
       end
 
       def find_entry(filename)
-        unless exists?(filename)
-          raise Errno::ENOENT, "No such file or directory - #{filename}"
-        end
+        raise Errno::ENOENT, "No such file or directory - #{filename}" unless exists?(filename)
 
         @mapped_zip.find_entry(filename)
       end
@@ -243,9 +241,7 @@ module Ziperu
 
       def delete(*args)
         args.each do |filename|
-          if directory?(filename)
-            raise Errno::EISDIR, "Is a directory - \"#{filename}\""
-          end
+          raise Errno::EISDIR, "Is a directory - \"#{filename}\"" if directory?(filename)
 
           @mapped_zip.remove(filename)
         end

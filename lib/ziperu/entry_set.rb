@@ -45,7 +45,6 @@ module Ziperu
       if at
         @all[at] = entry
       else
-        remove_from_all(old) if old
         @all << entry
       end
     end
@@ -82,10 +81,6 @@ module Ziperu
       return entries if @shadowed.zero?
 
       entries.reject { |e| shadowed?(e) }
-    end
-
-    def each_writable(&block)
-      writable_entries.each(&block)
     end
 
     def size

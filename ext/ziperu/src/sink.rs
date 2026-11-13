@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use magnus::{prelude::*, value::Opaque, Error, RString, Ruby, Value};
 
+use crate::rb::copy_chunk;
 use crate::source::{resolve_seek, ruby_io_error};
 
 pub(crate) const BUF_SIZE: usize = 64 * 1024;
@@ -473,13 +474,7 @@ impl Read for RubyOut {
             return Ok(0);
         }
         let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(|e| self.fail(e))?;
-        let Some(chunk) = chunk else {
-            return Ok(0);
-        };
-        // SAFETY: the slice is copied out before any other Ruby call.
-        let bytes = unsafe { chunk.as_slice() };
-        let n = bytes.len().min(buf.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
+        let n = copy_chunk(chunk, buf);
         self.pos += n as u64;
         Ok(n)
     }

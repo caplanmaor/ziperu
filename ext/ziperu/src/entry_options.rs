@@ -153,7 +153,7 @@ impl EntryOptions {
 }
 
 /// Walks concatenated extra fields (id, length, data) as `(id, data)`.
-fn extra_fields(bytes: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
+pub(crate) fn extra_fields(bytes: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
     let mut i = 0;
     std::iter::from_fn(move || {
         if i + 4 > bytes.len() {

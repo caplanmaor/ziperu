@@ -94,6 +94,8 @@ module Ziperu
     end
   end
 
+  # The end-of-central-directory record declares a different number of
+  # entries than the central directory holds.
   class EntryNumberMismatchError < Error
     def initialize(size, size_in_bytes)
       super()
@@ -154,13 +156,13 @@ module Ziperu
 
   PASSWORD_REQUIRED_MESSAGE = 'A password is required to decode this zip file.'
 
-  # Raised by the Rust core where it lacks the domain object a rubyzip
-  # exception wants; the Ruby layer re-raises the rubyzip-shaped error.
   # An entry object outlived a commit that moved its record; what it holds
   # from the central directory is still good, its local header is gone.
   class EntryMovedError < Error # :nodoc:
   end
 
+  # Raised by the Rust core where it lacks the domain object a rubyzip
+  # exception wants; the Ruby layer re-raises the rubyzip-shaped error.
   module Native
     class SizeLimitError < Ziperu::Error; end
     class PasswordError < Ziperu::Error; end

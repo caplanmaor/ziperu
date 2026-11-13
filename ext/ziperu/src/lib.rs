@@ -32,6 +32,14 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     archive.define_method("entry_count", method!(archive::Archive::entry_count, 0))?;
     archive.define_method("entries", method!(archive::Archive::entries, 0))?;
     archive.define_method("each_entry", method!(archive::Archive::each_entry, 0))?;
+    archive.define_method(
+        "each_entry_row",
+        method!(archive::Archive::each_entry_row, 0),
+    )?;
+    archive.define_method(
+        "indices_with_extra_fields",
+        method!(archive::Archive::indices_with_extra_fields, 2),
+    )?;
     archive.define_method("entry_meta", method!(archive::Archive::entry_meta, 1))?;
     archive.define_method("entry_metas", method!(archive::Archive::entry_metas, 2))?;
     archive.define_method("local_extra", method!(archive::Archive::local_extra, 1))?;
@@ -95,6 +103,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     writer.define_method("write", method!(writer::Writer::write, 1))?;
     writer.define_method("write_file", method!(writer::Writer::write_file, 1))?;
     writer.define_method("raw_copy", method!(writer::Writer::raw_copy, 4))?;
+    writer.define_method("raw_copy_many", method!(writer::Writer::raw_copy_many, 2))?;
     writer.define_method("copy_zipcrypto", method!(writer::Writer::copy_zipcrypto, 4))?;
     writer.define_method("comment=", method!(writer::Writer::set_comment, 1))?;
     writer.define_method("rollback_entry", method!(writer::Writer::rollback_entry, 0))?;

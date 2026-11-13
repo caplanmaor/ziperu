@@ -15,7 +15,7 @@ use magnus::{
     gc::Marker, typed_data::DataTypeFunctions, value::Opaque, Error, RString, Ruby, TypedData,
     Value,
 };
-use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipReadOptions};
+use zip::read::{read_zipfile_from_stream_with_options, ZipFile, ZipFileEntry, ZipReadOptions};
 use zip::result::{ZipError, ZipResult};
 use zip::ZipArchive;
 
@@ -62,6 +62,45 @@ pub(crate) struct EntryInfo {
     /// header must agree: reading through it must not decode the data
     /// differently from reading by index.
     pub(crate) method: Option<u16>,
+}
+
+impl EntryInfo {
+    /// For the entry the crate has at `index`.
+    pub(crate) fn from_entry(index: usize, entry: &ZipFileEntry<'_>) -> Self {
+        Self {
+            index: Some(index),
+            header_start: entry.header_start(),
+            size: entry.size(),
+            compressed_size: entry.compressed_size(),
+            crc32: entry.crc32(),
+            method: Some(crate::archive::compression_code(entry.compression())),
+        }
+    }
+
+    /// For a record the crate cannot address by index, as its central
+    /// record describes it.
+    pub(crate) fn at_offset(
+        header_start: u64,
+        size: u64,
+        compressed_size: u64,
+        crc32: u32,
+    ) -> Self {
+        Self {
+            index: None,
+            header_start,
+            size,
+            compressed_size,
+            crc32,
+            method: None,
+        }
+    }
+
+    /// Declared to hold nothing: no data, and the CRC of no data. An entry
+    /// declared empty but holding data, or with another CRC, is a lie the
+    /// crate's checks should catch.
+    fn is_empty(&self) -> bool {
+        self.size == 0 && self.compressed_size == 0 && self.crc32 == 0
+    }
 }
 
 /// The compression method in the local header at the source's position,
@@ -137,11 +176,13 @@ impl OwnedEntry {
         let options = ZipReadOptions::new().password(password);
         let file = match self.owner {
             Owner::Archive(archive) => {
+                // SAFETY: as above.
                 let archive: &'static mut ZipArchive<Source> = unsafe { &mut *archive };
                 let index = info.index.ok_or(ZipError::FileNotFound)?;
                 archive.by_index_with_options(index, options)?
             }
             Owner::Source(source) => {
+                // SAFETY: as above.
                 let source: &'static mut Source = unsafe { &mut *source };
                 open_local_entry(source, info, password, u64::MAX)?
             }
@@ -215,8 +256,10 @@ impl DataTypeFunctions for EntryReader {
     }
 }
 
-// SAFETY: the raw pointer in `OwnedEntry` is only dereferenced from methods
-// called while holding the GVL, so the reader is never used concurrently.
+// SAFETY: the raw pointer in `OwnedEntry` is only dereferenced through the
+// reader's `RefCell`, whose exclusive borrow is held by one thread for the
+// whole of a call (with or without the GVL), so the reader is never used
+// concurrently.
 unsafe impl Send for EntryReader {}
 
 impl EntryReader {
@@ -236,14 +279,7 @@ impl EntryReader {
             let meta = archive.metadata();
             let raw = meta.entry(index).rb(ruby)?;
             seekable = raw.compression() == zip::CompressionMethod::Stored && !raw.encrypted();
-            EntryInfo {
-                index: Some(index),
-                header_start: raw.header_start(),
-                size: raw.size(),
-                compressed_size: raw.compressed_size(),
-                crc32: raw.crc32(),
-                method: Some(crate::archive::compression_code(raw.compression())),
-            }
+            EntryInfo::from_entry(index, &raw)
         };
         let raw_source =
             (seekable && enforce_size).then(|| archive.clone().into_inner().clone_small());
@@ -352,10 +388,7 @@ impl EntryReader {
             });
         let entry = OwnedEntry::open(archive, enforce_size, password, &info).rb(ruby)?;
         let size = enforce_size.then_some(info.size);
-        // Nothing to read only when there is no data either, and the CRC
-        // is that of no data: an entry declared empty but holding data, or
-        // with another CRC, is a lie the crate's checks should catch.
-        let finished = size == Some(0) && info.compressed_size == 0 && info.crc32 == 0;
+        let finished = size.is_some() && info.is_empty();
         Ok(Self {
             inner: RefCell::new(Inner {
                 entry: Some(entry),
@@ -425,7 +458,7 @@ impl EntryReader {
         if inner.raw.is_some() {
             return Self::read_raw(ruby, &mut inner, maxlen);
         }
-        let remaining = inner.size.map(|s| s - inner.consumed).unwrap_or(u64::MAX);
+        let remaining = inner.size.map_or(u64::MAX, |s| s - inner.consumed);
         let want = match maxlen {
             Some(n) => (n as u64).min(remaining),
             None => remaining,
@@ -567,7 +600,7 @@ impl EntryReader {
             return Err(zip_error(ruby, e));
         }
         *consumed = 0;
-        *finished = *size == Some(0) && info.compressed_size == 0 && info.crc32 == 0;
+        *finished = size.is_some() && info.is_empty();
         inner.pending.clear();
         inner.failed = None;
         inner.raw = None;
@@ -578,12 +611,22 @@ impl EntryReader {
 /// Where the data of the entry whose local header is at `header_start`
 /// begins: after the header's fixed part, the name and the extra field.
 fn data_offset(source: &mut Source, header_start: u64) -> io::Result<u64> {
-    const SIGNATURE: u32 = 0x0403_4b50;
-    const HEADER_LEN: u64 = 30;
-    let mut header = [0u8; HEADER_LEN as usize];
+    let (name_len, extra_len) = local_header_lens(source, header_start)?;
+    Ok(header_start + LOCAL_HEADER_LEN + name_len + extra_len)
+}
+
+/// The fixed part of a local file header, before the name.
+pub(crate) const LOCAL_HEADER_LEN: u64 = 30;
+const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
+
+/// The lengths of the name and of the extra field that the local header
+/// at `header_start` declares. The source is left just after the header's
+/// fixed part.
+pub(crate) fn local_header_lens(source: &mut Source, header_start: u64) -> io::Result<(u64, u64)> {
+    let mut header = [0u8; LOCAL_HEADER_LEN as usize];
     source.seek_to(header_start)?;
     source.read_exact(&mut header)?;
-    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != SIGNATURE {
+    if u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != LOCAL_HEADER_SIGNATURE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "local file header signature not found",
@@ -591,7 +634,7 @@ fn data_offset(source: &mut Source, header_start: u64) -> io::Result<u64> {
     }
     let name_len = u64::from(u16::from_le_bytes([header[26], header[27]]));
     let extra_len = u64::from(u16::from_le_bytes([header[28], header[29]]));
-    Ok(header_start + HEADER_LEN + name_len + extra_len)
+    Ok((name_len, extra_len))
 }
 
 /// The error every read raises after one failed part-way.

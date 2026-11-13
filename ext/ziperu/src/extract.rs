@@ -80,9 +80,7 @@ impl From<io::Error> for Failure {
             .get_ref()
             .and_then(|inner| inner.downcast_ref::<ZipError>())
             .is_some_and(|z| matches!(z, ZipError::DecompressedSizeLimitExceeded { .. }))
-            || (e.kind() == io::ErrorKind::InvalidData
-                && e.to_string()
-                    .contains("larger than its declared uncompressed size"));
+            || crate::errors::is_size_limit(&e);
         if limit {
             Failure::SizeLimit
         } else {
@@ -99,6 +97,14 @@ enum Notice {
     Oversize,
 }
 
+/// How an extraction is to be done, as Ruby asks for it.
+pub struct Options {
+    pub enforce_size: bool,
+    pub threads: usize,
+    /// 0 raise, 1 overwrite, 2 skip (see `OnExists`).
+    pub on_exists: u8,
+}
+
 /// Extracts `specs` under `dest` (an absolute path) and returns one
 /// `[index, kind, path]` triple per entry that was skipped as unsafe
 /// (`kind` `:unsafe`) or came out larger than declared (`:oversize`, path
@@ -110,14 +116,6 @@ enum Notice {
 /// GVL), the directories are made first, in order, and the files are
 /// then shared out among that many threads, each reading through its own
 /// handle on the archive.
-/// How an extraction is to be done, as Ruby asks for it.
-pub struct Options {
-    pub enforce_size: bool,
-    pub threads: usize,
-    /// 0 raise, 1 overwrite, 2 skip (see `OnExists`).
-    pub on_exists: u8,
-}
-
 pub fn extract_entries(
     ruby: &Ruby,
     archive: ZipArchive<Source>,
@@ -275,7 +273,10 @@ fn extract_files(
             .collect();
         workers
             .into_iter()
-            .map(|w| w.join().expect("extraction thread panicked"))
+            .map(|w| {
+                w.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
             .collect()
     });
     let mut notices = std::mem::take(&mut extractor.notices);
@@ -371,8 +372,6 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Extracts `specs` in order; `offset` is the index of the first in
-    /// the whole batch, for naming the one that failed.
     /// Extracts `specs`, each with its place in the whole batch, in
     /// order; a failure names the place.
     fn extract_each(&mut self, specs: &[(usize, &Spec)]) -> Result<(), (usize, Failure)> {
@@ -547,14 +546,7 @@ impl<'a> Extractor<'a> {
             let info = {
                 let meta = self.archive.metadata();
                 let raw = meta.entry(index)?;
-                EntryInfo {
-                    index: Some(index),
-                    header_start: raw.header_start(),
-                    size: raw.size(),
-                    compressed_size: raw.compressed_size(),
-                    crc32: raw.crc32(),
-                    method: Some(crate::archive::compression_code(raw.compression())),
-                }
+                EntryInfo::from_entry(index, &raw)
             };
             let mut source = self.archive.clone().into_inner();
             let mut entry = open_local_entry(&mut source, &info, None, u64::MAX)?;

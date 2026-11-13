@@ -22,11 +22,7 @@ namespace :mem do
     RubyMemcheck.config(binary_name: "ziperu")
     RubyMemcheck::TestTask.new(check: :compile) do |t|
       t.libs << "test" << "lib"
-      t.test_files = FileList[
-        "test/io_source_test.rb", "test/extract_all_native_test.rb", "test/duplicate_names_test.rb",
-        "test/review_regressions_test.rb", "test/streaming_test.rb", "test/append_test.rb",
-        "test/parallel_test.rb"
-      ]
+      t.test_files = FileList[*NATIVE_BOUNDARY_TESTS, "test/append_test.rb", "test/parallel_test.rb"]
     end
   rescue LoadError
     desc "The GC-boundary tests under valgrind (needs `gem install ruby_memcheck`)"

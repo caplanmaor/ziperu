@@ -25,7 +25,7 @@ use crate::sink::Sink;
 use crate::stream_stats::EntryStats;
 
 /// Size of the random header that precedes the data.
-pub const HEADER_SIZE: usize = 12;
+const HEADER_SIZE: usize = 12;
 
 const fn crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
@@ -50,14 +50,14 @@ const fn crc_table() -> [u32; 256] {
 static CRC_TABLE: [u32; 256] = crc_table();
 
 /// The three rolling keys; one per entry, seeded from the password.
-pub struct Keys {
+struct Keys {
     key_0: Wrapping<u32>,
     key_1: Wrapping<u32>,
     key_2: Wrapping<u32>,
 }
 
 impl Keys {
-    pub fn new(password: &[u8]) -> Self {
+    fn new(password: &[u8]) -> Self {
         let mut keys = Self {
             key_0: Wrapping(0x1234_5678),
             key_1: Wrapping(0x2345_6789),
@@ -86,7 +86,7 @@ impl Keys {
     }
 
     /// Encrypts `buf` in place, advancing the keys with the plaintext.
-    pub fn encrypt(&mut self, buf: &mut [u8]) {
+    fn encrypt(&mut self, buf: &mut [u8]) {
         for byte in buf {
             let plain = *byte;
             *byte = plain ^ self.stream_byte();
@@ -97,7 +97,7 @@ impl Keys {
     /// The encrypted 12-byte header that opens an entry: 11 random bytes
     /// and a check byte (`check` is the high byte of the DOS time, which
     /// is what readers compare against when general purpose bit 3 is set).
-    pub fn header(&mut self, check: u8) -> io::Result<[u8; HEADER_SIZE]> {
+    fn header(&mut self, check: u8) -> io::Result<[u8; HEADER_SIZE]> {
         let mut header = [0u8; HEADER_SIZE];
         getrandom::fill(&mut header[..HEADER_SIZE - 1]).map_err(|e| {
             io::Error::other(format!("no randomness for the ZipCrypto header: {e}"))
@@ -115,8 +115,6 @@ pub(crate) const ENCRYPTED_FLAG: u16 = 1;
 pub(crate) const DATA_DESCRIPTOR_FLAG: u16 = 8;
 /// "PK\x07\x08", the optional signature that opens a data descriptor.
 pub(crate) const DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
-/// The ZipCrypto encryption header that precedes the ciphertext.
-pub(crate) const HEADER_LEN: u64 = HEADER_SIZE as u64;
 /// General purpose flag bit 11: the name and comment are UTF-8.
 pub(crate) const LANGUAGE_ENCODING_FLAG: u16 = 1 << 11;
 
@@ -182,7 +180,7 @@ impl Pending {
             deflate,
             crc: crc32fast::Hasher::new(),
             size: 0,
-            csize: HEADER_LEN,
+            csize: HEADER_SIZE as u64,
         };
         Ok((header, pending))
     }
@@ -307,14 +305,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keystream_matches_a_known_vector() {
-        // From the crate's tests: the keys after "test" and the first
-        // keystream bytes they produce.
+    fn encrypting_changes_the_bytes_and_decrypting_restores_them() {
         let mut keys = Keys::new(b"test");
         let mut data = [0u8; 4];
         keys.encrypt(&mut data);
         assert_ne!(data, [0u8; 4]);
-        // Encrypting then decrypting with fresh keys gives the plaintext.
         let mut keys = Keys::new(b"pw");
         let mut cipher = *b"hello world";
         keys.encrypt(&mut cipher);

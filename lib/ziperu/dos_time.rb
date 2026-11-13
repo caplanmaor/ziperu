@@ -77,7 +77,7 @@ module Ziperu
       hour   = (0b1111100000000000 & bin_dos_time) >> 11
       day    = (0b11111 & bin_dos_date)
       month  = (0b111100000 & bin_dos_date) >> 5
-      year   = ((0b1111111000000000 & bin_dos_date) >> 9) + 1980
+      year   = ((0b1111111000000000 & bin_dos_date) >> 9) + DOS_EPOCH_YEAR
 
       time = local(year, month, day, hour, minute, second)
       time.absolute_time = false

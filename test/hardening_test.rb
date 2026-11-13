@@ -28,7 +28,10 @@ class HardeningTest < Minitest::Test
   def write_zipcrypto(file, entries = { "a.txt" => "hello zipcrypto " * 100, "b.bin" => Random.new(7).bytes(50_000) })
     enc = Ziperu::TraditionalEncrypter.new(PASSWORD)
     Ziperu::OutputStream.open(file, encrypter: enc) do |z|
-      entries.each { |name, data| z.put_next_entry(name); z.write(data) }
+      entries.each do |name, data|
+        z.put_next_entry(name)
+        z.write(data)
+      end
     end
     entries
   end
@@ -182,12 +185,18 @@ class HardeningTest < Minitest::Test
     enc = Ziperu::TraditionalEncrypter.new(PASSWORD)
     e = assert_raises(Ziperu::Error) do
       File.open(file, "wb") do |f|
-        Ziperu::OutputStream.write_buffer(f, encrypter: enc) { |z| z.put_next_entry("a"); z.write "abc" }
+        Ziperu::OutputStream.write_buffer(f, encrypter: enc) do |z|
+          z.put_next_entry("a")
+          z.write "abc"
+        end
       end
     end
     assert_match(/reading and writing/, e.message)
     File.open(file, "w+b") do |f|
-      Ziperu::OutputStream.write_buffer(f, encrypter: enc) { |z| z.put_next_entry("a"); z.write "abc" }
+      Ziperu::OutputStream.write_buffer(f, encrypter: enc) do |z|
+        z.put_next_entry("a")
+        z.write "abc"
+      end
     end
     assert_equal "abc", read_encrypted(file, "a")
   end
@@ -195,26 +204,39 @@ class HardeningTest < Minitest::Test
   # --- OutputStream ---------------------------------------------------------
 
   def test_output_stream_open_returns_the_block_value_and_aborts_on_error
-    assert_equal 42, Ziperu::OutputStream.open(path("r.zip")) { |z| z.put_next_entry("x"); 42 }
+    assert_equal 42, Ziperu::OutputStream.open(path("r.zip")) { |z|
+      z.put_next_entry("x")
+      42
+    }
     entry = Ziperu::Entry.new("", "x")
     assert_raises(RuntimeError) do
-      Ziperu::OutputStream.open(path("abort.zip")) { |z| z.put_next_entry(entry); z.write("abc"); raise "boom" }
+      Ziperu::OutputStream.open(path("abort.zip")) do |z|
+        z.put_next_entry(entry)
+        z.write("abc")
+        raise "boom"
+      end
     end
     assert_equal 0, entry.crc, "an abandoned archive leaves the entry alone"
   end
 
   def test_duplicate_name_in_a_stream_is_an_entry_exists_error
     e = assert_raises(Ziperu::EntryExistsError) do
-      Ziperu::OutputStream.write_buffer { |z| z.put_next_entry("t"); z.put_next_entry("t") }
+      Ziperu::OutputStream.write_buffer do |z|
+        z.put_next_entry("t")
+        z.put_next_entry("t")
+      end
     end
     assert_match(/put_next_entry.*t already exists/, e.message)
   end
 
   def test_writing_data_to_a_directory_entry_raises
     e = assert_raises(Ziperu::Error) do
-      Ziperu::OutputStream.write_buffer { |z| z.put_next_entry("dir/"); z.write "x" }
+      Ziperu::OutputStream.write_buffer do |z|
+        z.put_next_entry("dir/")
+        z.write "x"
+      end
     end
-    assert_match(/directory entry 'dir\/'/, e.message)
+    assert_match(%r{directory entry 'dir/'}, e.message)
   end
 
   def test_shrinking_an_archive_in_a_string_io_truncates_it
@@ -277,9 +299,9 @@ class HardeningTest < Minitest::Test
   def test_truncated_archive_raises_instead_of_yielding_nothing
     bytes = File.binread(fixture("text.zip"))
     cut = bytes.byteslice(0, bytes.bytesize - 40)
-    assert_raises(Ziperu::Error) { Ziperu::InputStream.open(StringIO.new(cut)) { |is| is.get_next_entry } }
+    assert_raises(Ziperu::Error) { Ziperu::InputStream.open(StringIO.new(cut), &:get_next_entry) }
     File.binwrite(path("cut.zip"), cut)
-    assert_raises(Ziperu::Error) { Ziperu::InputStream.open(path("cut.zip")) { |is| is.get_next_entry } }
+    assert_raises(Ziperu::Error) { Ziperu::InputStream.open(path("cut.zip"), &:get_next_entry) }
     # Something that is not an archive at all still yields no entries.
     Ziperu::InputStream.open(StringIO.new("just some text")) { |is| assert_nil is.get_next_entry }
   end
@@ -297,7 +319,10 @@ class HardeningTest < Minitest::Test
   end
 
   def test_entry_declared_empty_but_holding_data_is_not_silently_empty
-    io = Ziperu::OutputStream.write_buffer { |z| z.put_next_entry("lie.txt"); z.write "hello" }
+    io = Ziperu::OutputStream.write_buffer do |z|
+      z.put_next_entry("lie.txt")
+      z.write "hello"
+    end
     bytes = io.string
     Ziperu::File.open_buffer(bytes) do |zf|
       e = zf.get_entry("lie.txt")
@@ -380,7 +405,7 @@ class HardeningTest < Minitest::Test
     FileUtils.cp(fixture("text.zip"), file)
     Ziperu::File.open(file) do |zf|
       refute zf.commit_required?
-      zf.get_entry("short.txt").extra.merge([0x7777, 2].pack("vv") + "AB")
+      zf.get_entry("short.txt").extra.merge("#{[0x7777, 2].pack("vv")}AB")
       # Written with the next commit; alone it does not call for one.
       refute zf.commit_required?
       zf.mkdir("x")
@@ -424,7 +449,7 @@ class HardeningTest < Minitest::Test
     Ziperu::InputStream.open(r) do |is|
       is.get_next_entry
       reads = 0
-      while (buf = is.sysread(1024))
+      while is.sysread(1024)
         reads += 1
         flunk "sysread never returns nil over a pipe" if reads > 3
       end

@@ -1,0 +1,8 @@
+inherit_from: ../../.rubocop.yml
+
+# The files ported from rubyzip keep its single quotes.
+Style/StringLiterals:
+  EnforcedStyle: single_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: single_quotes

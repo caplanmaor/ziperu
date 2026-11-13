@@ -28,9 +28,9 @@ class ExtractPoliciesTest < Minitest::Test
     FileUtils.rm_rf(@dir)
   end
 
-  def each_path
+  def each_path(&block)
     # The plain archive takes the native path, the AES one the Ruby path.
-    [[@path, {}], [@aes, { password: "pw" }]].each { |path, opts| yield path, opts }
+    [[@path, {}], [@aes, { password: "pw" }]].each(&block)
   end
 
   def test_on_exists_overwrite_skip_and_raise
@@ -89,7 +89,7 @@ class ExtractPoliciesTest < Minitest::Test
       refute File.exist?(File.join(out, "d/b.log"))
 
       FileUtils.rm_rf(out)
-      Ziperu::File.open(path, **opts) { |zf| zf.extract_all(out, exclude: [/\Ad\//, "nothing"]) }
+      Ziperu::File.open(path, **opts) { |zf| zf.extract_all(out, exclude: [%r{\Ad/}, "nothing"]) }
       assert_equal %w[c.txt], Dir.children(out)
     end
   end

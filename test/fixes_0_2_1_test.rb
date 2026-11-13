@@ -30,25 +30,36 @@ class Fixes021Test < Minitest::Test
     bytes = +""
     assert_raises(RuntimeError) { body.each { |c| bytes << c } }
     assert_raises(Ziperu::Error, "a failed stream must not read as a complete archive") do
-      Ziperu::File.open_buffer(bytes) { |zf| zf.entries }
+      Ziperu::File.open_buffer(bytes, &:entries)
     end
 
     io = StringIO.new
     assert_raises(RuntimeError) do
-      Ziperu::OutputStream.write_buffer(io) { |z| z.put_next_entry("a"); z.write("aaa"); raise "boom" }
+      Ziperu::OutputStream.write_buffer(io) do |z|
+        z.put_next_entry("a")
+        z.write("aaa")
+        raise "boom"
+      end
     end
-    assert_raises(Ziperu::Error) { Ziperu::File.open_buffer(io.string) { |zf| zf.entries } }
+    assert_raises(Ziperu::Error) { Ziperu::File.open_buffer(io.string, &:entries) }
   end
 
   def test_an_archive_at_a_path_is_still_closed_on_failure_as_rubyzip_does
     assert_raises(RuntimeError) do
-      Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a"); z.write("a"); raise "boom" }
+      Ziperu::OutputStream.open(@path) do |z|
+        z.put_next_entry("a")
+        z.write("a")
+        raise "boom"
+      end
     end
     Ziperu::File.open(@path) { |zf| assert_equal %w[a], zf.entries.map(&:name) }
   end
 
   def test_write_to_a_path_keeps_every_commit
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a"); z.write("a") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a")
+      z.write("a")
+    end
     original = File.binread(@path)
     out = File.join(@dir, "out.zip")
     Ziperu::File.open(@path, write: out) do |zf|
@@ -69,7 +80,10 @@ class Fixes021Test < Minitest::Test
   end
 
   def test_a_zero_length_read_reads_nothing
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("x"); z.write("hello world") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("x")
+      z.write("hello world")
+    end
     Ziperu::InputStream.open(@path) do |is|
       is.get_next_entry
       assert_equal "hello", is.read(5)
@@ -121,7 +135,7 @@ class Fixes021Test < Minitest::Test
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       assert_raises(Timeout::Error) { Timeout.timeout(0.1) { zf.read("zeros.bin") } }
       assert_raises(Timeout::Error) do
-        Timeout.timeout(0.1) { zf.get_input_stream("zeros.bin") { |is| is.read } }
+        Timeout.timeout(0.1) { zf.get_input_stream("zeros.bin", &:read) }
       end
       assert_raises(Timeout::Error) { Timeout.timeout(0.1) { zf.extract_all(File.join(@dir, "out")) } }
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
@@ -141,12 +155,22 @@ class Fixes021Test < Minitest::Test
   end
 
   def test_max_archive_size_bounds_what_is_read_from_a_pipe
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a"); z.write(Random.new(1).bytes(50_000)) }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a")
+      z.write(Random.new(1).bytes(50_000))
+    end
     bytes = File.binread(@path)
     pipe = lambda do
       r, w = IO.pipe
       w.binmode
-      writer = Thread.new { w.write(bytes) rescue nil; w.close }
+      writer = Thread.new do
+        begin
+          w.write(bytes)
+        rescue StandardError
+          nil
+        end
+        w.close
+      end
       [r, writer]
     end
 
@@ -175,7 +199,10 @@ class Fixes021Test < Minitest::Test
   end
 
   def test_foreach_rejects_an_unknown_keyword
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a"); z.write("a") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a")
+      z.write("a")
+    end
     assert_raises(ArgumentError) { Ziperu::File.foreach(@path, max_entrys: 1) { nil } }
   end
 end

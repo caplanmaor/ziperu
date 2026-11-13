@@ -50,7 +50,10 @@ class SizeEstimatorTest < Minitest::Test
   def test_deflated_entries_with_a_known_compressed_size
     data = "compress me " * 1000
     # The compressed size from one run is what the estimate needs.
-    once = Ziperu::OutputStream.write_buffer { |z| z.put_next_entry("d.txt"); z.write(data) }.string
+    once = Ziperu::OutputStream.write_buffer do |z|
+      z.put_next_entry("d.txt")
+      z.write(data)
+    end.string
     csize = Ziperu::File.open_buffer(once).get_entry("d.txt").compressed_size
     estimate = Ziperu::OutputStream.estimated_size { |e| e.add_deflated("d.txt", compressed_size: csize, size: data.bytesize) }
     actual = stream do |zos|
@@ -98,12 +101,13 @@ class SizeEstimatorTest < Minitest::Test
     end
     assert_equal 0, seen.first
     assert_operator seen.last, :>, 1000
-    assert_nil Ziperu::OutputStream.write_buffer(StringIO.new) { |zos| @w = zos.bytes_written }.then { @w }
+    assert_nil(Ziperu::OutputStream.write_buffer(StringIO.new) { |zos| @w = zos.bytes_written }.then { @w })
   end
 
   def test_rails_streaming_sets_headers_and_the_body
     controller = Class.new do
       include Ziperu::RailsStreaming
+
       attr_reader :response, :response_body
 
       def initialize

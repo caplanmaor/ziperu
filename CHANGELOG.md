@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+Faster (Windows, against 0.2.3):
+
+- Opening an archive hands each entry's facts from the native core as
+  one small Array, yielded directly, rather than a Hash of fifteen keys:
+  10,000 entries open in 36 ms instead of 44, with a fifth fewer objects.
+- `gets` and `each_line` read from an offset into the buffer instead of
+  cutting each line off its front: a 15 MB CSV of 400,000 lines, 2.0 s to
+  0.19 s (rubyzip: 1.6 s); 1000 small text entries, 140 to 64 ms.
+- Small writes (`puts`, `<<` of a field) are gathered and handed to the
+  native writer 64 KB at a time: 80,000 writes of 100 bytes, 142 to
+  73 ms.
+- A commit that rewrites the archive (a remove, a rename) asks the native
+  core in one pass which entries carry fields a raw copy would lose, and
+  copies runs of untouched entries in one call. Removing one entry of
+  10,000: 329 to 178 ms.
+
+Fixed:
+
+- An append (`OutputStream.open(path, append: true)`, or a commit that
+  only adds) that failed before its first entry was added damaged the
+  last entry already in the archive; the archive is now left as it was.
+- `InputStream#read(n)` on a stream (a pipe or socket) took time in
+  proportion to `n` for every 64 KB read, so a very large `n` was slow or
+  failed to allocate.
+- `RemoteIO`: a read spanning the oldest cached block and one not yet
+  fetched raised `NoMethodError` once the cache was full.
+- `Zip::Deflater` and `Zip::PassThruCompressor`, kept for code that names
+  them, raised `NoMethodError` on the first write.
+
+Changed:
+
+- `InputStream#ungetc` returns nil, as `IO#ungetc` does.
+
+Internal:
+
+- RuboCop (`rake rubocop`, and a CI job) with a configuration that keeps
+  rubyzip's style in the ported files; clippy now requires a `SAFETY:`
+  comment on every unsafe block.
+
 ## 0.2.3 (2026-11-11)
 
 Faster (Windows, against 0.2.2):

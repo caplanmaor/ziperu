@@ -18,7 +18,7 @@ class ZipInputStreamTest < Minitest::Test
       @file = File.new(path, mode)
     end
 
-    delegate [:tell, :seek, :read, :eof?, :close] => :@file
+    delegate %i[tell seek read eof? close] => :@file
   end
 
   def assert_stream_contents(zis)
@@ -85,7 +85,8 @@ class ZipInputStreamTest < Minitest::Test
 
   def test_encrypted_archive_with_wrong_password
     decrypter = Ziperu::TraditionalDecrypter.new("wrong")
-    ::Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"), decrypter: decrypter) do |zis|
+    ::Ziperu::InputStream.open(fixture("rubyzip/zipWithStoredCompressionAndEncryption.zip"),
+                               decrypter: decrypter) do |zis|
       assert_raises(::Ziperu::Error) do
         zis.get_next_entry
         zis.read
@@ -118,7 +119,7 @@ class ZipInputStreamTest < Minitest::Test
     ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       assert_equal(:file, zis.get_next_entry.ftype)
       3.times { zis.get_next_entry }
-      assert_equal(:directory, zis.get_next_entry.ftype) if false
+      nil
     end
     ::Ziperu::InputStream.open(fixture("rubyzip/zipWithDirs.zip")) do |zis|
       assert_equal(:directory, zis.get_next_entry.ftype)
@@ -346,7 +347,7 @@ class ZipInputStreamTest < Minitest::Test
     ::Ziperu::InputStream.open(fixture(TEXT_ZIP)) do |zis|
       5.times { zis.get_next_entry }
       assert_equal("crlf.txt", zis.get_next_entry.name)
-      assert_equal(["#{'x' * 48}\r\n", "#{'y' * 49}\r\n", "rest"], zis.each_line("\r\n").to_a)
+      assert_equal(["#{"x" * 48}\r\n", "#{"y" * 49}\r\n", "rest"], zis.each_line("\r\n").to_a)
     end
   end
 

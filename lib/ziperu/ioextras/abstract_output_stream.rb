@@ -20,9 +20,7 @@ module Ziperu
         self << params.join
 
         # Deflate doesn't like `nil`s or empty strings!
-        unless $OUTPUT_RECORD_SEPARATOR.nil? || $OUTPUT_RECORD_SEPARATOR.empty?
-          self << $OUTPUT_RECORD_SEPARATOR
-        end
+        self << $OUTPUT_RECORD_SEPARATOR unless $OUTPUT_RECORD_SEPARATOR.nil? || $OUTPUT_RECORD_SEPARATOR.empty?
 
         nil
       end

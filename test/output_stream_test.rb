@@ -350,7 +350,7 @@ class ZipOutputStreamTest < Minitest::Test
     end
     assert_equal positions, positions.sort
     assert_operator positions.uniq.size, :>, 3, "the IO is written to along the way"
-    assert_operator positions.last, :>, 40 * 8 * 1024 - 64 * 1024
+    assert_operator positions.last, :>, (40 * 8 * 1024) - (64 * 1024)
     assert_operator io.pos, :>, positions.last, "the central directory follows the entries"
     assert_equal io.pos, io.string.bytesize
     Ziperu::File.open_buffer(io.string) do |zf|
@@ -412,7 +412,10 @@ class ZipOutputStreamTest < Minitest::Test
 
   def test_write_buffer_with_a_pipe_hands_over_the_archive_on_close
     rd, wr = IO.pipe
-    reader = Thread.new { rd.binmode; rd.read }
+    reader = Thread.new do
+      rd.binmode
+      rd.read
+    end
     Ziperu::OutputStream.write_buffer(wr) { |zos| write_test_zip(zos) }
     wr.close
     bytes = reader.value

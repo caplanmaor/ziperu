@@ -4,7 +4,8 @@
 # (Copyright (C) 2002-2026 the rubyzip authors).
 
 module Ziperu
-  # Reads just the end-of-central-directory records of an archive, in Ruby.
+  # Reads the end-of-central-directory records of an archive, in Ruby, and
+  # lists an archive held in an IO (`read_from_stream`).
   #
   # The native core refuses archives whose EOCD declares more entries than
   # the central directory holds, so `Ziperu::File.open` raises on them
@@ -37,7 +38,6 @@ module Ziperu
       @entry_set = EntrySet.new
       @native.entries.each { |meta| @entry_set.push_record(Entry.from_meta(@native, meta)) }
       @size = @entry_set.size
-      @cdir_offset = @native.central_directory_start if @native.respond_to?(:central_directory_start)
       self
     end
 
@@ -59,9 +59,7 @@ module Ziperu
     end
 
     def count_entries(io)
-      if IOExtras.path_like?(io)
-        return ::File.open(IOExtras.path_of(io), 'rb') { |f| count_entries(f) }
-      end
+      return ::File.open(IOExtras.path_of(io), 'rb') { |f| count_entries(f) } if IOExtras.path_like?(io)
 
       read_eocds(io)
       @size
@@ -119,9 +117,7 @@ module Ziperu
       return if unpack_e_o_c_d(data.slice(eocd_location..-1))
 
       zip64_eocd_locator = data.rindex([ZIP64_EOCD_LOCATOR_SIG].pack('V'), eocd_location)
-      unless zip64_eocd_locator
-        raise Error, 'Zip64 end of central directory locator signature expected but not found'
-      end
+      raise Error, 'Zip64 end of central directory locator signature expected but not found' unless zip64_eocd_locator
 
       zip64_eocd_location = data.rindex([ZIP64_END_OF_CD_SIG].pack('V'), zip64_eocd_locator)
 

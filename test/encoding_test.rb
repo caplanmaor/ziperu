@@ -44,7 +44,10 @@ class EncodingTest < Minitest::Test
 
   def test_a_utf8_name_is_flagged_whatever_unicode_names_says
     name = "ünïcödé-名前.txt"
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry(name); z.write("x") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry(name)
+      z.write("x")
+    end
     bytes = File.binread(@path)
     assert_equal [Ziperu::Entry::EFS, Ziperu::Entry::EFS], header_flags(bytes).map { |f| f & Ziperu::Entry::EFS },
                  "the native core flags a non-ASCII UTF-8 name"
@@ -54,7 +57,10 @@ class EncodingTest < Minitest::Test
       assert_equal Encoding::UTF_8, e.name.encoding
       assert_nil e.extra[:unicodepath], "no Unicode Path field: the flag says it all"
     end
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("plain.txt"); z.write("p") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("plain.txt")
+      z.write("p")
+    end
     assert_equal [0, 0], header_flags(File.binread(@path)).map { |f| f & Ziperu::Entry::EFS }, "an ASCII name is not"
   end
 
@@ -66,7 +72,7 @@ class EncodingTest < Minitest::Test
       z.put_next_entry("dir/")
     end
     bytes = File.binread(@path)
-    assert_equal [Ziperu::Entry::EFS, Ziperu::Entry::EFS], header_flags(bytes).map { |f| f & Ziperu::Entry::EFS }
+    assert_equal([Ziperu::Entry::EFS, Ziperu::Entry::EFS], header_flags(bytes).map { |f| f & Ziperu::Entry::EFS })
     Ziperu::File.open(@path) do |zf|
       refute_equal 0, zf.get_entry("plain.txt").gp_flags & Ziperu::Entry::EFS
       refute_equal 0, zf.get_entry("dir/").gp_flags & Ziperu::Entry::EFS
@@ -77,8 +83,8 @@ class EncodingTest < Minitest::Test
       z.put_next_entry("secret.txt")
       z.write("s")
     end
-    assert_equal [Ziperu::Entry::EFS | 9, Ziperu::Entry::EFS | 9],
-                 header_flags(File.binread(@path)).map { |f| f & (Ziperu::Entry::EFS | 9) }
+    assert_equal([Ziperu::Entry::EFS | 9, Ziperu::Entry::EFS | 9],
+                 header_flags(File.binread(@path)).map { |f| f & (Ziperu::Entry::EFS | 9) })
     Ziperu::File.open(@path, password: "pw") { |zf| assert_equal "s", zf.read("secret.txt") }
   end
 
@@ -169,7 +175,10 @@ class EncodingTest < Minitest::Test
     end
     # An entry rewritten from an archive keeps exactly the fields it had.
     Ziperu.write_extended_timestamps = false
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("bare.txt"); z.write("x") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("bare.txt")
+      z.write("x")
+    end
     Ziperu.write_extended_timestamps = true
     Ziperu::File.open(@path) { |zf| zf.get_entry("bare.txt").comment = "edited" }
     Ziperu::File.open(@path) { |zf| assert_nil zf.get_entry("bare.txt").extra[:universaltime] }
@@ -177,19 +186,31 @@ class EncodingTest < Minitest::Test
     # must have no extra field at all.
     Ziperu.write_extended_timestamps = false
     Ziperu.write_zip64_support = false # no zip64 placeholder either, as an EPUB producer sets it
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("mimetype", nil, nil, Ziperu::Entry::STORED); z.write("application/epub+zip") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("mimetype", nil, nil, Ziperu::Entry::STORED)
+      z.write("application/epub+zip")
+    end
     assert File.binread(@path).include?("mimetypeapplication/epub+zip")
     Ziperu.write_extended_timestamps = false
-    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a.txt"); z.write("x") }
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("x")
+    end
     Ziperu::File.open(@path) { |zf| assert_nil zf.get_entry("a.txt").extra[:universaltime] }
   end
 
   def test_the_size_estimate_follows_the_default_fields
     sink = +"".b
     io = Object.new
-    io.define_singleton_method(:write) { |d| sink << d; d.bytesize }
+    io.define_singleton_method(:write) do |d|
+      sink << d
+      d.bytesize
+    end
     names = %w[plain.txt ünï.txt]
-    estimate = Ziperu::OutputStream.estimated_size { |e| names.each { |n| e.add_stored(n, 3) }; e.add_directory("dír/") }
+    estimate = Ziperu::OutputStream.estimated_size do |e|
+      names.each { |n| e.add_stored(n, 3) }
+      e.add_directory("dír/")
+    end
     Ziperu::OutputStream.write_buffer(io) do |zos|
       names.each do |n|
         zos.put_next_entry(Ziperu::Entry.new("", n, size: 3, compression_method: Ziperu::Entry::STORED))

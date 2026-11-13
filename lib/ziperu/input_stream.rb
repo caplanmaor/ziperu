@@ -2,7 +2,7 @@
 
 module Ziperu
   # Reads the entries of an archive one after another, exposing each as an
-  # IO-like stream, exactly as rubyzip's `Ziperu::InputStream` does:
+  # IO-like stream, exactly as rubyzip's `Zip::InputStream` does:
   #
   #   Ziperu::InputStream.open("my.zip") do |io|
   #     while (entry = io.get_next_entry)
@@ -53,25 +53,25 @@ module Ziperu
       # AES from ZipCrypto by the entry, so one password serves both.
       decrypter ||= TraditionalDecrypter.new(password) if password
       super(**opts)
+      @decrypter = decrypter
+      @enforce_size = enforce_size
+      @reader = nil
+      @current_entry = nil
       if streaming && self.class.pipe_like?(context)
         IOExtras.binmode(context)
         @stream = Native::StreamReader.open(context, decrypter&.password&.b, enforce_size)
         @stream_entries = 0
         @stream_total = 0
-        @decrypter = decrypter
-        @enforce_size = enforce_size
         @owns_archive = false
         @archive = nil
-        @reader = nil
-        @current_entry = nil
         return
       end
-      @split = !context.kind_of?(Native::Archive) && self.class.split_archive?(context)
       # An archive handed in (by Entry#get_input_stream) stays open for its
       # owner; one opened here is closed with the stream. A split segment
       # has no central directory to open; rubyzip fails on the first entry,
       # so defer the error to `get_next_entry`.
       @owns_archive = !context.kind_of?(Native::Archive)
+      @split = @owns_archive && self.class.split_archive?(context)
       @archive =
         if !@owns_archive
           context
@@ -91,26 +91,20 @@ module Ziperu
             nil
           end
         end
-      @decrypter = decrypter
-      @enforce_size = enforce_size
       # An archive with several records under one name is walked from its
       # listing, since the native core addresses only the last of each name
       # by index; every record is yielded, as rubyzip's walk of the local
       # headers would.
       @records = @archive.entries if @archive&.duplicate_names?
       @next_index = offset.zero? || @archive.nil? ? 0 : index_at_offset(offset)
-      if @next_index.nil?
-        raise Error, "no entry starts at offset #{offset} (Zip local header magic not found)"
-      end
-      @reader = nil
-      @current_entry = nil
+      return unless @next_index.nil?
+
+      raise Error, "no entry starts at offset #{offset} (Zip local header magic not found)"
     end
 
     # Close this InputStream. All further IO will raise an IOError.
     def close
-      @reader&.close
-      @reader = nil
-      @lazy_open = false
+      close_reader
       @stream&.close
       @stream = nil
       @archive&.close if @owns_archive
@@ -122,16 +116,15 @@ module Ziperu
     # the entry data. Returns nil when there are no more entries.
     def get_next_entry
       raise SplitArchiveError if @split
+
       check_open!
       return next_stream_entry if @stream
-
       return @current_entry = nil if @archive.nil? || @next_index.nil?
+
       if @next_index >= (@records ? @records.size : @archive.entry_count)
         # Past the last entry there is nothing to read, not the previous
         # entry again.
-        @reader&.close
-        @reader = nil
-        @lazy_open = false
+        close_reader
         flush
         return @current_entry = nil
       end
@@ -175,7 +168,7 @@ module Ziperu
       @next_index =
         if @records
           at = @records.index { |meta| meta[:header_offset] == entry.local_header_offset }
-          at && at + 1
+          at && (at + 1)
         else
           entry.index + 1
         end
@@ -261,7 +254,7 @@ module Ziperu
         begin
           yield zio
         ensure
-          zio.close if zio
+          zio.close
         end
       end
 
@@ -320,7 +313,7 @@ module Ziperu
             context.seek(0, ::IO::SEEK_SET)
             context.read(4)
           end
-        head.to_s.b.start_with?([LOCAL_ENTRY_SIGNATURE].pack("V"))
+        head.to_s.b.start_with?([LOCAL_ENTRY_SIGNATURE].pack('V'))
       rescue SystemCallError, IOError
         false
       end
@@ -364,7 +357,7 @@ module Ziperu
         return io.read.to_s.b unless limit
 
         bytes = +''.b
-        while (chunk = io.read(IOExtras::CHUNK_SIZE))
+        while (chunk = io.read(CHUNK_SIZE))
           bytes << chunk
           raise LimitError.new('an archive size', bytes.bytesize, limit) if bytes.bytesize > limit
         end
@@ -402,12 +395,9 @@ module Ziperu
         raise CompressionMethodError, entry.compression_method
       end
 
-      if entry.encrypted? && @decrypter.nil?
-        raise Error, PASSWORD_REQUIRED_MESSAGE
-      end
+      raise Error, PASSWORD_REQUIRED_MESSAGE if entry.encrypted? && @decrypter.nil?
 
-      @reader&.close
-      @reader = nil
+      close_reader
       @lazy_open = true
       reader unless lazy
       flush
@@ -451,6 +441,12 @@ module Ziperu
 
     private
 
+    def close_reader
+      @reader&.close
+      @reader = nil
+      @lazy_open = false
+    end
+
     # Nil when no entry starts there, which reads as "no more entries".
     def index_at_offset(offset)
       return @records.index { |meta| meta[:header_offset] == offset } if @records
@@ -477,6 +473,7 @@ module Ziperu
       if (limit = @settings.max_entries) && @stream_entries > limit
         raise LimitError.new('an entry count', @stream_entries, limit)
       end
+
       if meta[:size]
         check_stream_entry_size(meta[:size])
         if (limit = @settings.max_compression_ratio) && meta[:size].positive?
@@ -488,7 +485,7 @@ module Ziperu
       meta[:crc] ||= 0
       meta[:compressed_size] ||= 0
       @current_entry = Entry.from_meta(nil, meta, metadata_encoding: @metadata_encoding, settings: @settings)
-      @current_entry.instance_variable_set(:@size, nil) if meta[:size].nil?
+      @current_entry.learn_data(nil, 0) if meta[:size].nil?
       @stream_entry_bytes = 0
       @reader = @stream
       @lineno = 0
@@ -534,8 +531,7 @@ module Ziperu
       crc, size = @stream.trailer
       return unless crc && !@current_entry.size_known?
 
-      @current_entry.instance_variable_set(:@size, size)
-      @current_entry.instance_variable_set(:@crc, crc)
+      @current_entry.learn_data(size, crc)
     end
 
     # Re-raise the native core's errors as the rubyzip-shaped ones.

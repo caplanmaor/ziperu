@@ -99,7 +99,8 @@ class StreamingTest < Minitest::Test
     Ziperu::File.open_buffer(bytes) do |zf|
       e = zf.get_entry("a.txt")
       hdr = bytes.byteslice(e.local_header_offset, 30).unpack("VvvvvvVVVvv")
-      nlen, xlen = hdr[9], hdr[10]
+      nlen = hdr[9]
+      xlen = hdr[10]
       assert_equal 45, hdr[1], "version needed: zip64"
       after = bytes.byteslice(e.local_header_offset + 30 + nlen + xlen + e.compressed_size, 24)
       sig, crc, csize, usize = after.unpack("VVQ<Q<")
@@ -209,8 +210,7 @@ class StreamingTest < Minitest::Test
     end
     assert_kind_of Enumerator, body
     refute ran, "nothing is written until the chunks are asked for"
-    chunks = []
-    body.each { |c| chunks << c }   # what Rack does
+    chunks = body.map { |c| c } # what Rack does
     assert ran
     assert_operator chunks.size, :>, 1, "the archive comes out in pieces"
     assert_sample(chunks.join)

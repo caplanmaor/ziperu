@@ -67,7 +67,10 @@ class SecurityTest < Minitest::Test
     # sees what the directory says, and the one name goes through every
     # check. The data is the same bytes either way.
     path = File.join(@dir, "mismatch.zip")
-    Ziperu::OutputStream.open(path) { |z| z.put_next_entry("same.txt"); z.write("x") }
+    Ziperu::OutputStream.open(path) do |z|
+      z.put_next_entry("same.txt")
+      z.write("x")
+    end
     bytes = File.binread(path)
     central = bytes.rindex("PK\x01\x02".b)
     bytes[central + 46, 8] = "ours.txt"
@@ -121,7 +124,10 @@ class SecurityTest < Minitest::Test
 
   def test_a_declared_size_smaller_than_the_data_is_not_taken_on_trust
     path = File.join(@dir, "lie.zip")
-    Ziperu::OutputStream.open(path) { |z| z.put_next_entry("lie.bin", nil, nil, Ziperu::Entry::STORED); z.write("A" * 1000) }
+    Ziperu::OutputStream.open(path) do |z|
+      z.put_next_entry("lie.bin", nil, nil, Ziperu::Entry::STORED)
+      z.write("A" * 1000)
+    end
     bytes = File.binread(path)
     central = bytes.rindex("PK\x01\x02".b)
     bytes[central + 24, 4] = [10].pack("V") # uncompressed size: 10, not 1000
@@ -139,9 +145,15 @@ class SecurityTest < Minitest::Test
 
   def test_duplicate_names_are_listed_but_only_the_last_is_written_back
     path = File.join(@dir, "dup.zip")
-    Ziperu::OutputStream.open(path) { |z| z.put_next_entry("a.txt"); z.write("first") }
+    Ziperu::OutputStream.open(path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("first")
+    end
     first = File.binread(path)
-    Ziperu::OutputStream.open(path) { |z| z.put_next_entry("a.txt"); z.write("second") }
+    Ziperu::OutputStream.open(path) do |z|
+      z.put_next_entry("a.txt")
+      z.write("second")
+    end
     second = File.binread(path)
     # Splice: both local entries, both central records, one end record.
     a_central = first.rindex("PK\x01\x02".b)

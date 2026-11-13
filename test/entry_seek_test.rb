@@ -85,9 +85,9 @@ class EntrySeekTest < Minitest::Test
 
   def sources
     {
-      "file" => ->(&b) { Ziperu::File.open(@path, &b) },
+      "file"   => ->(&b) { Ziperu::File.open(@path, &b) },
       "buffer" => ->(&b) { Ziperu::File.open_buffer(File.binread(@path), &b) },
-      "io" => ->(&b) { File.open(@path, "rb") { |io| Ziperu::File.open_buffer(io, &b) } }
+      "io"     => ->(&b) { File.open(@path, "rb") { |io| Ziperu::File.open_buffer(io, &b) } }
     }
   end
 end

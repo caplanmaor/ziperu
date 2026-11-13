@@ -25,8 +25,9 @@ use magnus::{
 use zip::read::{read_zipfile_from_stream_with_options, ZipReadOptions};
 
 use crate::errors::{busy_error, read_error, size_limit_error, ERROR};
-use crate::rb::bytes_of;
+use crate::rb::{bytes_of, copy_chunk};
 use crate::source::ruby_io_error;
+use crate::zipcrypto::{DATA_DESCRIPTOR_FLAG, ENCRYPTED_FLAG};
 
 const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -57,14 +58,7 @@ impl Read for RubyRead {
         let ruby = Ruby::get().map_err(|e| io::Error::other(e.to_string()))?;
         let io = ruby.get_inner(self.io);
         let chunk: Option<RString> = io.funcall("read", (buf.len(),)).map_err(ruby_io_error)?;
-        let Some(chunk) = chunk else {
-            return Ok(0);
-        };
-        // SAFETY: copied out at once, with no Ruby call in between.
-        let bytes = unsafe { chunk.as_slice() };
-        let n = bytes.len().min(buf.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
-        Ok(n)
+        Ok(copy_chunk(chunk, buf))
     }
 }
 
@@ -282,8 +276,8 @@ impl State {
             .read_vec(u16_at(24) as usize)
             .map_err(|e| stream_error(ruby, e))?;
         let zip64 = apply_zip64(&extra, &mut size, &mut csize);
-        let descriptor = flags & 8 != 0;
-        let encrypted = flags & 1 != 0;
+        let descriptor = flags & DATA_DESCRIPTOR_FLAG != 0;
+        let encrypted = flags & ENCRYPTED_FLAG != 0;
 
         let unsupported = |what: &str| {
             Error::new(
@@ -384,6 +378,10 @@ impl State {
         if current.finished {
             return Ok(false);
         }
+        // A step at a time, whatever the caller asked for: the buffer is
+        // grown (and zeroed) by `want` before each read, and the caller
+        // comes back for the rest.
+        let want = want.min(CHUNK);
         let start = out.len();
         let ended = match &mut current.body {
             Body::Stored { remaining } => {

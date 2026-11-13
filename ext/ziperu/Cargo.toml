@@ -34,5 +34,8 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 crc32fast = "1"
 getrandom = { version = "0.4", features = ["std"] }
 
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [build-dependencies]
 rb-sys-env = "0.2"

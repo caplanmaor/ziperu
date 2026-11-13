@@ -38,6 +38,12 @@ module Ziperu
         obj.respond_to?(:to_path) ? obj.to_path : obj.to_s
       end
 
+      # Whether the native core can take `str` as a name or path: it wants
+      # valid UTF-8.
+      def native_text?(str)
+        str.ascii_only? || (str.encoding == ::Encoding::UTF_8 && str.valid_encoding?)
+      end
+
       # Puts an IO in binary mode when it has one (a StringIO does not).
       def binmode(io)
         io.binmode if io.respond_to?(:binmode)

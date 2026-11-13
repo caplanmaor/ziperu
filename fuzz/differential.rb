@@ -18,21 +18,21 @@
 # A failing case is saved under tmp/fuzz/failures/ with its spec, and the
 # run exits non-zero. Reproduce one with the printed --seed.
 
-$LOAD_PATH.unshift File.expand_path('../lib', __dir__)
-require 'ziperu'
-require 'base64'
-require 'digest'
-require 'fileutils'
-require 'json'
-require 'open3'
-require 'optparse'
-require 'rbconfig'
-require 'stringio'
-require 'tmpdir'
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "ziperu"
+require "base64"
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "rbconfig"
+require "stringio"
+require "tmpdir"
 
 module Fuzz
-  ROOT = File.expand_path('..', __dir__)
-  OUT = File.join(ROOT, 'tmp', 'fuzz')
+  ROOT = File.expand_path("..", __dir__)
+  OUT = File.join(ROOT, "tmp", "fuzz")
 
   # Errors ziperu is allowed to raise on hostile input. Anything else (a
   # NoMethodError, a TypeError, a RangeError) is a bug.
@@ -54,7 +54,7 @@ module Fuzz
       spec_path = File.join(@dir, "#{name}-spec.json")
       out = File.join(@dir, "#{name}-out.zip")
       File.write(spec_path, JSON.generate(spec))
-      run('write', spec_path, out)
+      run("write", spec_path, out)
       File.binread(out)
     end
 
@@ -63,7 +63,7 @@ module Fuzz
       out = File.join(@dir, "#{name}-read.json")
       File.binwrite(zip, bytes)
       extra = password ? [password, encryption.to_s] : []
-      run('read', zip, out, *extra)
+      run("read", zip, out, *extra)
       JSON.parse(File.read(out))
     end
 
@@ -81,7 +81,7 @@ module Fuzz
   class Generator
     WORDS = %w[readme notes data image index main lib src test build alpha beta].freeze
     EXTS = %w[.txt .bin .json .rb .md .dat].freeze
-    UNICODE = ['日本語', 'файл', 'résumé', 'emoji🎉', 'Ünïcödé', '中文目录'].freeze
+    UNICODE = ["日本語", "файл", "résumé", "emoji🎉", "Ünïcödé", "中文目录"].freeze
     METHODS = %w[stored deflated deflated deflated].freeze
 
     attr_reader :rng
@@ -97,7 +97,7 @@ module Fuzz
     def name(depth: rng.rand(3))
       parts = Array.new(depth) { segment }
       parts << "#{segment}#{EXTS.sample(random: rng)}"
-      parts.join('/')
+      parts.join("/")
     end
 
     def segment
@@ -111,7 +111,7 @@ module Fuzz
 
     def data
       case rng.rand(10)
-      when 0 then ''.b
+      when 0 then "".b
       when 1, 2 then rng.bytes(rng.rand(1..64))
       when 3, 4 then (WORDS.sample(random: rng) * rng.rand(1..2000)).b
       when 5 then rng.bytes(rng.rand(1..300_000))
@@ -134,22 +134,25 @@ module Fuzz
 
         if chance(0.15)
           used["#{n}/"] = true
-          entries << { 'name' => "#{n}/", 'dir' => true, 'mtime' => mtime, 'comment' => chance(0.2) ? segment : '' }
+          entries << { "name" => "#{n}/", "dir" => true, "mtime" => mtime, "comment" => chance(0.2) ? segment : "" }
         else
           used[n] = true
           method = METHODS.sample(random: rng)
-          method = 'bzip2' if bzip2 && chance(0.1)
-          entries << { 'name' => n, 'data' => Base64.strict_encode64(data), 'method' => method,
-                       'mtime' => mtime, 'comment' => chance(0.2) ? segment : '' }
+          method = "bzip2" if bzip2 && chance(0.1)
+          entries << { "name" => n, "data" => Base64.strict_encode64(data), "method" => method,
+                       "mtime" => mtime, "comment" => chance(0.2) ? segment : "" }
         end
       end
-      entries << { 'name' => name, 'data' => Base64.strict_encode64(data), 'method' => 'deflated', 'mtime' => mtime, 'comment' => '' } if entries.empty?
+      if entries.empty?
+        entries << { "name" => name, "data" => Base64.strict_encode64(data), "method" => "deflated", "mtime" => mtime,
+"comment" => "" }
+      end
       {
-        'entries' => entries,
-        'comment' => chance(0.3) ? "#{segment} #{rng.rand(1000)}" : '',
-        'level' => chance(0.5) ? rng.rand(0..9) : nil,
-        'streaming' => streaming && chance(0.25),
-        'zip64' => zip64 && chance(0.1)
+        "entries"   => entries,
+        "comment"   => chance(0.3) ? "#{segment} #{rng.rand(1000)}" : "",
+        "level"     => chance(0.5) ? rng.rand(0..9) : nil,
+        "streaming" => streaming && chance(0.25),
+        "zip64"     => zip64 && chance(0.1)
       }
     end
 
@@ -176,29 +179,29 @@ module Fuzz
           log << "zero #{len} bytes at #{at}"
         when 3
           at = rng.rand(bytes.bytesize)
-          bytes[at, 4] = [rng.rand(2**32)].pack('V') if at + 4 <= bytes.bytesize
+          bytes[at, 4] = [rng.rand(2**32)].pack("V") if at + 4 <= bytes.bytesize
           log << "random u32 at #{at}"
         when 4
           at = rng.rand(bytes.bytesize)
           len = rng.rand(1..256)
           chunk = bytes.byteslice(at, len)
-          bytes = bytes.byteslice(0, at) + chunk + chunk + bytes.byteslice(at + len..).to_s
+          bytes = bytes.byteslice(0, at) + chunk + chunk + bytes.byteslice((at + len)..).to_s
           log << "duplicate #{len} bytes at #{at}"
         when 5
           # Aim at a header field: signatures are easy to find.
           sig = [0x04034b50, 0x02014b50, 0x06054b50, 0x06064b50].sample(random: rng)
-          idx = bytes.index([sig].pack('V'))
+          idx = bytes.index([sig].pack("V"))
           if idx
             at = idx + rng.rand(4..30)
             if at + 2 <= bytes.bytesize
-              bytes[at, 2] = [rng.rand(2**16)].pack('v')
+              bytes[at, 2] = [rng.rand(2**16)].pack("v")
               log << "random u16 at #{at} (after signature #{sig.to_s(16)})"
             end
           end
         when 6
           at = rng.rand(bytes.bytesize)
           len = rng.rand(1..128)
-          bytes = bytes.byteslice(0, at) + bytes.byteslice(at + len..).to_s
+          bytes = bytes.byteslice(0, at) + bytes.byteslice((at + len)..).to_s
           log << "delete #{len} bytes at #{at}"
         end
       end
@@ -216,8 +219,9 @@ module Fuzz
       @rng = Random.new(seed)
       @gen = Generator.new(@rng)
       @dir = dir
-      @python = Oracle.new('python', [*python, '-I', File.join(ROOT, 'fuzz', 'oracle.py')], dir)
-      @rubyzip = rubyzip_lib && Oracle.new('rubyzip', [RbConfig.ruby, '-I', rubyzip_lib, File.join(ROOT, 'fuzz', 'rubyzip_oracle.rb')], dir)
+      @python = Oracle.new("python", [*python, "-I", File.join(ROOT, "fuzz", "oracle.py")], dir)
+      @rubyzip = rubyzip_lib && Oracle.new("rubyzip",
+                                           [RbConfig.ruby, "-I", rubyzip_lib, File.join(ROOT, "fuzz", "rubyzip_oracle.rb")], dir)
       @stats = Hash.new(0)
       @failures = []
       @corpus = []
@@ -242,36 +246,37 @@ module Fuzz
       if @rubyzip && @gen.chance(0.25)
         spec = @gen.spec(bzip2: false, streaming: false, zip64: false)
         if @gen.chance(0.6)
-          spec['password'] = "pw#{@rng.rand(1000)}"
-          spec['encryption'] = @gen.chance(0.5) ? 'aes' : 'traditional'
+          spec["password"] = "pw#{@rng.rand(1000)}"
+          spec["encryption"] = @gen.chance(0.5) ? "aes" : "traditional"
         end
         bytes = @rubyzip.write(spec)
       else
         spec = @gen.spec
         bytes = @python.write(spec)
       end
-      @current = { 'case' => 'read', 'spec' => spec }
+      @current = { "case" => "read", "spec" => spec }
       expected = model_from_spec(spec)
       # rubyzip writes AES entries as AE-2, whose header CRC is zero by design.
-      check_ziperu_reads(bytes, expected, spec['comment'], decrypter: decrypter_for(spec), crc: spec['encryption'] != 'aes')
+      check_ziperu_reads(bytes, expected, spec["comment"], decrypter: decrypter_for(spec),
+                                                           crc:       spec["encryption"] != "aes")
       remember(bytes)
     end
 
     def case_write
       spec = @gen.spec(bzip2: false, streaming: false, zip64: false)
-      @current = { 'case' => 'write', 'spec' => spec }
-      path = File.join(@dir, 'ziperu-out.zip')
+      @current = { "case" => "write", "spec" => spec }
+      path = File.join(@dir, "ziperu-out.zip")
       File.delete(path) if File.exist?(path)
       use_buffer = @gen.chance(0.3)
       writer = lambda do |zos|
-        zos.comment = spec['comment'] unless spec['comment'].empty?
-        spec['entries'].each do |e|
-          method = e['method'] == 'stored' ? Ziperu::Entry::STORED : Ziperu::Entry::DEFLATED
-          level = spec['level'] || Zlib::DEFAULT_COMPRESSION
-          entry = Ziperu::Entry.new('', e['name'], comment: e['comment'], compression_method: method)
-          entry.time = Ziperu::DOSTime.new(*e['mtime'])
+        zos.comment = spec["comment"] unless spec["comment"].empty?
+        spec["entries"].each do |e|
+          method = e["method"] == "stored" ? Ziperu::Entry::STORED : Ziperu::Entry::DEFLATED
+          level = spec["level"] || Zlib::DEFAULT_COMPRESSION
+          entry = Ziperu::Entry.new("", e["name"], comment: e["comment"], compression_method: method)
+          entry.time = Ziperu::DOSTime.new(*e["mtime"])
           zos.put_next_entry(entry, nil, nil, method, level)
-          zos.write(Base64.decode64(e['data'])) unless e['dir']
+          zos.write(Base64.decode64(e["data"])) unless e["dir"]
         end
       end
       bytes = if use_buffer
@@ -281,8 +286,8 @@ module Fuzz
                 File.binread(path)
               end
       expected = model_from_spec(spec)
-      check_oracles_read(bytes, expected, spec['comment'])
-      check_ziperu_reads(bytes, expected, spec['comment'])
+      check_oracles_read(bytes, expected, spec["comment"])
+      check_ziperu_reads(bytes, expected, spec["comment"])
       remember(bytes)
     end
 
@@ -291,10 +296,10 @@ module Fuzz
       bytes = @python.write(spec)
       expected = model_from_spec(spec)
       ops = []
-      @current = { 'case' => 'modify', 'spec' => spec, 'ops' => ops }
-      path = File.join(@dir, 'ziperu-modify.zip')
+      @current = { "case" => "modify", "spec" => spec, "ops" => ops }
+      path = File.join(@dir, "ziperu-modify.zip")
       File.binwrite(path, bytes)
-      comment = spec['comment']
+      comment = spec["comment"]
       # add/replace read their source when the archive is committed, so
       # each op needs its own file.
       sources = 0
@@ -304,13 +309,13 @@ module Fuzz
       Ziperu::File.open(path) do |zf|
         @rng.rand(1..6).times do
           names = expected.keys.map(&utf8)
-          files = names.reject { |k| expected[k.b]['dir'] }
+          files = names.reject { |k| expected[k.b]["dir"] }
           case @rng.rand(7)
           when 0
             n = fresh_name(expected)
             d = @gen.data
             zf.get_output_stream(n) { |os| os.write(d) }
-            expected[n.b] = { 'data' => d, 'dir' => false }
+            expected[n.b] = { "data" => d, "dir" => false }
             ops << "get_output_stream #{n} (#{d.bytesize} bytes)"
           when 1
             n = names.sample(random: @rng) or next
@@ -329,7 +334,7 @@ module Fuzz
             src_path = src.call
             File.binwrite(src_path, d)
             zf.replace(n, src_path)
-            expected[n.b]['data'] = d
+            expected[n.b]["data"] = d
             ops << "replace #{n} (#{d.bytesize} bytes)"
           when 4
             n = fresh_name(expected)
@@ -337,14 +342,14 @@ module Fuzz
             src_path = src.call
             File.binwrite(src_path, d)
             zf.add(n, src_path)
-            expected[n.b] = { 'data' => d, 'dir' => false }
+            expected[n.b] = { "data" => d, "dir" => false }
             ops << "add #{n} (#{d.bytesize} bytes)"
           when 5
             n = "#{@gen.segment}#{@rng.rand(1000)}"
             next if expected.key?("#{n}/".b) || expected.key?(n.b)
 
             zf.mkdir(n)
-            expected["#{n}/".b] = { 'data' => ''.b, 'dir' => true }
+            expected["#{n}/".b] = { "data" => "".b, "dir" => true }
             ops << "mkdir #{n}"
           when 6
             comment = "changed #{@rng.rand(1000)}"
@@ -355,7 +360,7 @@ module Fuzz
       end
       result = File.binread(path)
       # rubyzip cannot read the bzip2 entries python wrote and ziperu raw-copied.
-      rubyzip = spec['entries'].none? { |e| e['method'] == 'bzip2' }
+      rubyzip = spec["entries"].none? { |e| e["method"] == "bzip2" }
       check_oracles_read(result, expected, comment, rubyzip: rubyzip)
       check_ziperu_reads(result, expected, comment)
       remember(result)
@@ -364,21 +369,21 @@ module Fuzz
     def case_mutate
       original = @corpus.sample(random: @rng)
       bytes, log = @gen.mutate(original)
-      @current = { 'case' => 'mutate', 'mutations' => log, 'original_sha' => Digest::SHA256.hexdigest(original) }
+      @current = { "case" => "mutate", "mutations" => log, "original_sha" => Digest::SHA256.hexdigest(original) }
       ours = ziperu_read_leniently(bytes)
       theirs = @python.read(bytes)
       @stats[ours[:open_error] ? :mutate_rejected : :mutate_accepted] += 1
-      @stats[:mutate_acceptance_differs] += 1 if ours[:open_error].nil? != theirs['ok']
-      return unless theirs['ok']
+      @stats[:mutate_acceptance_differs] += 1 if ours[:open_error].nil? != theirs["ok"]
+      return unless theirs["ok"]
 
-      theirs['entries'].each do |t|
-        o = ours[:entries][t['name'].b] or next
-        next unless o[:data] && t['data']
+      theirs["entries"].each do |t|
+        o = ours[:entries][t["name"].b] or next
+        next unless o[:data] && t["data"]
 
-        oracle = Base64.decode64(t['data'])
+        oracle = Base64.decode64(t["data"])
         next if o[:data] == oracle
 
-        raise Failure, "entry #{t['name'].inspect}: ziperu and python both read it but the bytes differ " \
+        raise Failure, "entry #{t["name"].inspect}: ziperu and python both read it but the bytes differ " \
                        "(#{o[:data].bytesize} vs #{oracle.bytesize})"
       end
     end
@@ -388,22 +393,22 @@ module Fuzz
     # Ziperu::File, InputStream, open_buffer and extract_all all agree
     # with the model.
     def check_ziperu_reads(bytes, expected, comment, decrypter: nil, crc: true)
-      path = File.join(@dir, 'ziperu-in.zip')
+      path = File.join(@dir, "ziperu-in.zip")
       File.binwrite(path, bytes)
       opts = decrypter ? { decrypter: decrypter } : {}
 
       Ziperu::File.open(path) do |zf|
-        compare_comment(zf.comment, comment, 'Ziperu::File')
-        compare_names(zf.entries.map { |e| e.name.b }, expected.keys, 'Ziperu::File')
+        compare_comment(zf.comment, comment, "Ziperu::File")
+        compare_names(zf.entries.map { |e| e.name.b }, expected.keys, "Ziperu::File")
         zf.entries.each do |entry|
           want = expected.fetch(entry.name.b)
-          assert_eq(entry.directory?, want['dir'], "#{entry.name}: directory?")
-          next if want['dir']
+          assert_eq(entry.directory?, want["dir"], "#{entry.name}: directory?")
+          next if want["dir"]
 
-          assert_eq(entry.size, want['data'].bytesize, "#{entry.name}: size")
-          assert_eq(entry.crc, Zlib.crc32(want['data']), "#{entry.name}: crc") if crc
-          assert_eq(zf.read(entry).b, want['data'], "#{entry.name}: Ziperu::File#read") unless decrypter
-          assert_eq(entry.get_input_stream(**opts, &:read).to_s.b, want['data'], "#{entry.name}: get_input_stream")
+          assert_eq(entry.size, want["data"].bytesize, "#{entry.name}: size")
+          assert_eq(entry.crc, Zlib.crc32(want["data"]), "#{entry.name}: crc") if crc
+          assert_eq(zf.read(entry).b, want["data"], "#{entry.name}: Ziperu::File#read") unless decrypter
+          assert_eq(entry.get_input_stream(**opts, &:read).to_s.b, want["data"], "#{entry.name}: get_input_stream")
         end
       end
 
@@ -413,33 +418,34 @@ module Fuzz
           seen << entry.name.b
           next if entry.directory?
 
-          assert_eq(zis.read.to_s.b, expected.fetch(entry.name.b)['data'], "#{entry.name}: InputStream#read")
+          assert_eq(zis.read.to_s.b, expected.fetch(entry.name.b)["data"], "#{entry.name}: InputStream#read")
         end
       end
-      compare_names(seen, expected.keys, 'Ziperu::InputStream')
+      compare_names(seen, expected.keys, "Ziperu::InputStream")
 
       Ziperu::File.open_buffer(bytes.dup) do |zf|
         zf.entries.each do |entry|
           next if entry.directory?
 
-          assert_eq(entry.get_input_stream(**opts, &:read).to_s.b, expected.fetch(entry.name.b)['data'], "#{entry.name}: open_buffer read")
+          assert_eq(entry.get_input_stream(**opts, &:read).to_s.b, expected.fetch(entry.name.b)["data"],
+                    "#{entry.name}: open_buffer read")
         end
       end
 
       return if decrypter # extract has no decrypter argument in rubyzip's API
 
-      dest = File.join(@dir, 'extracted')
+      dest = File.join(@dir, "extracted")
       FileUtils.rm_rf(dest)
       FileUtils.mkdir_p(dest)
       Ziperu::File.open(path) { |zf| zf.extract_all(dest) }
       expected.each do |name, want|
         on_disk = File.join(dest, name)
-        if want['dir']
+        if want["dir"]
           raise Failure, "#{name}: directory not extracted" unless File.directory?(on_disk)
         else
           raise Failure, "#{name}: not extracted" unless File.file?(on_disk)
 
-          assert_eq(File.binread(on_disk), want['data'], "#{name}: extracted bytes")
+          assert_eq(File.binread(on_disk), want["data"], "#{name}: extracted bytes")
         end
       end
     end
@@ -447,19 +453,19 @@ module Fuzz
     def check_oracles_read(bytes, expected, comment, rubyzip: true)
       [@python, rubyzip ? @rubyzip : nil].compact.each do |oracle|
         result = oracle.read(bytes)
-        raise Failure, "#{oracle.name} cannot open what ziperu wrote: #{result['error']}" unless result['ok']
+        raise Failure, "#{oracle.name} cannot open what ziperu wrote: #{result["error"]}" unless result["ok"]
 
-        compare_comment(result['comment'], comment, oracle.name)
-        compare_names(result['entries'].map { |e| e['name'].b }, expected.keys, oracle.name)
-        result['entries'].each do |e|
-          want = expected.fetch(e['name'].b)
-          assert_eq(e['dir'], want['dir'], "#{oracle.name}: #{e['name']} directory?")
-          next if want['dir']
+        compare_comment(result["comment"], comment, oracle.name)
+        compare_names(result["entries"].map { |e| e["name"].b }, expected.keys, oracle.name)
+        result["entries"].each do |e|
+          want = expected.fetch(e["name"].b)
+          assert_eq(e["dir"], want["dir"], "#{oracle.name}: #{e["name"]} directory?")
+          next if want["dir"]
 
-          raise Failure, "#{oracle.name} cannot read #{e['name']}: #{e['error']}" if e['error']
+          raise Failure, "#{oracle.name} cannot read #{e["name"]}: #{e["error"]}" if e["error"]
 
-          assert_eq(Base64.decode64(e['data']), want['data'], "#{oracle.name}: #{e['name']} bytes")
-          assert_eq(e['crc'], Zlib.crc32(want['data']), "#{oracle.name}: #{e['name']} crc")
+          assert_eq(Base64.decode64(e["data"]), want["data"], "#{oracle.name}: #{e["name"]} bytes")
+          assert_eq(e["crc"], Zlib.crc32(want["data"]), "#{oracle.name}: #{e["name"]} crc")
         end
       end
     end
@@ -471,14 +477,14 @@ module Fuzz
           zf.entries.each do |entry|
             record = {}
             begin
-              record[:data] = entry.directory? ? ''.b : zf.read(entry).b
+              record[:data] = entry.directory? ? "".b : zf.read(entry).b
             rescue *ACCEPTABLE => e
               record[:error] = e
             end
             out[:entries][entry.name.b] = record
           end
         end
-        path = File.join(@dir, 'ziperu-mut.zip')
+        path = File.join(@dir, "ziperu-mut.zip")
         File.binwrite(path, bytes)
         Ziperu::InputStream.open(path) do |zis|
           zis.read while zis.get_next_entry
@@ -492,9 +498,9 @@ module Fuzz
     # ---- helpers -------------------------------------------------------
 
     def decrypter_for(spec)
-      password = spec['password'] or return nil
+      password = spec["password"] or return nil
 
-      if spec['encryption'] == 'aes'
+      if spec["encryption"] == "aes"
         Ziperu::AESDecrypter.new(password, Ziperu::AESEncryption::STRENGTH_256_BIT)
       else
         Ziperu::TraditionalDecrypter.new(password)
@@ -502,8 +508,8 @@ module Fuzz
     end
 
     def model_from_spec(spec)
-      spec['entries'].to_h do |e|
-        [e['name'].b, { 'data' => e['dir'] ? ''.b : Base64.decode64(e['data']), 'dir' => e['dir'] ? true : false }]
+      spec["entries"].to_h do |e|
+        [e["name"].b, { "data" => e["dir"] ? "".b : Base64.decode64(e["data"]), "dir" => e["dir"] ? true : false }]
       end
     end
 
@@ -531,7 +537,7 @@ module Fuzz
     end
 
     def describe(value)
-      return value.inspect unless value.is_a?(String) && value.bytesize > 80
+      return value.inspect unless value.kind_of?(String) && value.bytesize > 80
 
       "#{value.bytesize} bytes, sha #{Digest::SHA256.hexdigest(value)[0, 12]}"
     end
@@ -543,7 +549,7 @@ module Fuzz
 
     def record_failure(iteration, kind, error)
       @failures << [iteration, kind, error]
-      dir = File.join(OUT, 'failures')
+      dir = File.join(OUT, "failures")
       FileUtils.mkdir_p(dir)
       base = File.join(dir, "seed#{@seed}-iter#{iteration}-#{kind}")
       %w[ziperu-in.zip ziperu-out.zip ziperu-modify.zip ziperu-mut.zip python-out.zip rubyzip-out.zip].each do |f|
@@ -551,40 +557,40 @@ module Fuzz
         FileUtils.cp(src, "#{base}-#{f}") if File.exist?(src)
       end
       File.write("#{base}.json", JSON.pretty_generate((@current || {}).merge(
-        'error' => "#{error.class}: #{error.message}".dup.force_encoding(Encoding::UTF_8).scrub,
-        'backtrace' => error.backtrace&.first(8)
-      )))
+                                                        "error"     => "#{error.class}: #{error.message}".force_encoding(Encoding::UTF_8).scrub,
+                                                        "backtrace" => error.backtrace&.first(8)
+                                                      )))
       warn "FAIL iteration #{iteration} (#{kind}): #{error.class}: #{error.message.lines.first&.chomp}"
       warn "     saved to #{base}.*; rerun with --seed #{@seed} --iterations #{iteration + 1}"
     end
   end
 
   def self.find_python
-    [ENV['PYTHON'], 'python3', 'python'].compact.each do |candidate|
-      out, status = Open3.capture2e(candidate, '-c', 'import zipfile, sys; print(sys.version_info[:2])')
-      return [candidate] if status.success? && out.include?('(3')
+    [ENV.fetch("PYTHON", nil), "python3", "python"].compact.each do |candidate|
+      out, status = Open3.capture2e(candidate, "-c", "import zipfile, sys; print(sys.version_info[:2])")
+      return [candidate] if status.success? && out.include?("(3")
     rescue Errno::ENOENT
       next
     end
-    abort 'python 3 is needed as the oracle (set PYTHON=...)'
+    abort "python 3 is needed as the oracle (set PYTHON=...)"
   end
 
   def self.main(argv)
     options = { seed: Random.new_seed % (2**31), iterations: nil, time: nil, only: nil }
     OptionParser.new do |o|
-      o.on('--seed N', Integer) { |v| options[:seed] = v }
-      o.on('--iterations N', Integer) { |v| options[:iterations] = v }
-      o.on('--time SECONDS', Float) { |v| options[:time] = v }
-      o.on('--only CASE', %w[read write modify mutate]) { |v| options[:only] = v.to_sym }
+      o.on("--seed N", Integer) { |v| options[:seed] = v }
+      o.on("--iterations N", Integer) { |v| options[:iterations] = v }
+      o.on("--time SECONDS", Float) { |v| options[:time] = v }
+      o.on("--only CASE", %w[read write modify mutate]) { |v| options[:only] = v.to_sym }
     end.parse!(argv)
     options[:iterations] ||= 200 unless options[:time]
 
-    rubyzip_lib = ENV['RUBYZIP_LIB'] || File.join(ROOT, 'tmp', 'rubyzip', 'lib')
-    rubyzip_lib = nil unless File.exist?(File.join(rubyzip_lib, 'zip.rb'))
-    puts "seed #{options[:seed]}; oracles: python#{rubyzip_lib ? ', rubyzip' : ''}"
+    rubyzip_lib = ENV["RUBYZIP_LIB"] || File.join(ROOT, "tmp", "rubyzip", "lib")
+    rubyzip_lib = nil unless File.exist?(File.join(rubyzip_lib, "zip.rb"))
+    puts "seed #{options[:seed]}; oracles: python#{", rubyzip" if rubyzip_lib}"
 
     FileUtils.mkdir_p(OUT)
-    Dir.mktmpdir('ziperu-fuzz', OUT) do |dir|
+    Dir.mktmpdir("ziperu-fuzz", OUT) do |dir|
       runner = Runner.new(seed: options[:seed], python: find_python, rubyzip_lib: rubyzip_lib, dir: dir)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       i = 0
@@ -594,16 +600,16 @@ module Fuzz
 
         runner.run_one(i, only: options[:only])
         i += 1
-        $stderr.print '.' if (i % 10).zero?
+        $stderr.print "." if (i % 10).zero?
       end
       $stderr.puts
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-      puts "#{i} iterations in #{elapsed.round(1)}s: #{runner.stats.sort.map { |k, v| "#{k}=#{v}" }.join(' ')}"
+      puts "#{i} iterations in #{elapsed.round(1)}s: #{runner.stats.sort.map { |k, v| "#{k}=#{v}" }.join(" ")}"
       if runner.failures?
-        puts 'FAILED'
+        puts "FAILED"
         exit 1
       end
-      puts 'ok'
+      puts "ok"
     end
   end
 end

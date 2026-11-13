@@ -34,9 +34,7 @@ module Ziperu
       alias getwd pwd
 
       def chdir(directory_name)
-        unless @file.stat(directory_name).directory?
-          raise Errno::EINVAL, "Invalid argument - #{directory_name}"
-        end
+        raise Errno::EINVAL, "Invalid argument - #{directory_name}" unless @file.stat(directory_name).directory?
 
         @mapped_zip.pwd = @file.expand_path(directory_name)
       end
@@ -52,9 +50,7 @@ module Ziperu
       end
 
       def foreach(directory_name)
-        unless @file.stat(directory_name).directory?
-          raise Errno::ENOTDIR, directory_name
-        end
+        raise Errno::ENOTDIR, directory_name unless @file.stat(directory_name).directory?
 
         path = @file.expand_path(directory_name)
         path << '/' unless path.end_with?('/')
@@ -67,9 +63,7 @@ module Ziperu
       end
 
       def delete(entry_name)
-        unless @file.stat(entry_name).directory?
-          raise Errno::EINVAL, "Invalid argument - #{entry_name}"
-        end
+        raise Errno::EINVAL, "Invalid argument - #{entry_name}" unless @file.stat(entry_name).directory?
 
         @mapped_zip.remove(entry_name)
       end

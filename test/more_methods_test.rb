@@ -34,7 +34,10 @@ class MoreMethodsTest < Minitest::Test
         assert_equal @data, zf.read("best.bin")
         assert_empty zf.verify
       end
-      Ziperu::InputStream.open(@path) { |is| is.get_next_entry; assert_equal @data, is.read }
+      Ziperu::InputStream.open(@path) do |is|
+        is.get_next_entry
+        assert_equal @data, is.read
+      end
     end
   end
 

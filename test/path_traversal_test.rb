@@ -66,7 +66,7 @@ class PathTraversalTest < Minitest::Test
   end
 
   def test_leading_dot_dot
-    entries = { "../moo" => /WARNING: skipped extracting '\.\.\/moo'/ }
+    entries = { "../moo" => %r{WARNING: skipped extracting '\.\./moo'} }
     in_tmpdir do
       extract_paths(["jwilk", "relative0.zip"], entries)
       refute File.exist?("../moo")
@@ -75,8 +75,8 @@ class PathTraversalTest < Minitest::Test
 
   def test_non_leading_dot_dot_with_existing_folder
     entries = {
-      "tmp/" => "",
-      "tmp/../../moo" => /WARNING: skipped extracting 'tmp\/\.\.\/\.\.\/moo'/
+      "tmp/"          => "",
+      "tmp/../../moo" => %r{WARNING: skipped extracting 'tmp/\.\./\.\./moo'}
     }
     in_tmpdir do
       extract_paths("relative1.zip", entries)
@@ -86,7 +86,7 @@ class PathTraversalTest < Minitest::Test
   end
 
   def test_non_leading_dot_dot_without_existing_folder
-    entries = { "tmp/../../moo" => /WARNING: skipped extracting 'tmp\/\.\.\/\.\.\/moo'/ }
+    entries = { "tmp/../../moo" => %r{WARNING: skipped extracting 'tmp/\.\./\.\./moo'} }
     in_tmpdir do
       extract_paths(["jwilk", "relative2.zip"], entries)
       refute File.exist?("../moo")
@@ -105,7 +105,7 @@ class PathTraversalTest < Minitest::Test
   def test_directory_symlink
     # Can't create tmp/moo, because the tmp symlink is skipped.
     entries = {
-      "tmp" => /WARNING: skipped symlink '.*\/tmp'/,
+      "tmp"     => %r{WARNING: skipped symlink '.*/tmp'},
       "tmp/moo" => :error
     }
     in_tmpdir do
@@ -116,8 +116,8 @@ class PathTraversalTest < Minitest::Test
 
   def test_two_directory_symlinks_a
     entries = {
-      "cur" => /WARNING: skipped symlink '.*\/cur'/,
-      "par" => /WARNING: skipped symlink '.*\/par'/,
+      "cur"     => %r{WARNING: skipped symlink '.*/cur'},
+      "par"     => %r{WARNING: skipped symlink '.*/par'},
       "par/moo" => :error
     }
     in_tmpdir do
@@ -130,8 +130,8 @@ class PathTraversalTest < Minitest::Test
 
   def test_two_directory_symlinks_b
     entries = {
-      "cur" => /WARNING: skipped symlink '.*\/cur'/,
-      "cur/par" => /WARNING: skipped symlink '.*\/cur\/par'/,
+      "cur"     => %r{WARNING: skipped symlink '.*/cur'},
+      "cur/par" => %r{WARNING: skipped symlink '.*/cur/par'},
       "par/moo" => :error
     }
     in_tmpdir do
@@ -182,7 +182,7 @@ class PathTraversalTest < Minitest::Test
 
   def test_entry_name_with_relative_symlink
     entries = {
-      "path" => /WARNING: skipped symlink '.*\/path'/,
+      "path"          => %r{WARNING: skipped symlink '.*/path'},
       "path/file.txt" => :error
     }
     in_tmpdir do
@@ -204,7 +204,7 @@ class PathTraversalTest < Minitest::Test
       Dir.mkdir(dest_dir)
       Ziperu::File.open(File.join(TEST_FILE_ROOT, "out_evil.zip")) do |zf|
         zf.each do |e|
-          assert_output("", /WARNING: skipped extracting '\.\.\/out_evil\//) do
+          assert_output("", %r{WARNING: skipped extracting '\.\./out_evil/}) do
             e.extract(destination_directory: dest_dir)
           end
         end
