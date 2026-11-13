@@ -18,10 +18,19 @@ where rubyzip leaves most of it to the caller:
   is done on the name a reader would use, so a Unicode Path extra field
   that renames an entry cannot be used to escape either. The native
   extractor applies the same check on every thread.
-- **Symlinks.** Extraction never creates a link unless asked to
+- **Links on disk.** Below the destination, extraction does not write
+  through a link that is already there (a symlink, or a junction on
+  Windows): an entry with one on the way, or at its own path, is skipped
+  with a warning, whatever `on_exists:` says. The destination itself may
+  be a link.
+- **Symlink entries.** Extraction never creates a link unless asked to
   (`symlinks: :create`), and then only when its target resolves inside
-  the destination; links are created after everything else, so no entry
-  is ever written through one.
+  the destination and has no `..` after a name (which a link could
+  redirect); links are created after everything else.
+- **Remote archives.** `RemoteIO` fetches http and https URLs only,
+  sends its `headers:` only to the origin of the URL it was given (not
+  to another host a redirect leads to, unless `forward_headers: true`),
+  and refuses a redirect from https to http.
 - **Lying headers.** No entry inflates past its declared size
   (`Ziperu::EntrySizeError`); a CRC mismatch raises; the sizes and CRC
   come from the central directory, never from a local header or data
@@ -47,6 +56,11 @@ where rubyzip leaves most of it to the caller:
 
 ## What it does not
 
+- **A destination someone else can write to while you extract.** The
+  link check is made just before each path is used, so a local user who
+  swaps a directory for a link in between can still redirect a write.
+  Extract into a directory only you can write to (a fresh
+  `Dir.mktmpdir`, say) and move the result.
 - **ZipCrypto** is written and read because tools still expect it, but it
   is a broken cipher: a few bytes of known plaintext recover the keys.
   Use `AESEncrypter` for anything that matters.

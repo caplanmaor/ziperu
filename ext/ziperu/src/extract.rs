@@ -11,6 +11,14 @@
 //! normalised lexically (as `File.absolute_path` does), and the result must
 //! start with the destination plus a separator. Nothing is created for an
 //! entry that fails it; Ruby prints the same warning it would have.
+//!
+//! Below the destination nothing is followed through a link already on
+//! disk (a symlink, or on Windows a junction): every directory on the way
+//! to an entry, and the entry's own path, must be a real directory or
+//! file, or the entry is skipped with a warning. The destination itself is
+//! taken as given, link or not. This is checked before each path is used,
+//! so it does not hold against someone swapping a directory for a link
+//! while the extraction runs.
 
 use std::collections::HashSet;
 use std::fs::{self, FileTimes, OpenOptions};
@@ -93,6 +101,9 @@ impl From<io::Error> for Failure {
 enum Notice {
     /// The entry resolved outside the destination; nothing was written.
     Unsafe(String),
+    /// A link on disk stands at this path on the way to the entry, or at
+    /// the entry's own path; nothing was written.
+    Link(String),
     /// Without size enforcement, more bytes came out than declared.
     Oversize,
 }
@@ -107,8 +118,8 @@ pub struct Options {
 
 /// Extracts `specs` under `dest` (an absolute path) and returns one
 /// `[index, kind, path]` triple per entry that was skipped as unsafe
-/// (`kind` `:unsafe`) or came out larger than declared (`:oversize`, path
-/// nil). An existing file raises `Ziperu::DestinationExistsError`, a header
+/// (`kind` `:unsafe`), skipped for a link in the way (`:link`, with the
+/// link's path) or came out larger than declared (`:oversize`, path nil). An existing file raises `Ziperu::DestinationExistsError`, a header
 /// that understates the size `Ziperu::EntrySizeError`; either leaves the
 /// entries before it extracted, as the Ruby loop would.
 ///
@@ -182,10 +193,12 @@ pub fn extract_entries(
     notices.sort_by_key(|(index, _)| *index);
     let unsafe_kind = ruby.to_symbol("unsafe");
     let oversize_kind = ruby.to_symbol("oversize");
+    let link_kind = ruby.to_symbol("link");
     let out = ruby.ary_new_capa(notices.len());
     for (index, notice) in notices {
         let triple: (usize, Symbol, Option<String>) = match notice {
             Notice::Unsafe(path) => (index, unsafe_kind, Some(path)),
+            Notice::Link(path) => (index, link_kind, Some(path)),
             Notice::Oversize => (index, oversize_kind, None),
         };
         out.push(triple)?;
@@ -336,9 +349,47 @@ enum OnExists {
     Skip,
 }
 
+/// What stands at a path, looked at without following a link there.
+enum OnDisk {
+    Missing,
+    Directory,
+    /// A symlink, or on Windows a junction or other name-surrogate
+    /// reparse point (what `FileType::is_symlink` counts).
+    Link,
+    /// A file, or anything else that is neither a directory nor a link.
+    Other,
+}
+
+fn on_disk(path: &Path) -> io::Result<OnDisk> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok(OnDisk::Link),
+        Ok(meta) if meta.is_dir() => Ok(OnDisk::Directory),
+        Ok(_) => Ok(OnDisk::Other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(OnDisk::Missing),
+        Err(e) => Err(e),
+    }
+}
+
+/// Opens without following a link at the path itself, where the OS can:
+/// a link put there after `on_disk` looked fails the open instead of
+/// being written through.
+#[cfg(unix)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_NOFOLLOW);
+}
+
+#[cfg(not(unix))]
+fn no_follow(_options: &mut OpenOptions) {}
+
 struct Extractor<'a> {
     archive: ZipArchive<Source>,
     dest: &'a str,
+    /// `dest` as `resolve` has it, with one trailing separator: what every
+    /// entry path starts with.
+    prefix: String,
+    /// `dest` as `resolve` has it.
+    root: String,
     enforce_size: bool,
     on_exists: OnExists,
     /// Directories known to exist, so each parent is created once.
@@ -359,9 +410,17 @@ impl<'a> Extractor<'a> {
         enforce_size: bool,
         on_exists: OnExists,
     ) -> Self {
+        let root = resolve(dest, "");
+        let prefix = if root.ends_with('/') {
+            root.clone()
+        } else {
+            format!("{root}/")
+        };
         Self {
             archive,
             dest,
+            prefix,
+            root,
             enforce_size,
             on_exists,
             made: HashSet::new(),
@@ -388,7 +447,6 @@ impl<'a> Extractor<'a> {
             self.notices.push((spec.index, Notice::Unsafe(shown)));
             return Ok(());
         };
-        let path = PathBuf::from(path);
         if spec.directory {
             self.create_directory(&path, spec)
         } else {
@@ -396,23 +454,94 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    fn create_directory(&mut self, path: &Path, spec: &Spec) -> Result<(), Failure> {
-        if self.made.contains(path) {
+    /// Makes sure every directory between the destination and `path` (not
+    /// `path` itself) is a real directory, creating the missing ones.
+    /// Returns false, having noted why if it is a link, when the entry is
+    /// to be left out.
+    fn prepare_parents(&mut self, path: &str, spec: &Spec) -> Result<bool, Failure> {
+        let Some((parent, _)) = path.rsplit_once('/') else {
+            return Ok(true);
+        };
+        if self.made.contains(Path::new(parent)) {
+            return Ok(true);
+        }
+        // The destination is taken as given, a link or not, and made if
+        // it is not there yet.
+        if !self.made.contains(Path::new(&self.root)) {
+            let root = PathBuf::from(&self.root);
+            fs::create_dir_all(&root).map_err(at(&root))?;
+            self.made.insert(root);
+        }
+        let Some(below) = format!("{parent}/")
+            .strip_prefix(&self.prefix)
+            .map(str::to_string)
+        else {
+            return Ok(true);
+        };
+        let mut walked = self.prefix.clone();
+        for component in below.split('/').filter(|c| !c.is_empty()) {
+            if !walked.ends_with('/') {
+                walked.push('/');
+            }
+            walked.push_str(component);
+            let step = PathBuf::from(&walked);
+            if self.made.contains(&step) {
+                continue;
+            }
+            match on_disk(&step).map_err(at(&step))? {
+                OnDisk::Directory => {}
+                OnDisk::Missing => match fs::create_dir(&step) {
+                    Ok(()) => {}
+                    // Another thread made it meanwhile.
+                    Err(e)
+                        if e.kind() == io::ErrorKind::AlreadyExists
+                            && matches!(on_disk(&step), Ok(OnDisk::Directory)) => {}
+                    Err(e) => return Err(at(&step)(e)),
+                },
+                OnDisk::Link => {
+                    self.notices.push((spec.index, Notice::Link(walked)));
+                    return Ok(false);
+                }
+                // A file where a directory should be: the entry cannot go
+                // there. Skipped under `:skip`, an error otherwise (a
+                // directory entry, when there is one, has already had its
+                // say under `:overwrite`).
+                OnDisk::Other => {
+                    return match self.on_exists {
+                        OnExists::Skip => Ok(false),
+                        _ => Err(Failure::Exists(walked)),
+                    };
+                }
+            }
+            self.made.insert(step);
+        }
+        Ok(true)
+    }
+
+    fn create_directory(&mut self, path: &str, spec: &Spec) -> Result<(), Failure> {
+        let dir = PathBuf::from(path);
+        if self.made.contains(&dir) || !self.prepare_parents(path, spec)? {
             return Ok(());
         }
-        match fs::metadata(path) {
-            Ok(meta) if meta.is_dir() => {
-                self.made.insert(path.to_path_buf());
+        match on_disk(&dir).map_err(at(&dir))? {
+            OnDisk::Directory => {
+                self.made.insert(dir);
                 return Ok(());
             }
-            Ok(_) => match self.on_exists {
-                OnExists::Raise => return Err(Failure::Exists(path_string(path))),
+            OnDisk::Link => {
+                self.notices
+                    .push((spec.index, Notice::Link(path.to_string())));
+                return Ok(());
+            }
+            OnDisk::Other => match self.on_exists {
+                OnExists::Raise => return Err(Failure::Exists(path_string(&dir))),
                 OnExists::Skip => return Ok(()),
-                OnExists::Overwrite => fs::remove_file(path).map_err(at(path))?,
+                OnExists::Overwrite => fs::remove_file(&dir).map_err(at(&dir))?,
             },
-            Err(_) => {}
+            OnDisk::Missing => {}
         }
-        fs::create_dir_all(path).map_err(at(path))?;
+        fs::create_dir(&dir).map_err(at(&dir))?;
+        let path = dir.as_path();
         self.made.insert(path.to_path_buf());
         if spec.mtime.is_some() || spec.mode.is_some() {
             self.stamp
@@ -441,33 +570,30 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    fn create_file(&mut self, path: &Path, spec: &Spec) -> Result<(), Failure> {
-        if let Some(parent) = path.parent() {
-            if !self.made.contains(parent) {
-                // A file where the parent directory should be: the entry
-                // cannot go there. Skipped under `:skip`, an error
-                // otherwise (a directory entry, when there is one, has
-                // already had its say under `:overwrite`).
-                if fs::metadata(parent).is_ok_and(|m| !m.is_dir()) {
-                    return match self.on_exists {
-                        OnExists::Skip => Ok(()),
-                        _ => Err(Failure::Exists(path_string(parent))),
-                    };
-                }
-                fs::create_dir_all(parent).map_err(at(parent))?;
-                self.made.insert(parent.to_path_buf());
-            }
+    fn create_file(&mut self, name: &str, spec: &Spec) -> Result<(), Failure> {
+        if !self.prepare_parents(name, spec)? {
+            return Ok(());
         }
+        let path = Path::new(name);
         let mut options = OpenOptions::new();
         options.write(true);
-        match self.on_exists {
-            OnExists::Raise => options.create_new(true),
-            OnExists::Skip if path.exists() => return Ok(()),
-            OnExists::Skip => options.create_new(true),
+        match (on_disk(path).map_err(at(path))?, self.on_exists) {
+            // Never written through, whatever the policy.
+            (OnDisk::Link, _) => {
+                self.notices
+                    .push((spec.index, Notice::Link(name.to_string())));
+                return Ok(());
+            }
+            (OnDisk::Missing, _) => options.create_new(true),
+            (_, OnExists::Raise) => return Err(Failure::Exists(path_string(path))),
+            (_, OnExists::Skip) => return Ok(()),
             // A directory in the way is not overwritten by a file.
-            OnExists::Overwrite if path.is_dir() => return Err(Failure::Exists(path_string(path))),
-            OnExists::Overwrite => options.create(true).truncate(true),
+            (OnDisk::Directory, OnExists::Overwrite) => {
+                return Err(Failure::Exists(path_string(path)))
+            }
+            (OnDisk::Other, OnExists::Overwrite) => options.create(true).truncate(true),
         };
+        no_follow(&mut options);
         let mut file = match options.open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists || path.exists() => {

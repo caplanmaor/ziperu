@@ -42,6 +42,7 @@ module Ziperu
     # directory record, and for most archives the whole central directory.
     TAIL_SIZE = 64 * 1024
     MAX_REDIRECTS = 5
+    HTTP_SCHEMES = %w[http https].freeze
     DEFAULT_OPEN_TIMEOUT = 10
     DEFAULT_READ_TIMEOUT = 60
 
@@ -52,9 +53,14 @@ module Ziperu
     # `url` (a String or URI) to fetch over HTTP(S) with `headers` sent on
     # every request; or, with no url, `size:` and a block that returns
     # `length` bytes from `offset`.
+    #
+    # Redirects are followed, but `headers` (credentials, typically) go
+    # only to the scheme, host and port of `url`: not to another origin a
+    # redirect leads to, unless `forward_headers: true`. A redirect from
+    # https to http is refused.
     def initialize(url = nil, headers: {}, size: nil, block_size: DEFAULT_BLOCK_SIZE,
                    cache_blocks: DEFAULT_CACHE_BLOCKS, open_timeout: DEFAULT_OPEN_TIMEOUT,
-                   read_timeout: DEFAULT_READ_TIMEOUT, &fetch)
+                   read_timeout: DEFAULT_READ_TIMEOUT, forward_headers: false, &fetch)
       raise ArgumentError, 'give a url or a block, not both' if url && fetch
       raise ArgumentError, 'give a url, or size: and a block' unless url || (fetch && size)
       raise ArgumentError, 'block_size must be positive' unless block_size.positive?
@@ -69,7 +75,13 @@ module Ziperu
       @closed = false
       if url
         @uri = URI(url.to_s)
+        unless HTTP_SCHEMES.include?(@uri.scheme&.downcase) && @uri.host
+          raise ArgumentError, "RemoteIO fetches http and https URLs, not #{url.to_s.inspect}"
+        end
+
         @headers = headers
+        @headers_origin = origin(@uri)
+        @forward_headers = forward_headers
         @open_timeout = open_timeout
         @read_timeout = read_timeout
         @size = discover_size
@@ -247,17 +259,39 @@ module Ziperu
     def request(range, redirects = MAX_REDIRECTS)
       http = connection
       get = Net::HTTP::Get.new(@uri)
-      @headers.each { |k, v| get[k.to_s] = v.to_s }
+      @headers.each { |k, v| get[k.to_s] = v.to_s } if @forward_headers || origin(@uri) == @headers_origin
       get['range'] = range
       get['accept-encoding'] = 'identity'
       response = http.request(get)
       return response unless response.kind_of?(Net::HTTPRedirection)
       raise Error, "too many redirects from #{@uri}" if redirects.zero?
 
-      location = URI.join(@uri.to_s, response['location'].to_s)
-      disconnect if location.host != @uri.host || location.port != @uri.port || location.scheme != @uri.scheme
+      location = redirect_target(response['location'])
+      disconnect if origin(location) != origin(@uri)
       @uri = location
       request(range, redirects - 1)
+    end
+
+    # Where a redirect leads, if it may be followed: http or https only,
+    # and never from https down to http.
+    def redirect_target(header)
+      location = URI.join(@uri.to_s, header.to_s)
+      scheme = location.scheme&.downcase
+      unless HTTP_SCHEMES.include?(scheme) && location.host
+        raise Error, "#{@uri} redirected to #{location}, which is not an http or https URL"
+      end
+      if @uri.scheme.downcase == 'https' && scheme == 'http'
+        raise Error, "#{@uri} redirected from https to #{location}; refusing to drop to plain http"
+      end
+
+      location
+    rescue URI::Error => e
+      raise Error, "#{@uri} redirected to an unusable location #{header.inspect}: #{e.message}"
+    end
+
+    # Scheme, host and port: where headers given for one URL may go.
+    def origin(uri)
+      [uri.scheme.downcase, uri.host.downcase, uri.port]
     end
 
     # Keeps `body`, the last bytes of a file of `total` bytes. Returns `total`.

@@ -34,6 +34,11 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 crc32fast = "1"
 getrandom = { version = "0.4", features = ["std"] }
 
+# O_NOFOLLOW for extraction (already in the tree through the zip crate's
+# dependencies).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
 

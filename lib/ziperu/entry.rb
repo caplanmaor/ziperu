@@ -36,6 +36,11 @@ module Ziperu
     PERMISSION_BITS = 0o7777      # :nodoc:
     SAFE_PERMISSION_BITS = 0o1777 # :nodoc:
 
+    # How `create_file` opens its file: as 'wb', but where the OS can, not
+    # through a link put at the path after it was checked.
+    WRITE_NO_FOLLOW = ::File::WRONLY | ::File::CREAT | ::File::TRUNC |
+                      (defined?(::File::NOFOLLOW) ? ::File::NOFOLLOW : 0) # :nodoc:
+
     # Compression level flags (bits 1 and 2 of the gp flags).
     COMPRESSION_LEVEL_SUPERFAST_GPFLAG = 0b110 # :nodoc:
     COMPRESSION_LEVEL_FAST_GPFLAG = 0b100      # :nodoc:
@@ -463,6 +468,13 @@ module Ziperu
     # NB: The caller is responsible for making sure `destination_directory` is
     # safe, if it is passed.
     #
+    # Below `destination_directory` nothing is written through a link
+    # already on disk (a symlink, or a junction on Windows): an entry with
+    # one on the way, or at its own path, is skipped with a warning. The
+    # destination itself may be a link. The check is made just before the
+    # path is used, so it does not hold against a local user who swaps a
+    # directory for a link while the extraction runs.
+    #
     # `create_parent_directories`, if true, creates any missing intermediate
     # directories for a file entry before writing it. This defaults to
     # false: a missing intermediate directory usually means an earlier
@@ -485,6 +497,13 @@ module Ziperu
 
       unless extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
         warn "WARNING: skipped extracting '#{@name}' to '#{extract_path}' as unsafe."
+        return self
+      end
+
+      # A symlink entry replaces a link at its own path; nothing else is
+      # written through one.
+      if (link = link_on_the_way(dest_dir, extract_path, leaf: !symlink?))
+        warn "WARNING: skipped extracting '#{@name}' through the link '#{link}'."
         return self
       end
 
@@ -876,7 +895,7 @@ module Ziperu
         raise DestinationExistsError, dest_path unless decision
       end
 
-      ::File.open(dest_path, 'wb') do |os|
+      ::File.open(dest_path, WRITE_NO_FOLLOW, binmode: true) do |os|
         if pending_data?
           # Added or replaced from disk or an IO and not yet committed:
           # the data is that source's, not the archive's.
@@ -928,6 +947,15 @@ module Ziperu
         warn "WARNING: skipped symlink '#{@name}' to '#{target}' as it points outside the destination."
         return
       end
+      # The check above is lexical. A `..` after a name is not: through a
+      # link, `b/..` is the parent of wherever `b` points, so `c -> b/..`
+      # with `b -> .` is really the destination's parent. Leading `..`s
+      # only climb real directories (the ones on the way were checked).
+      parts = target.split(%r{[/\\]}).reject { |part| part.empty? || part == '.' }
+      if parts.drop_while { |part| part == '..' }.include?('..')
+        warn "WARNING: skipped symlink '#{@name}' to '#{target}' as a '..' after a name could lead through a link."
+        return
+      end
 
       if ::File.symlink?(dest_path) || ::File.exist?(dest_path)
         decision = yield(self, dest_path)
@@ -939,6 +967,25 @@ module Ziperu
       ::File.symlink(target, dest_path)
     rescue NotImplementedError, Errno::EACCES, Errno::EPERM => e
       warn "WARNING: could not create symlink '#{dest_path}': #{e.message}"
+    end
+
+    # The first link already on disk below `dest_dir` on the way to `path`,
+    # and at `path` itself when `leaf`, or nil. A junction counts (Ruby's
+    # lstat reports one as a link). The walk stops at the first component
+    # that is missing or not a directory: the callers deal with those.
+    def link_on_the_way(dest_dir, path, leaf: true)
+      parts = path.delete_prefix(dest_dir).split('/').reject(&:empty?)
+      parts.pop unless leaf
+      walked = dest_dir
+      parts.each do |part|
+        walked = ::File.join(walked, part)
+        stat = ::File.lstat(walked)
+        return walked if stat.symlink?
+        return nil unless stat.directory?
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        return nil
+      end
+      nil
     end
 
     def set_unix_attributes_on_path(dest_path) # :nodoc:

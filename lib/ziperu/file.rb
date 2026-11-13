@@ -801,6 +801,8 @@ module Ziperu
           case kind
           when :unsafe
             warn "WARNING: skipped extracting '#{entry.name}' to '#{path}' as unsafe."
+          when :link
+            warn "WARNING: skipped extracting '#{entry.name}' through the link '#{path}'."
           when :oversize
             warn "WARNING: #{EntrySizeError.new(entry).message}"
           end

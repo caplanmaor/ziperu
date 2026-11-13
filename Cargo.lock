@@ -884,6 +884,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "getrandom",
+ "libc",
  "magnus",
  "rayon",
  "rb-sys",

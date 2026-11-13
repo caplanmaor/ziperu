@@ -3,15 +3,18 @@
 require "socket"
 
 # A one-file HTTP server that answers Range requests (and, to check
-# redirects, sends /moved to /a.zip). Counts what it sends.
+# redirects, sends /moved to /a.zip and /away to `redirect_to`). Counts
+# what it sends and keeps the headers of every request.
 class RangeServer
-  attr_reader :port, :bytes_sent, :hits
+  attr_reader :port, :bytes_sent, :hits, :seen_headers
+  attr_accessor :redirect_to
 
   def initialize(body, ranges: true)
     @body = body
     @ranges = ranges
     @bytes_sent = 0
     @hits = 0
+    @seen_headers = Queue.new
     @server = TCPServer.new("127.0.0.1", 0)
     @port = @server.addr[1]
     @thread = Thread.new { loop { serve(@server.accept) } }
@@ -36,9 +39,10 @@ class RangeServer
         headers[key.downcase] = value.strip
       end
       @hits += 1
+      @seen_headers << headers
       path = request_line.split[1]
-      if path == "/moved"
-        respond(client, "302 Found", { "location" => "/a.zip" }, "")
+      if ["/moved", "/away"].include?(path)
+        respond(client, "302 Found", { "location" => path == "/away" ? @redirect_to : "/a.zip" }, "")
         next
       end
       range = headers["range"]

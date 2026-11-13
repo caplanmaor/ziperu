@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+Security:
+
+- Extraction wrote through a link already on disk below the
+  destination: with a junction `dest/linked` pointing elsewhere (no
+  privilege needed on Windows) or a symlink, the entry `linked/x` was
+  written outside the destination, and with `on_exists: :overwrite` a
+  file symlink at an entry's path had its target overwritten. Both
+  `extract_all` (native and Ruby paths) and `Entry#extract` now skip,
+  with a warning, an entry whose path has a link on the way or is one.
+  The destination itself may still be a link.
+- `symlinks: :create` accepted a chain of links that each looked inside
+  the destination (`b -> .`, then `c -> b/..`, which is really the
+  destination's parent). A link target with `..` after a name is now
+  refused; leading `..`s are still allowed.
+- `RemoteIO` sent its `headers:` (credentials, typically) to wherever a
+  redirect led, and followed a redirect from https to http. Headers now
+  go only to the origin of the URL given, unless `forward_headers: true`;
+  an https-to-http redirect raises, and only http and https URLs are
+  accepted.
+
 Faster (Windows, against 0.2.3):
 
 - Opening an archive hands each entry's facts from the native core as

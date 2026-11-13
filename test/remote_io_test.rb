@@ -61,6 +61,63 @@ class RemoteIOTest < Minitest::Test
     assert_equal @zip.byteslice(100, 1000), io.read(1000)
   end
 
+  SECRET = { "Authorization" => "Bearer SECRET" }.freeze
+
+  def headers_seen_by(server)
+    seen = []
+    seen << server.seen_headers.pop until server.seen_headers.empty?
+    seen
+  end
+
+  def test_headers_stay_on_the_origin_they_were_given_for
+    other = RangeServer.new(@zip)
+    @server.redirect_to = other.url
+    io = Ziperu::RemoteIO.new(@server.url("/away"), headers: SECRET)
+    assert_equal @zip.bytesize, io.size
+    assert_equal @zip.byteslice(0, 10), io.read(10)
+    assert_equal(["Bearer SECRET"], headers_seen_by(@server).map { |h| h["authorization"] })
+    seen = headers_seen_by(other)
+    refute_empty seen
+    assert seen.none? { |h| h.key?("authorization") }, "no credentials to the other origin"
+  ensure
+    other&.stop
+  end
+
+  def test_headers_follow_a_redirect_on_the_same_origin
+    Ziperu::RemoteIO.new(@server.url("/moved"), headers: SECRET)
+    assert_equal(["Bearer SECRET"] * 2, headers_seen_by(@server).map { |h| h["authorization"] })
+  end
+
+  def test_forward_headers_sends_them_to_another_origin
+    other = RangeServer.new(@zip)
+    @server.redirect_to = other.url
+    Ziperu::RemoteIO.new(@server.url("/away"), headers: SECRET, forward_headers: true)
+    assert_equal(["Bearer SECRET"], headers_seen_by(other).map { |h| h["authorization"] })
+  ensure
+    other&.stop
+  end
+
+  def test_redirects_to_other_schemes_are_refused
+    @server.redirect_to = "file:///etc/passwd"
+    error = assert_raises(Ziperu::RemoteIO::Error) { Ziperu::RemoteIO.new(@server.url("/away")) }
+    assert_match(/not an http or https URL/, error.message)
+  end
+
+  def test_a_redirect_from_https_to_http_is_refused
+    # No TLS server here: the check is on the URL alone.
+    io = Ziperu::RemoteIO.new(size: 1) { "x" }
+    io.instance_variable_set(:@uri, URI("https://example.com/a.zip"))
+    error = assert_raises(Ziperu::RemoteIO::Error) { io.send(:redirect_target, "http://example.com/a.zip") }
+    assert_match(/refusing to drop to plain http/, error.message)
+    assert_equal URI("https://cdn.example.com/a.zip"), io.send(:redirect_target, "https://cdn.example.com/a.zip")
+  end
+
+  def test_only_http_and_https_urls
+    ["file:///etc/passwd", "ftp://example.com/a.zip", "example.com/a.zip"].each do |url|
+      assert_raises(ArgumentError, url) { Ziperu::RemoteIO.new(url) }
+    end
+  end
+
   def test_io_behaviour
     io = Ziperu::RemoteIO.new(@server.url, block_size: 1000)
     assert_equal 0, io.pos
