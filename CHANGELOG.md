@@ -95,6 +95,11 @@ Fixed:
   fetched raised `NoMethodError` once the cache was full.
 - `Zip::Deflater` and `Zip::PassThruCompressor`, kept for code that names
   them, raised `NoMethodError` on the first write.
+- A `Timeout` (or `Thread#raise`, or Ctrl-C) could be lost for good. When
+  it was delivered during the native core's own check for a pending
+  exception, that check dropped it. A `Timeout.timeout` around a loop of
+  reads then never fired, and the loop ran forever. The exception is now
+  raised. Seen as a CI test that hung about one run in five.
 
 Changed:
 
@@ -124,6 +129,16 @@ Internal:
 - The regression tests that were filed by release (0.2.1, 0.2.2, the code
   review, the quality pass) are regrouped by behaviour: failure
   recovery, IO semantics, names and metadata, archive options.
+- The nightly CI run of the whole suite under GC stress overran GitHub's
+  six hours every night. GC stress is now on only from each test's setup
+  to its teardown, not while Bundler, minitest and the gem load. The run
+  is split into four parallel jobs, and the seven scale tests, which take
+  more than a quarter of an hour each under stress, are left out. Every
+  push still runs the native-boundary tests under stress.
+- The test that a `Timeout` interrupts native work no longer assumes a
+  768 MiB read takes over 0.1 s, which failed on a fast Windows runner.
+  It times the work warm, repeats it under a fraction of that, and checks
+  that the interrupt takes effect within one call.
 
 ## 0.2.3 (2026-11-11)
 

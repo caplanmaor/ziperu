@@ -56,10 +56,11 @@ jobs:
 
   # Missing `mark` calls on wrapped objects show up with a GC on every
   # allocation, which is too slow for the whole suite on every platform:
-  # the native-boundary tests, once.
+  # the native-boundary tests, once per push.
   gc-stress:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
@@ -68,9 +69,34 @@ jobs:
           bundler-cache: true
           cargo-cache: true
       - run: bundle exec rake compile
-      - run: bundle exec rake ${{ github.event_name == 'schedule' && 'test' || 'test:gc_stress' }}
+      - run: bundle exec rake test:gc_stress
         env:
           GC_STRESS: "true"
+
+  # Nightly, the rest of the suite under GC stress, in four shards (the
+  # whole suite in one job ran past GitHub's six hours). The scale tests
+  # are left out; see GC_STRESS_TOO_SLOW in the Rakefile.
+  gc-stress-all:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: gc-stress-all (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          cargo-cache: true
+      - run: bundle exec rake compile
+      - run: bundle exec rake test:gc_stress_all
+        env:
+          GC_STRESS: "true"
+          SHARD: ${{ matrix.shard }}/4
 
   # rubyzip's own suite against this gem; fails when fewer tests pass
   # than the committed COMPAT.md records.

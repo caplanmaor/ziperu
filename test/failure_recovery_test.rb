@@ -104,16 +104,35 @@ class FailureRecoveryTest < Minitest::Test
       z.write("small")
     end
     Ziperu::File.open(@path) do |zf|
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      assert_raises(Timeout::Error) { Timeout.timeout(0.1) { zf.read("zeros.bin") } }
-      assert_raises(Timeout::Error) do
-        Timeout.timeout(0.1) { zf.get_input_stream("zeros.bin", &:read) }
-      end
-      assert_raises(Timeout::Error) { Timeout.timeout(0.1) { zf.extract_all(File.join(@dir, "out")) } }
-      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-      assert_operator elapsed, :<, 3, "each call stops within a chunk of the interrupt"
+      assert_interrupted("read") { zf.read("zeros.bin") }
+      assert_interrupted("stream") { zf.get_input_stream("zeros.bin", &:read) }
+      outs = 0
+      assert_interrupted("extract_all") { zf.extract_all(File.join(@dir, "out#{outs += 1}")) }
       assert_equal "small", zf.read("small.txt"), "nothing is left locked"
     end
+  end
+
+  # Checks that Timeout stops `work` part-way through one call, not only
+  # between calls. `work` is timed warm (the fastest of three runs: the
+  # first pays for fresh memory), then repeated under a timeout of a fifth
+  # of that, so the timeout always fires however fast the machine is; it
+  # must take effect well within one more call. A fixed timeout did not
+  # do: on a fast runner the work finished before it fired.
+  def assert_interrupted(label, &work)
+    skip "timings mean nothing with a GC per allocation" if GC.stress
+    clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    once = Array.new(3) do
+      started = clock.call
+      work.call
+      clock.call - started
+    end.min
+    skip "#{label} took #{once}s, too quick to interrupt measurably" if once < 0.02
+
+    limit = once / 5
+    started = clock.call
+    assert_raises(Timeout::Error, label) { Timeout.timeout(limit) { loop(&work) } }
+    late = clock.call - started - limit
+    assert_operator late, :<, [once / 2, 3].min, "#{label} stops within a chunk of the interrupt"
   end
 
   def test_an_interrupted_read_loses_nothing

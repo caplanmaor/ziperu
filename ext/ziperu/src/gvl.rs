@@ -207,14 +207,28 @@ pub fn without_gvl<F: FnOnce() -> R, R>(f: F) -> R {
 
 /// Whether an exception is queued for this thread, waiting for its next
 /// interrupt check: `Thread#pending_interrupt?`, which leaves it queued.
+///
+/// Calling a method is itself an interrupt check, so the exception can be
+/// raised by this very call. It is then no longer queued anywhere: it is
+/// kept for `errors::interrupted` to raise, and this says it is pending.
+/// Dropping it, as this once did, lost the exception for good: a
+/// `Timeout` that fired at that moment never fired again, and the work it
+/// guarded ran on.
 fn exception_pending() -> bool {
     use magnus::prelude::*;
     let Ok(ruby) = magnus::Ruby::get() else {
         return false;
     };
-    ruby.thread_current()
+    match ruby
+        .thread_current()
         .funcall::<_, _, bool>("pending_interrupt?", ())
-        .unwrap_or(false)
+    {
+        Ok(pending) => pending,
+        Err(raised) => {
+            RAISED.with(|r| *r.borrow_mut() = Some(raised));
+            true
+        }
+    }
 }
 
 /// Lets Ruby handle the interrupts it has pending for this thread, none of

@@ -5,8 +5,24 @@ require "ziperu"
 require "minitest/autorun"
 
 # CI runs the suite once more under GC stress to catch unmarked Ruby values
-# held from Rust.
-GC.stress = true if ENV["GC_STRESS"] == "true"
+# held from Rust. Stress is on from each test's setup to its teardown only:
+# with it on from the start, loading Bundler, minitest and the gem a GC per
+# allocation cost most of a minute per file, which made the nightly run of
+# the whole suite overrun GitHub's six hours.
+if ENV["GC_STRESS"] == "true"
+  module GCStressPerTest
+    def before_setup
+      super
+      GC.stress = true
+    end
+
+    def after_teardown
+      GC.stress = false
+      super
+    end
+  end
+  Minitest::Test.prepend(GCStressPerTest)
+end
 
 module TestHelper
   DATA_DIR = File.expand_path("data", __dir__)
