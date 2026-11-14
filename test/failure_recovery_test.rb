@@ -152,6 +152,10 @@ class FailureRecoveryTest < Minitest::Test
     started = clock.call
     assert_raises(Timeout::Error, label) { Timeout.timeout(limit) { loop(&work) } }
     late = clock.call - started - limit
+    # Valgrind runs one thread at a time, and the thread that raises the
+    # timeout can wait a whole read for its turn. The interrupted paths
+    # have been run for it to check; how promptly is not its business.
+    return if ENV["RUBY_MEMCHECK_RUNNING"]
     return assert(cut_short.call, "#{label} is stopped part-way") if cut_short
 
     assert_operator late, :<, [once / 2, 3].min, "#{label} stops within a chunk of the interrupt"

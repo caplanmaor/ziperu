@@ -146,7 +146,10 @@ Internal:
   It times the work warm and repeats it under a fraction of that. For a
   stream and for `extract_all` it then checks what was left behind (how
   far the reader got, no finished file), not the clock: tidying up after
-  an interrupt takes time that varies with the machine.
+  an interrupt takes time that varies with the machine. Under valgrind
+  it runs the interrupted paths without judging how promptly they stop:
+  valgrind runs one thread at a time, and the one raising the timeout can
+  wait a whole read for its turn.
 
 ## 0.2.3 (2026-11-11)
 
