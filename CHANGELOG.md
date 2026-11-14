@@ -100,6 +100,12 @@ Fixed:
   exception, that check dropped it. A `Timeout.timeout` around a loop of
   reads then never fired, and the loop ran forever. The exception is now
   raised. Seen as a CI test that hung about one run in five.
+- A `Timeout` on a stream's read of a whole large entry
+  (`get_input_stream(name, &:read)`) took effect late. The interrupted
+  read first copied everything it had read so far, to keep it for the
+  next read: for a 768 MiB entry, longer than reading the entry on macOS.
+  It now keeps the String it was filling and copies only if another read
+  follows.
 
 Changed:
 
@@ -137,8 +143,10 @@ Internal:
   push still runs the native-boundary tests under stress.
 - The test that a `Timeout` interrupts native work no longer assumes a
   768 MiB read takes over 0.1 s, which failed on a fast Windows runner.
-  It times the work warm, repeats it under a fraction of that, and checks
-  that the interrupt takes effect within one call.
+  It times the work warm and repeats it under a fraction of that. For a
+  stream and for `extract_all` it then checks what was left behind (how
+  far the reader got, no finished file), not the clock: tidying up after
+  an interrupt takes time that varies with the machine.
 
 ## 0.2.3 (2026-11-11)
 

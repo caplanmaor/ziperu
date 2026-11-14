@@ -105,9 +105,23 @@ class FailureRecoveryTest < Minitest::Test
     end
     Ziperu::File.open(@path) do |zf|
       assert_interrupted("read") { zf.read("zeros.bin") }
-      assert_interrupted("stream") { zf.get_input_stream("zeros.bin", &:read) }
+      # How far the native reader says it got: all the way, had the read
+      # run to its end before the timeout was raised.
+      reached = nil
+      size = zf.get_entry("zeros.bin").size
+      assert_interrupted("stream", cut_short: -> { reached < size }) do
+        zf.get_input_stream("zeros.bin") do |is|
+          is.read
+        ensure
+          reached = is.instance_variable_get(:@reader).pos
+        end
+      end
+      # An extraction that is stopped takes its unfinished file away.
       outs = 0
-      assert_interrupted("extract_all") { zf.extract_all(File.join(@dir, "out#{outs += 1}")) }
+      unfinished = -> { !File.exist?(File.join(@dir, "out#{outs}", "zeros.bin")) }
+      assert_interrupted("extract_all", cut_short: unfinished) do
+        zf.extract_all(File.join(@dir, "out#{outs += 1}"))
+      end
       assert_equal "small", zf.read("small.txt"), "nothing is left locked"
     end
   end
@@ -115,10 +129,16 @@ class FailureRecoveryTest < Minitest::Test
   # Checks that Timeout stops `work` part-way through one call, not only
   # between calls. `work` is timed warm (the fastest of three runs: the
   # first pays for fresh memory), then repeated under a timeout of a fifth
-  # of that, so the timeout always fires however fast the machine is; it
-  # must take effect well within one more call. A fixed timeout did not
-  # do: on a fast runner the work finished before it fired.
-  def assert_interrupted(label, &work)
+  # of that, so the timeout always fires however fast the machine is. A
+  # fixed timeout did not do: on a fast runner the work finished before
+  # it fired.
+  #
+  # `cut_short`, where the work leaves evidence of having been stopped
+  # part-way, is the proof. Without it the clock is: the timeout must take
+  # effect well within one more call. The clock is the weaker proof, since
+  # tidying up after an interrupt (closing and deleting a large unfinished
+  # file, say) takes time of its own that varies with the machine.
+  def assert_interrupted(label, cut_short: nil, &work)
     skip "timings mean nothing with a GC per allocation" if GC.stress
     clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
     once = Array.new(3) do
@@ -132,6 +152,8 @@ class FailureRecoveryTest < Minitest::Test
     started = clock.call
     assert_raises(Timeout::Error, label) { Timeout.timeout(limit) { loop(&work) } }
     late = clock.call - started - limit
+    return assert(cut_short.call, "#{label} is stopped part-way") if cut_short
+
     assert_operator late, :<, [once / 2, 3].min, "#{label} stops within a chunk of the interrupt"
   end
 
@@ -173,6 +195,39 @@ class FailureRecoveryTest < Minitest::Test
       poker.join
       reader.join
       assert_equal data.bytesize, delivered, "the reader reached the end having handed out every byte"
+    end
+  end
+
+  # A read of a whole entry goes straight into the String it returns. One
+  # that is interrupted keeps that String, and the next read starts with it.
+  def test_an_interrupted_read_of_a_whole_entry_loses_nothing
+    data = Array.new(128) { |i| [i].pack("N") * (1 << 18) }.join
+    Ziperu::OutputStream.open(@path) do |zos|
+      zos.put_next_entry("big.bin")
+      zos << data
+    end
+    Ziperu::File.open(@path) do |zf|
+      zf.get_input_stream("big.bin") do |is|
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        is.read
+        once = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        is.rewind
+        begin
+          Timeout.timeout(once / 5) { is.read }
+          skip "the read finished before the timeout fired"
+        rescue Timeout::Error
+          nil
+        end
+        # The timeout can also land in Ruby code once the native read has
+        # returned everything; the String is then the caller's loss.
+        if is.instance_variable_get(:@reader).pos == data.bytesize
+          skip "the timeout fired after the native read had finished"
+        end
+        rest = is.read
+        assert_equal data.bytesize, rest.bytesize
+        assert rest == data, "what was read before the interrupt comes first, then the rest"
+        assert_predicate is, :eof?
+      end
     end
   end
 

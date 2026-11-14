@@ -8,7 +8,7 @@
 //! the data, which is what rubyzip does when `Ziperu.validate_entry_sizes` is
 //! off.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::io::{self, Read, Seek, SeekFrom};
 
 use magnus::{
@@ -246,12 +246,21 @@ pub struct EntryReader {
     inner: RefCell<Inner>,
     /// The Ruby IO behind a `Source::Ruby`, kept alive by `mark`.
     io: Option<Opaque<Value>>,
+    /// The String an interrupted `read_direct` was filling, kept alive by
+    /// `mark`. Its bytes become `Inner::pending` only if another read
+    /// comes (`settle`): copying them at the interrupt held up a
+    /// `Timeout` by the time it takes to copy most of a large entry.
+    /// Set and taken with the GVL held only.
+    partial: Cell<Option<Opaque<RString>>>,
 }
 
 impl DataTypeFunctions for EntryReader {
     fn mark(&self, marker: &Marker) {
         if let Some(io) = self.io {
             marker.mark(io);
+        }
+        if let Some(partial) = self.partial.get() {
+            marker.mark(partial);
         }
     }
 }
@@ -317,6 +326,7 @@ impl EntryReader {
         let pos = pos.min(size);
         inner.raw = Some((data_start + pos, data_start + size));
         inner.consumed = pos;
+        rb_self.partial.set(None);
         inner.pending.clear();
         inner.failed = None;
         inner.finished = pos >= size;
@@ -405,7 +415,18 @@ impl EntryReader {
                 direct,
             }),
             io,
+            partial: Cell::new(None),
         })
+    }
+
+    /// Moves what an interrupted `read_direct` had read into `pending`,
+    /// for the read now starting to serve first.
+    fn settle(&self, ruby: &Ruby, inner: &mut Inner) {
+        if let Some(partial) = self.partial.take() {
+            let partial = ruby.get_inner(partial);
+            // SAFETY: copied out at once, with the GVL held.
+            inner.pending = unsafe { partial.as_slice() }.to_vec();
+        }
     }
 
     fn inner(&self, ruby: &Ruby) -> Result<RefMut<'_, Inner>, Error> {
@@ -433,6 +454,7 @@ impl EntryReader {
         let mut inner = rb_self.inner(ruby)?;
         inner.entry = None;
         inner.finished = true;
+        rb_self.partial.set(None);
         Ok(())
     }
 
@@ -447,6 +469,7 @@ impl EntryReader {
         if let Some(reason) = &inner.failed {
             return Err(failed_error(ruby, reason));
         }
+        rb_self.settle(ruby, &mut inner);
         if inner.finished && inner.pending.is_empty() {
             return Ok(None);
         }
@@ -479,7 +502,7 @@ impl EntryReader {
             return Ok(Some(ruby.str_from_slice(&buf)));
         }
         if buf.is_empty() && probe && inner.direct && want >= crate::rb::DIRECT_READ_MIN {
-            return Self::read_direct(ruby, &mut inner, want as usize);
+            return Self::read_direct(ruby, rb_self, &mut inner, want as usize);
         }
         let Inner {
             entry, finished, ..
@@ -537,9 +560,14 @@ impl EntryReader {
     /// The rest of the entry, `want` bytes to its declared size, read
     /// straight into the String handed back (see `rb::fill_new_string`),
     /// with the same outcomes as the chunked way: an interrupt leaves what
-    /// was read pending for the next read, any other error poisons the
-    /// reader, and data past the declared size is a size-limit error.
-    fn read_direct(ruby: &Ruby, inner: &mut Inner, want: usize) -> Result<Option<RString>, Error> {
+    /// was read for the next read (`partial`), any other error poisons
+    /// the reader, and data past the declared size is a size-limit error.
+    fn read_direct(
+        ruby: &Ruby,
+        rb_self: &Self,
+        inner: &mut Inner,
+        want: usize,
+    ) -> Result<Option<RString>, Error> {
         let needs_gvl = inner.needs_gvl;
         if inner.finished {
             return Ok(None);
@@ -570,8 +598,7 @@ impl EntryReader {
             }
             Err(e) => {
                 if crate::gvl::is_cancelled(&e) {
-                    // SAFETY: copied out at once, with the GVL held.
-                    inner.pending = unsafe { out.as_slice() }.to_vec();
+                    rb_self.partial.set(Some(out.into()));
                 } else {
                     inner.failed = Some(e.to_string());
                 }
@@ -601,6 +628,7 @@ impl EntryReader {
         }
         *consumed = 0;
         *finished = size.is_some() && info.is_empty();
+        rb_self.partial.set(None);
         inner.pending.clear();
         inner.failed = None;
         inner.raw = None;
