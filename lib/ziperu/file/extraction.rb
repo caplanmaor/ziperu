@@ -44,6 +44,8 @@ module Ziperu
     # itself (`unzip -j`); `sanitize: :windows` rewrites names that Windows
     # refuses (`<>:"|?*`, control characters, a trailing dot or space,
     # `CON`, `NUL` and the like) so the archive extracts there at all.
+    EXTRACT_ALL_OPTIONS = %i[symlinks progress threads on_exists exclude junk_paths sanitize].freeze # :nodoc:
+
     def extract_all(destination_directory = '.', symlinks: :skip, progress: nil, threads: 1,
                     on_exists: nil, exclude: nil, junk_paths: false, sanitize: nil, &block)
       targets = ExtractionPlan.new(@cdir.writable_entries, exclude: exclude, junk_paths: junk_paths,
@@ -262,6 +264,9 @@ module Ziperu
       return false unless entry.instance_of?(::Ziperu::Entry) && entry.index && entry.backed_by?(native)
       # An encrypted entry goes through the Ruby path, which has the password.
       return false if entry.encrypted?
+      # So does one in a method that cannot be read, for the error rubyzip
+      # raises (CompressionMethodError).
+      return false unless READABLE_COMPRESSION_METHODS.include?(entry.compression_method)
       return false unless entry.file? || entry.directory?
 
       IOExtras.native_text?(entry.name)

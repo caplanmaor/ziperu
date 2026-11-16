@@ -52,6 +52,11 @@ module Ziperu
           stored&.native(offset)
         end
 
+        # The password its owner was given for the archive, or nil.
+        def password
+          nil
+        end
+
         # The record's local-header extra fields, as stored.
         def local_extra(offset)
           stored.local_extra(offset)
@@ -90,11 +95,14 @@ module Ziperu
           self
         end
 
+        def password
+          @owner.password if @owner.respond_to?(:password)
+        end
+
         # The native archive, reopened if its owner released it on close:
         # rubyzip lets entries be read after `close`.
         def native(offset)
-          if @native.closed? && @owner.respond_to?(:native_archive)
-            reopened = @owner.native_archive
+          if @native.closed? && (reopened = (@owner.native_archive if @owner.respond_to?(:native_archive)))
             unless still_at_place?(reopened, offset)
               where = @index ? "at index #{@index} of" : 'in'
               raise EntryMovedError, "entry '#{@raw_name}' is no longer #{where} #{@owner.name}"
@@ -134,20 +142,26 @@ module Ziperu
       end
 
       # Stands in for a Ziperu::File as the owner of the entries that
-      # `File.foreach` yields from a path, so they too can be read once the
-      # walk is over (`foreach(path).find { ... }`, or entries collected in
-      # the block). One is shared by all the entries of a walk, and so is
-      # the archive it reopens.
+      # `File.foreach` yields: it has the password given for the archive,
+      # and for an archive at a path it reopens it, so the entries can be
+      # read once the walk is over (`foreach(path).find { ... }`, or
+      # entries collected in the block). One is shared by all the entries
+      # of a walk, and so is the archive it reopens.
       class Reopener
-        attr_reader :name
+        attr_reader :name, :password
 
-        def initialize(name, settings)
+        # `name` is the archive's path, or nil for one read from an IO,
+        # which cannot be opened again.
+        def initialize(name, settings, password = nil)
           @name = name
           @settings = settings
+          @password = password
           @native = nil
         end
 
         def native_archive
+          return if @name.nil?
+
           @native = InputStream.open_archive(@name, @settings) if @native.nil? || @native.closed?
           @native
         end

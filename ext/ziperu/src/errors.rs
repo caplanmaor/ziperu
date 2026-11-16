@@ -95,6 +95,17 @@ pub fn zip_error(ruby: &Ruby, err: ZipError) -> Error {
 fn invalid_archive_message(msg: &str) -> String {
     if msg.contains("EOCD") {
         "Zip end of central directory signature not found".to_string()
+    } else if let Some(block) = msg.strip_prefix("Unexpected end of ") {
+        // The crate names the Rust type it was reading.
+        let what = match block.rsplit("::").next().unwrap_or(block) {
+            "Zip32CDEBlock" => "the end of central directory record",
+            "Zip64CDEBlock" => "the zip64 end of central directory record",
+            "Zip64CDELocatorBlock" => "the zip64 end of central directory locator",
+            "ZipCentralEntryBlock" => "a central directory entry",
+            "ZipLocalEntryBlock" => "a local file header",
+            _ => "a record",
+        };
+        format!("invalid Zip archive: {what} is cut short")
     } else {
         // Some of the crate's messages carry a placeholder it never fills.
         msg.replace(" of {properties_size}", "")
@@ -252,5 +263,31 @@ fn decompression_error(ruby: &Ruby, msg: &str) -> Error {
     match ruby.get_inner(&DECOMPRESSION_ERROR).new_instance((cause,)) {
         Ok(exc) => Error::from(exc),
         Err(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_archive_message;
+
+    #[test]
+    fn no_rust_type_names_in_messages() {
+        for block in [
+            "Zip32CDEBlock",
+            "Zip64CDEBlock",
+            "Zip64CDELocatorBlock",
+            "ZipCentralEntryBlock",
+            "ZipLocalEntryBlock",
+            "SomethingNew",
+        ] {
+            let said =
+                invalid_archive_message(&format!("Unexpected end of zip::format::blocks::{block}"));
+            assert!(said.ends_with("is cut short"), "{said}");
+            assert!(!said.contains("::") && !said.contains("Block"), "{said}");
+        }
+        assert_eq!(
+            invalid_archive_message("Unexpected end of zip::format::blocks::Zip32CDEBlock"),
+            "invalid Zip archive: the end of central directory record is cut short"
+        );
     }
 }

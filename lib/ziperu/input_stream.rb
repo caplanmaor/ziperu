@@ -44,6 +44,7 @@ module Ziperu
                    enforce_size: nil, metadata_encoding: nil, streaming: false, **opts)
       @settings = Settings.take!(opts)
       enforce_size = @settings.validate_entry_sizes if enforce_size.nil?
+      Entry.check_metadata_encoding!(metadata_encoding)
       @metadata_encoding = metadata_encoding
       # rubyzip 2.x's `new(io, offset, decrypter)`.
       offset, decrypter = Compat.positional(legacy, %i[offset decrypter],
@@ -99,6 +100,7 @@ module Ziperu
       @next_index = offset.zero? || @archive.nil? ? 0 : index_at_offset(offset)
       return unless @next_index.nil?
 
+      @archive.close
       raise Error, "no entry starts at offset #{offset} (Zip local header magic not found)"
     end
 

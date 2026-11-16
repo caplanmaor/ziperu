@@ -141,4 +141,33 @@ class CompatCornersTest < Minitest::Test
     Ziperu.warn_invalid_date = false
     assert_silent { Ziperu::Entry.from_meta(nil, meta).time }
   end
+
+  # rubyzip raises CompressionMethodError whichever way the entry is read;
+  # `read` and `extract_all` once raised a plain Error.
+  def test_every_way_of_reading_an_unreadable_method_raises_compression_method_error
+    Ziperu::OutputStream.open(@zip) do |z|
+      z.put_next_entry("a", nil, nil, Ziperu::Entry::STORED)
+      z.write("hello")
+    end
+    bytes = File.binread(@zip)
+    wavpack = [97].pack("v")
+    bytes[8, 2] = wavpack
+    bytes[bytes.rindex("PK\x01\x02".b) + 10, 2] = wavpack
+    File.binwrite(@zip, bytes)
+
+    out = File.join(@tmp, "out")
+    Dir.mkdir(out)
+    Ziperu::File.open(@zip) do |zf|
+      [
+        -> { zf.read("a") },
+        -> { zf.get_input_stream("a", &:read) },
+        -> { zf.extract("a", destination_directory: out) },
+        -> { zf.extract_all(out) }
+      ].each do |way|
+        error = assert_raises(Ziperu::CompressionMethodError, &way)
+        assert_equal 97, error.compression_method
+      end
+    end
+    assert_empty Dir.children(out), "nothing is left where the entry would have gone"
+  end
 end

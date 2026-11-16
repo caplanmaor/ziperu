@@ -21,6 +21,17 @@ class SafeFailureTest < Minitest::Test
     FileUtils.rm_rf(@root)
   end
 
+  # The per-entry path, which `File#extract` and an `extract_all` with a
+  # block take; the native one already cleaned up after itself.
+  def test_a_failed_extraction_leaves_no_file_where_there_was_none
+    Ziperu::File.open(corrupt_archive) do |zf|
+      assert_raises(Ziperu::Error) { zf.extract("a.txt", destination_directory: @dest) }
+      assert_empty Dir.children(@dest)
+      assert_raises(Ziperu::Error) { zf.extract_all(@dest) { true } }
+      assert_empty Dir.children(@dest)
+    end
+  end
+
   def test_a_failed_overwrite_keeps_the_original_file
     zip = corrupt_archive
     %i[native ruby].each do |path|

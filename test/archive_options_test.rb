@@ -191,4 +191,65 @@ class ArchiveOptionsTest < Minitest::Test
 
     assert_equal "hello hello hello", Zlib::Inflate.new(-Zlib::MAX_WBITS).inflate(out)
   end
+
+  def encrypted_zip
+    Ziperu::OutputStream.open(@path, encrypter: Ziperu::TraditionalEncrypter.new("pw")) do |z|
+      z.put_next_entry("secret.txt")
+      z.write("secret")
+    end
+    @path
+  end
+
+  def test_the_extract_all_one_liner_takes_what_open_takes
+    out = File.join(@dir, "out")
+    Ziperu::File.extract_all(encrypted_zip, out, password: "pw", on_exists: :overwrite)
+    assert_equal "secret", File.read(File.join(out, "secret.txt"))
+    assert_raises(Ziperu::LimitError) { Ziperu::File.extract_all(@path, out, max_entries: 0) }
+    assert_raises(ArgumentError) { Ziperu::File.extract_all(@path, out, no_such_option: 1) }
+  end
+
+  def test_foreach_takes_a_password
+    entry = Ziperu::File.foreach(encrypted_zip, password: "pw").first
+    assert_equal "secret", entry.get_input_stream(&:read)
+    Ziperu::File.foreach(@path, password: "pw") { |e| assert_equal "secret", e.get_input_stream(&:read) }
+    File.open(@path, "rb") do |io|
+      Ziperu::File.foreach(io, password: "pw") { |e| assert_equal "secret", e.get_input_stream(&:read) }
+    end
+    error = assert_raises(Ziperu::Error) { Ziperu::File.foreach(@path).first.get_input_stream(&:read) }
+    assert_match(/password/i, error.message)
+  end
+
+  def test_an_unknown_metadata_encoding_raises
+    Ziperu::OutputStream.open(@path) { |z| z.put_next_entry("a") }
+    [
+      -> { Ziperu::File.open(@path, metadata_encoding: "NoSuchEnc") { nil } },
+      -> { Ziperu::File.foreach(@path, metadata_encoding: "NoSuchEnc") { nil } },
+      -> { Ziperu::InputStream.open(@path, metadata_encoding: "NoSuchEnc") { nil } }
+    ].each do |open|
+      error = assert_raises(ArgumentError, &open)
+      assert_match(/unknown metadata_encoding: "NoSuchEnc"/, error.message)
+    end
+    Ziperu::File.open(@path, metadata_encoding: Encoding::Shift_JIS) { |zf| assert_equal 1, zf.size }
+  end
+
+  def test_a_file_inspects_in_a_line_however_many_entries_it_has
+    Ziperu::OutputStream.open(@path) { |z| 500.times { |i| z.put_next_entry("f#{i}") } }
+    Ziperu::File.open(@path) do |zf|
+      assert_equal "#<Ziperu::File:#{@path} entries=500>", zf.inspect
+      zf.get_output_stream("new.txt") { |os| os.write("x") }
+      assert_equal "#<Ziperu::File:#{@path} entries=501 (uncommitted changes)>", zf.inspect
+    end
+    Ziperu::File.open(@path, write: false) { |zf| assert_match(/entries=501 \(read-only\)>\z/, zf.inspect) }
+  end
+
+  def test_a_cut_short_archive_is_described_without_rust_type_names
+    Ziperu::OutputStream.open(@path) do |z|
+      z.put_next_entry("a")
+      z.write("hello")
+    end
+    File.binwrite(@path, File.binread(@path)[0..-11])
+    error = assert_raises(Ziperu::Error) { Ziperu::File.open(@path) { nil } }
+    refute_match(/::|Block/, error.message)
+    assert_match(/end of central directory record is cut short/, error.message)
+  end
 end

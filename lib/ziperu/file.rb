@@ -61,6 +61,7 @@ module Ziperu
       # encoding flag (an archive made on Windows in Japan, say:
       # "Shift_JIS"); they are transcoded to UTF-8. Without it such names
       # are binary Strings, as in rubyzip.
+      Entry.check_metadata_encoding!(metadata_encoding)
       @metadata_encoding = metadata_encoding
 
       # On commit, runs of files added from disk are compressed on this
@@ -210,17 +211,21 @@ module Ziperu
       # Each entry can be read (`get_input_stream`, `extract`) while the
       # block runs; the archive is closed when `foreach` returns. An entry
       # of an archive at a path can still be read afterwards, as rubyzip
-      # allows: the archive is reopened for it. Without a block, returns
-      # an Enumerator.
-      def foreach(path_or_io, metadata_encoding: nil, **settings, &block)
-        return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding, **settings) unless block
+      # allows: the archive is reopened for it. `password:` is the one the
+      # entries are read with, as with `open`. Without a block, returns an
+      # Enumerator.
+      def foreach(path_or_io, metadata_encoding: nil, password: nil, **settings, &block)
+        unless block
+          return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding, password: password, **settings)
+        end
 
+        Entry.check_metadata_encoding!(metadata_encoding)
         unknown = settings.dup
         settings = Settings.take!(unknown)
         raise ArgumentError, "unknown keyword: #{unknown.keys.map(&:inspect).join(', ')}" unless unknown.empty?
 
         native = InputStream.open_archive(path_or_io, settings)
-        owner = Entry::Source::Reopener.new(path_or_io, settings) if InputStream.path_like?(path_or_io)
+        owner = Entry::Source::Reopener.new((path_or_io if InputStream.path_like?(path_or_io)), settings, password)
         begin
           native.each_entry_row do |row|
             yield Entry.from_row(native, row, nil, metadata_encoding: metadata_encoding, settings: settings,
@@ -248,10 +253,13 @@ module Ziperu
       end
 
       # Extracts every entry of the archive at `zip_file_name` into
-      # `destination_directory`.
+      # `destination_directory`. Takes the options of `#extract_all`; any
+      # other is for opening the archive (`password:`, the limits and the
+      # rest of what `open` takes).
       def extract_all(zip_file_name, destination_directory = '.', **options, &block)
-        Ziperu::File.open(zip_file_name) do |zf|
-          zf.extract_all(destination_directory, **options, &block)
+        how, open_options = options.partition { |name, _| EXTRACT_ALL_OPTIONS.include?(name) }.map(&:to_h)
+        Ziperu::File.open(zip_file_name, **open_options) do |zf|
+          zf.extract_all(destination_directory, **how, &block)
         end
       end
     end
@@ -302,6 +310,13 @@ module Ziperu
     # Returns the name of the zip archive
     def to_s
       @name
+    end
+
+    # Short, where the default lists every entry: half a megabyte for an
+    # archive of 5,000, in irb, a log line or an error message.
+    def inspect
+      state = [('read-only' if @read_only), ('uncommitted changes' if @dirty)].compact
+      "#<#{self.class.name}:#{@name} entries=#{@cdir.size}#{state.map { |s| " (#{s})" }.join}>"
     end
 
     # Returns a string containing the contents of the specified entry

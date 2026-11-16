@@ -274,6 +274,14 @@ module Ziperu
       entry
     end
 
+    # Raises for a `metadata_encoding:` Ruby does not know, which was once
+    # ignored: names then stayed binary and nothing said why.
+    def self.check_metadata_encoding!(encoding) # :nodoc:
+      ::Encoding.find(encoding) unless encoding.nil?
+    rescue ::ArgumentError
+      raise ::ArgumentError, "unknown metadata_encoding: #{encoding.inspect}"
+    end
+
     # Is this entry encrypted?
     def encrypted?
       gp_flags.anybits?(ENCRYPTED_GPFLAG)
@@ -599,9 +607,13 @@ module Ziperu
     end
 
     # The decrypter for this entry when the owning `Ziperu::File` was
-    # opened with a password; nil otherwise, or for a plain entry.
+    # opened with a password, or `File.foreach` was given one; nil
+    # otherwise, or for a plain entry.
     def default_decrypter # :nodoc:
-      return unless encrypted? && @zipfile.kind_of?(::Ziperu::File) && (pw = @zipfile.password)
+      return unless encrypted?
+
+      pw = @zipfile.kind_of?(::Ziperu::File) ? @zipfile.password : @source.password
+      return unless pw
 
       aes? ? AESDecrypter.new(pw) : TraditionalDecrypter.new(pw)
     end
@@ -841,7 +853,8 @@ module Ziperu
     # one: in a single native call when the entry is in an archive and its
     # declared size is to be trusted, through a stream otherwise.
     def read_all # :nodoc:
-      if !pending_data? && @source.stored? && !encrypted? && @settings.validate_entry_sizes
+      if !pending_data? && @source.stored? && !encrypted? && @settings.validate_entry_sizes &&
+         READABLE_COMPRESSION_METHODS.include?(compression_method)
         get_raw_input_string
       else
         get_input_stream(&:read)
@@ -913,7 +926,15 @@ module Ziperu
           ::FileUtils.rm_f(staged) unless done
         end
       else
-        ::File.open(dest_path, WRITE_NO_FOLLOW, binmode: true) { |os| write_data_to(os) }
+        # Nothing was there, so an extraction that fails takes away what
+        # it had written rather than leave a file cut short.
+        done = false
+        begin
+          ::File.open(dest_path, WRITE_NO_FOLLOW, binmode: true) { |os| write_data_to(os) }
+          done = true
+        ensure
+          ::FileUtils.rm_f(dest_path) unless done
+        end
       end
 
       set_extra_attributes_on_path(dest_path)

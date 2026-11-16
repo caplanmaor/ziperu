@@ -10,6 +10,28 @@ Fixed:
   collected in the block. rubyzip allows it, and so does an entry of a
   closed `Ziperu::File`; the archive is now reopened for these entries
   too. Found by write_xlsx's test suite, 974 of whose tests failed on it.
+- `File#extract`, and `extract_all` with a block, left an empty file
+  behind when the entry could not be read (a bad CRC, a wrong password).
+  The file is removed, as the native path of `extract_all` already did.
+- `File#read` and `extract_all` raised a plain `Zip::Error` for an entry
+  in a compression method that cannot be read. They raise
+  `Zip::CompressionMethodError`, as rubyzip does and as
+  `get_input_stream` did, so one `rescue` covers every way of reading.
+- `File.extract_all(path, dest, password: "...")` raised "unknown
+  keyword": the one-liner passed every option to `#extract_all` and none
+  to `open`. It now takes both kinds, the limits included.
+- `File.foreach` takes `password:`, and the entries it yields are read
+  with it. They could only be read by building a decrypter for each.
+- A `metadata_encoding:` Ruby does not know raises `ArgumentError`. It was
+  ignored, and names stayed binary with nothing to say why.
+- The message for an archive cut short named Rust types ("Unexpected end
+  of zip::format::blocks::Zip32CDEBlock"). It says what is cut short: the
+  end of central directory record, a central directory entry and so on.
+- `File#inspect` is one line (the path, the entry count, read-only or
+  uncommitted). The default listed every entry: half a megabyte for an
+  archive of 5,000, in irb, a log line or an error message.
+- `InputStream.new(path, offset: n)` closes the archive before raising
+  when no entry starts at `n`. It was left for the GC.
 
 Internal:
 
