@@ -39,6 +39,7 @@ jobs:
         run: |
           bundle exec rake compile
           gem build ziperu.gemspec -q
-          gem install --local --no-document ziperu-*.gem
+          # Not --local: rb_sys, which the gem needs to build, is fetched.
+          gem install --no-document ziperu-*.gem
       - name: Run ${{ matrix.project.name }}'s suite against ziperu
         run: .github/scripts/downstream.sh "${{ matrix.project.url }}" . ${{ matrix.project.cmd }}
