@@ -36,6 +36,25 @@ class ListingTest < Minitest::Test
     assert_equal "d#{(COUNT - 1) % 7}/f#{COUNT - 1}.txt", seen.last
   end
 
+  # rubyzip reopens the file for an entry read after its archive closed.
+  def test_entries_from_foreach_can_be_read_once_it_has_returned
+    kept = []
+    Ziperu::File.foreach(@path) { |e| kept << e }
+    assert_equal "entry 0", kept.first.get_input_stream.read
+    assert_equal "entry #{COUNT - 1}", kept.last.get_input_stream(&:read)
+    found = Ziperu::File.foreach(@path).find { |e| e.name == "d3/f3.txt" }
+    assert_equal "entry 3", found.get_input_stream(&:read)
+  end
+
+  def test_an_entry_from_foreach_whose_archive_was_replaced_raises
+    kept = Ziperu::File.foreach(@path).first
+    Ziperu::OutputStream.open(@path) do |zos|
+      zos.put_next_entry("other.txt")
+      zos.write("other")
+    end
+    assert_raises(Ziperu::EntryMovedError) { kept.get_input_stream(&:read) }
+  end
+
   def test_foreach_without_a_block_is_a_lazy_enumerator
     enum = Ziperu::File.foreach(@path)
     assert_kind_of Enumerator, enum

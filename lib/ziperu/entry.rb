@@ -266,9 +266,11 @@ module Ziperu
                     fstype version_made_by dos_date dos_time comment extra header_offset].freeze # :nodoc:
 
     # Build an entry from one row (see ROW_FIELDS).
-    def self.from_row(archive, row, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu) # :nodoc:
+    # `owner` is who reopens the archive for the entry once it is closed:
+    # `zipfile`, unless another is given (see Source::Reopener).
+    def self.from_row(archive, row, zipfile = nil, metadata_encoding: nil, settings: ::Ziperu, owner: zipfile) # :nodoc:
       entry = allocate
-      entry.send(:init_from_row, archive, row, zipfile, metadata_encoding, settings)
+      entry.send(:init_from_row, archive, row, zipfile, metadata_encoding, settings, owner)
       entry
     end
 
@@ -1064,7 +1066,7 @@ module Ziperu
       raise EntryNameError if name.length > MAX_FIELD_LENGTH
     end
 
-    def init_from_row(archive, row, zipfile, metadata_encoding, settings)
+    def init_from_row(archive, row, zipfile, metadata_encoding, settings, owner)
       index, name, size, compressed_size, crc, method, flags, external_attributes, fstype, _version,
         dos_date, dos_time, comment, extra, header_offset = row
       @settings = settings
@@ -1080,7 +1082,7 @@ module Ziperu
       # the archive knows the entry by.
       @gp_flags = flags
       @original_name = name
-      @source = archive ? Source::Archive.new(archive, zipfile, index, @original_name) : Source::NONE
+      @source = archive ? Source::Archive.new(archive, owner, index, @original_name) : Source::NONE
       # Most entries have no comment and many no extra fields: those share
       # one empty String rather than carrying their own.
       @extra = nil

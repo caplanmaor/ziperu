@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- An entry that `File.foreach` yielded from a path could not be read once
+  `foreach` had returned: `get_input_stream` raised `IOError: closed
+  archive`. That covered `foreach(path).find { ... }` and entries
+  collected in the block. rubyzip allows it, and so does an entry of a
+  closed `Ziperu::File`; the archive is now reopened for these entries
+  too. Found by write_xlsx's test suite, 974 of whose tests failed on it.
+
+Internal:
+
+- The weekly run of other gems' test suites never got as far as running
+  one: installing the built gem with `--local` could not find `rb_sys`,
+  and the script had lost its execute bit.
+
 ## 0.3.0 (2026-11-14)
 
 Security:

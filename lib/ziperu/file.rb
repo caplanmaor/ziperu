@@ -208,8 +208,10 @@ module Ziperu
       # building the whole listing first: the way to walk an archive with
       # hundreds of thousands of entries, or to stop at the first match.
       # Each entry can be read (`get_input_stream`, `extract`) while the
-      # block runs; the archive is closed when `foreach` returns. Without a
-      # block, returns an Enumerator.
+      # block runs; the archive is closed when `foreach` returns. An entry
+      # of an archive at a path can still be read afterwards, as rubyzip
+      # allows: the archive is reopened for it. Without a block, returns
+      # an Enumerator.
       def foreach(path_or_io, metadata_encoding: nil, **settings, &block)
         return enum_for(:foreach, path_or_io, metadata_encoding: metadata_encoding, **settings) unless block
 
@@ -218,9 +220,11 @@ module Ziperu
         raise ArgumentError, "unknown keyword: #{unknown.keys.map(&:inspect).join(', ')}" unless unknown.empty?
 
         native = InputStream.open_archive(path_or_io, settings)
+        owner = Entry::Source::Reopener.new(path_or_io, settings) if InputStream.path_like?(path_or_io)
         begin
           native.each_entry_row do |row|
-            yield Entry.from_row(native, row, nil, metadata_encoding: metadata_encoding, settings: settings)
+            yield Entry.from_row(native, row, nil, metadata_encoding: metadata_encoding, settings: settings,
+                                                   owner: owner)
           end
         ensure
           native.close

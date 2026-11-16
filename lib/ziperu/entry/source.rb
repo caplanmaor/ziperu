@@ -69,8 +69,9 @@ module Ziperu
 
       NONE = None.new.freeze
 
-      # A record of `native`, the archive `owner` (a Ziperu::File, or nil
-      # for an entry read through an InputStream) has open. `index` is nil
+      # A record of `native`, the archive `owner` has open: a Ziperu::File,
+      # a Reopener for an entry `File.foreach` yielded from a path, or nil
+      # for an entry read through an InputStream. `index` is nil
       # for a record the native core cannot address by index (one of
       # several under the same name), which is found by its offset.
       class Archive
@@ -89,10 +90,10 @@ module Ziperu
           self
         end
 
-        # The native archive, reopened if the owning Ziperu::File released
-        # it on close: rubyzip lets entries be read after `close`.
+        # The native archive, reopened if its owner released it on close:
+        # rubyzip lets entries be read after `close`.
         def native(offset)
-          if @native.closed? && @owner.kind_of?(::Ziperu::File)
+          if @native.closed? && @owner.respond_to?(:native_archive)
             reopened = @owner.native_archive
             unless still_at_place?(reopened, offset)
               where = @index ? "at index #{@index} of" : 'in'
@@ -129,6 +130,26 @@ module Ziperu
           reopened.entries.any? do |meta|
             meta[:index].nil? && meta[:header_offset] == offset && meta[:name] == name
           end
+        end
+      end
+
+      # Stands in for a Ziperu::File as the owner of the entries that
+      # `File.foreach` yields from a path, so they too can be read once the
+      # walk is over (`foreach(path).find { ... }`, or entries collected in
+      # the block). One is shared by all the entries of a walk, and so is
+      # the archive it reopens.
+      class Reopener
+        attr_reader :name
+
+        def initialize(name, settings)
+          @name = name
+          @settings = settings
+          @native = nil
+        end
+
+        def native_archive
+          @native = InputStream.open_archive(@name, @settings) if @native.nil? || @native.closed?
+          @native
         end
       end
 
