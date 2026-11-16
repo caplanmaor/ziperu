@@ -1,6 +1,6 @@
 # rubyzip compatibility
 
-rubyzip 3.7.0's own test suite run against ziperu 0.3.0 (`rake compat`, 2026-11-14).
+rubyzip 3.7.0's own test suite run against ziperu 0.3.1 (`rake compat`, 2026-11-16).
 
 **419 of 476 tests pass (88.0%)** across the files that load; 0 test files fail to load (usually a missing class), so the true total is higher.
 
