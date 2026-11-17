@@ -120,6 +120,16 @@ module Ziperu
         end
       end
 
+      # Whether `name` matches one of `patterns` (what `exclude:` was given).
+      def self.excluded?(patterns, name)
+        Array(patterns).any? do |pattern|
+          case pattern
+          when ::Regexp then pattern.match?(name)
+          else ::File.fnmatch?(pattern.to_s, name, ::File::FNM_EXTGLOB | ::File::FNM_DOTMATCH)
+          end
+        end
+      end
+
       # `entries` are the archive's writable entries (of several records
       # under one name only the last, the one rubyzip would know).
       def initialize(entries, exclude: nil, junk_paths: false, sanitize: nil)
@@ -190,12 +200,7 @@ module Ziperu
       # (`File.fnmatch` with `*` crossing `/`, as `unzip -x` has it) or a
       # Regexp.
       def excluded?(name)
-        Array(@exclude).any? do |pattern|
-          case pattern
-          when ::Regexp then pattern.match?(name)
-          else ::File.fnmatch?(pattern.to_s, name, ::File::FNM_EXTGLOB | ::File::FNM_DOTMATCH)
-          end
-        end
+        self.class.excluded?(@exclude, name)
       end
 
       # The path under the destination an entry goes to.

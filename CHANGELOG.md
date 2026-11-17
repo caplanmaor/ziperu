@@ -2,8 +2,49 @@
 
 ## Unreleased
 
+Added:
+
+- `Ziperu::Tar.foreach` and `Ziperu::Tar::Reader` read tar archives:
+  plain, or compressed with gzip, zstd, xz or bzip2, told apart by their
+  first bytes and not by their name. An archive is read front to back,
+  an entry at a time, in constant memory, from a path or from any IO
+  with `read` (a pipe, a socket, a response body). An entry gives its
+  name, size, type, mode, time (to the nanosecond where the archive has
+  it), link target and owner, and its data through `read` and
+  `each_chunk`. v7, ustar, GNU and PAX archives are read, long names and
+  extended headers included; sparse files and multi-volume archives are
+  refused.
+- `Ziperu::Tar.extract_all(path_or_io, dest)` extracts a tar archive
+  under the rules a zip is extracted by: a name that resolves outside
+  the destination is skipped with a warning, nothing is written through
+  a link already on disk, and times and permission bits are restored
+  but never setuid, setgid or an owner. Symlinks are skipped unless
+  `symlinks: :create`, and then made only when the target stays inside.
+  A hard link is made only to a file the same extraction wrote. Devices
+  and fifos are skipped. `on_exists:`, `exclude:`, `sanitize:` and
+  `progress:` are as for a zip; `strip_components:` drops leading
+  directories. Of two entries with one name the last wins, as `tar` has
+  it. Links are created after every file.
+- `Ziperu.extract(path_or_io, dest)` extracts a zip or a tar archive,
+  told apart by the first bytes, with the options of whichever it is.
+  From a pipe a tar archive is streamed; a zip is read into memory
+  first, within `max_archive_size`.
+- The limits hold for tar as for zip: `max_entries`, `max_entry_size`,
+  `max_total_size`, `max_archive_size` for what is read from an IO, and
+  `max_compression_ratio`, which is measured over the stream as it is
+  read and so stops a compressed bomb a few megabytes in, read or
+  skipped.
+- A compressed tar archive is read to the end of its stream, where
+  gzip, xz and bzip2 keep their checksum: tar has none for an entry's
+  data. A long name or extended header over 1 MiB is refused, and an xz
+  stream that asks for more than 256 MiB to decode.
+
 Internal:
 
+- The native extractor is in two parts: `placer.rs` decides where an
+  entry goes and what is refused on the way (the path check, links on
+  disk, what is already there), and `extract.rs` reads zip entries into
+  the files it opens. Nothing changes in what is extracted or how.
 - The memory growth check failed a nightly run on code that had passed
   the day before. It sampled resident memory after a full GC, but memory
   glibc had freed and not yet returned swung the samples between 68 and

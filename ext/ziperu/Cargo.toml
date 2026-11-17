@@ -34,6 +34,13 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 crc32fast = "1"
 getrandom = { version = "0.4", features = ["std"] }
 
+# For reading compressed tar archives: the codecs the zip crate already
+# brings in for its own entries, at the versions and with the backends it
+# picks, so nothing more is compiled.
+bzip2 = { version = "0.6", default-features = false }
+zstd = { version = "0.14", default-features = false }
+lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "xz"] }
+
 # O_NOFOLLOW for extraction (already in the tree through the zip crate's
 # dependencies).
 [target.'cfg(unix)'.dependencies]

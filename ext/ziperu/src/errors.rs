@@ -30,6 +30,7 @@ exception!(NATIVE_PASSWORD_ERROR, "Ziperu::Native::PasswordError");
 exception!(pub NATIVE_UNSUPPORTED_ERROR, "Ziperu::Native::UnsupportedError");
 exception!(pub DESTINATION_EXISTS_ERROR, "Ziperu::DestinationExistsError");
 exception!(pub ENTRY_SIZE_ERROR, "Ziperu::EntrySizeError");
+exception!(pub LIMIT_ERROR, "Ziperu::LimitError");
 exception!(pub NATIVE_DUPLICATE_ENTRY_ERROR, "Ziperu::Native::DuplicateEntryError");
 exception!(ENOENT, "Errno::ENOENT");
 exception!(EACCES, "Errno::EACCES");

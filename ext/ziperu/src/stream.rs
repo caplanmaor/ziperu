@@ -46,8 +46,14 @@ const CHUNK: usize = 64 * 1024;
 const CAPACITY_HINT_MAX: u64 = 1 << 20;
 
 /// A Ruby IO read through `read(n)`, forward only.
-struct RubyRead {
+pub(crate) struct RubyRead {
     io: Opaque<Value>,
+}
+
+impl RubyRead {
+    pub(crate) fn new(io: Opaque<Value>) -> Self {
+        Self { io }
+    }
 }
 
 impl Read for RubyRead {

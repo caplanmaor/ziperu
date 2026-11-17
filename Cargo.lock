@@ -881,15 +881,18 @@ dependencies = [
 name = "ziperu"
 version = "0.3.1"
 dependencies = [
+ "bzip2",
  "crc32fast",
  "flate2",
  "getrandom",
  "libc",
+ "lzma-rust2",
  "magnus",
  "rayon",
  "rb-sys",
  "rb-sys-env",
  "zip",
+ "zstd",
 ]
 
 [[package]]

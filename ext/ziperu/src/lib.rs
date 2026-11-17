@@ -10,12 +10,14 @@ mod errors;
 mod extract;
 mod gvl;
 mod place;
+mod placer;
 mod rb;
 mod reader;
 mod sink;
 mod source;
 mod stream;
 mod stream_stats;
+mod tar;
 #[cfg(test)]
 mod test_rng;
 mod writer;
@@ -92,6 +94,18 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     stream.define_method("eof?", method!(stream::StreamReader::is_eof, 0))?;
     stream.define_method("trailer", method!(stream::StreamReader::trailer, 0))?;
     stream.define_method("close", method!(stream::StreamReader::close, 0))?;
+
+    let tar = native.define_class("TarReader", ruby.class_object())?;
+    tar.define_singleton_method("open_path", function!(tar::TarReader::open_path, 3))?;
+    tar.define_singleton_method("open_io", function!(tar::TarReader::open_io, 3))?;
+    tar.define_method("next_entry", method!(tar::TarReader::next_entry, 0))?;
+    tar.define_method("read", method!(tar::TarReader::read, 1))?;
+    tar.define_method("compression", method!(tar::TarReader::compression, 0))?;
+    tar.define_method("bytes_in", method!(tar::TarReader::bytes_in, 0))?;
+    tar.define_method("extract_begin", method!(tar::TarReader::extract_begin, 2))?;
+    tar.define_method("extract_entry", method!(tar::TarReader::extract_entry, 1))?;
+    tar.define_method("extract_finish", method!(tar::TarReader::extract_finish, 0))?;
+    tar.define_method("close", method!(tar::TarReader::close, 0))?;
 
     let writer = native.define_class("Writer", ruby.class_object())?;
     writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;
