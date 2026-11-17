@@ -19,8 +19,8 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 [Magnus](https://github.com/matsadler/magnus). `require "zip"` aliases
 `Zip = Ziperu`, so existing code runs unchanged.
 
-ziperu 0.2.3 on GitHub's Linux runners (Ruby 3.4, median of 5), against
-rubyzip 3.7.0:
+Measured with ziperu 0.2.3 against rubyzip 3.7.0 on GitHub's Linux
+runners (Ruby 3.4, median of 5 runs):
 
 | scenario | rubyzip | ziperu | speedup |
 |---|---:|---:|---:|
@@ -32,10 +32,11 @@ rubyzip 3.7.0:
 | append one entry to a 10000-entry archive | 1.16 s | 148 ms | 7.8x |
 | add 1000 files from disk (`threads: 4`) | 348 ms | 89 ms | 3.9x |
 
-macOS and Windows, every scenario, and which calls release the GVL (what
-Puma users ask about) are in [docs/benchmarks.md](docs/benchmarks.md).
+Results for macOS and Windows, and the rest of the scenarios, are in
+[docs/benchmarks.md](docs/benchmarks.md). It also lists which calls
+release the GVL, so other threads (other Puma requests, say) keep running.
 
-- **Precompiled** for Linux (glibc and musl), macOS and Windows, Ruby 3.1 to 4.0. No toolchain, no runtime dependencies.
+- **Precompiled** for Linux (glibc and musl), macOS and Windows, on Ruby 3.3 to 4.0, with binaries for 3.1 and 3.2 as well. No toolchain, no runtime dependencies.
 - **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, unchanged entries are copied byte for byte on commit, and a commit that only adds entries appends them in place.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, XZ, PPMd, AES and ZipCrypto.
 - **Safe by default**: no entry inflates past its declared size, extraction skips names that resolve outside the destination and never writes through a link already on disk, symlinks are opt-in, and limits on entry count, entry size, total size and compression ratio can be set up front. [SECURITY.md](SECURITY.md) has the details.
@@ -56,9 +57,6 @@ Or on its own:
 gem install ziperu
 ```
 
-Precompiled gems ship for Linux, macOS and Windows; see
-[Platforms](#platforms) for the details.
-
 ## Quick start
 
 ```ruby
@@ -74,27 +72,9 @@ Ziperu::File.open("new.zip", create: true) do |zf|
   zf.add("report.pdf", "tmp/report.pdf")
   zf.get_output_stream("notes.txt") { |io| io.puts "written at #{Time.now}" }
 end
-
-Ziperu::OutputStream.write_buffer(socket) do |zos|   # any IO; a pipe, socket or
-  zos.put_next_entry("hello.txt")                    # response body is streamed,
-  zos.write("hello")                                 # nothing buffered to the end
-end
-
-body = Ziperu::OutputStream.body do |zos|   # a Rack body: an Enumerator of
-  zos.put_next_entry("export.csv")          # the archive's bytes, produced
-  zos.write(csv)                            # as the server consumes them
-end
-[200, { "content-type" => "application/zip" }, body]
-
-Ziperu::File.foreach("huge.zip") do |entry|   # one entry at a time, constant
-  puts entry.name if entry.size > 1 << 30      # memory, however many there are
-end
-
-Ziperu::File.open("secret.zip", password: "s3cret") do |zf|   # AES or ZipCrypto
-  zf.extract_all("out/")
-  zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit
-end
 ```
+
+Streaming, passwords, limits and the rest are in the cookbook below.
 
 ## Cookbook
 
@@ -109,7 +89,8 @@ Ziperu::File.open("site.zip") do |zf|
 end
 ```
 
-Build an archive in memory and hand it out, or take one in:
+Build an archive in memory and hand it out, write one straight to an IO,
+or take one in:
 
 ```ruby
 bytes = Ziperu::OutputStream.write_buffer do |zos|
@@ -117,26 +98,45 @@ bytes = Ziperu::OutputStream.write_buffer do |zos|
   zos.write(csv)
 end.string
 
+Ziperu::OutputStream.write_buffer(socket) do |zos|   # a pipe or socket is streamed,
+  zos.put_next_entry("report.csv")                   # nothing buffered to the end
+  zos.write(csv)
+end
+
 Ziperu::File.open_buffer(params[:upload].read) do |zf|
   zf.each { |e| puts "#{e.name}: #{e.size} bytes" }
 end
 ```
 
-Stream a zip download without a temp file (Rack; in Rails, write to
-`response.stream` inside `ActionController::Live` the same way):
+Stream a zip download without a temp file. `OutputStream.body` returns a
+Rack body: an Enumerator of the archive's bytes, produced as the server
+consumes them.
 
 ```ruby
+require "ziperu/rails_streaming"
+
 body = Ziperu::OutputStream.body do |zos|
   attachments.each do |att|
     zos.put_next_entry(att.filename)
     att.download { |chunk| zos.write(chunk) }
   end
 end
-[200, Ziperu::RailsStreaming.headers("attachments.zip"), body]   # require "ziperu/rails_streaming"
+[200, Ziperu::RailsStreaming.headers("attachments.zip"), body]
+```
 
-class ExportsController < ApplicationController           # in Rails: headers, body, no Live
+In a Rails controller, `zip_stream` sets the headers and the body, with
+no need for `ActionController::Live`:
+
+```ruby
+class ExportsController < ApplicationController
   include Ziperu::RailsStreaming
-  def show = zip_stream("export.zip") { |zos| zos.put_next_entry("a.csv"); zos.write(csv) }
+
+  def show
+    zip_stream("export.zip") do |zos|
+      zos.put_next_entry("a.csv")
+      zos.write(csv)
+    end
+  end
 end
 ```
 
@@ -147,6 +147,7 @@ changed archive elsewhere:
 ```ruby
 Ziperu::File.open("backup.zip") do |zf|
   zf.add("logs/today.log", "/var/log/app/today.log")
+  zf.add("upload.bin", StringIO.new(bytes))   # any IO, streamed on commit
   zf.get_output_stream("manifest.json") { |io| io.write(manifest.to_json) }
 end
 
@@ -154,7 +155,9 @@ Ziperu::File.open("backup.zip", write: "backup-2.zip") { |zf| zf.remove("old.log
 Ziperu::File.open("backup.zip", write: false) { |zf| zf.read("manifest.json") }  # read-only
 ```
 
-Pick one entry out of a large archive, or read it all as a stream:
+Pick one entry out of a large archive, or read it all as a stream.
+`foreach` yields one entry at a time in constant memory, however many
+there are:
 
 ```ruby
 entry = Ziperu::File.foreach("huge.zip").find { |e| e.name.end_with?(".sig") }
@@ -300,14 +303,6 @@ flagged UTF-8 come back as UTF-8 strings; duplicate names in one
 methods), is in [docs/migrating.md](docs/migrating.md). What rubyzip's own
 test suite makes of ziperu is in [COMPAT.md](COMPAT.md).
 
-## Why
-
-rubyzip is pure Ruby and does per-entry work in Ruby objects. ziperu
-parses the central directory once in Rust and hands Ruby a flat metadata
-dump, reads entries in large chunks, copies unchanged entries byte for
-byte on `commit`, and releases the GVL while inflating from a file or
-String buffer and while deflating to a file, so other Ruby threads keep running.
-
 ## Platforms
 
 - **Ruby 3.3 to 4.0** are supported and tested on Linux, macOS and Windows.
@@ -337,6 +332,9 @@ run, the release pipeline and the code layout are described in
 - [Changelog](CHANGELOG.md)
 - [Migrating from rubyzip](docs/migrating.md): every deliberate difference, and what ziperu adds
 - [rubyzip compatibility report](COMPAT.md)
+- [Benchmarks](docs/benchmarks.md): all three platforms, and which calls release the GVL
+- [Security](SECURITY.md): what extraction and reading guard against
+- [Development](docs/development.md): building, the fuzzer, the release pipeline
 
 ## Contributing
 
