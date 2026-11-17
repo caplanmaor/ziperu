@@ -15,13 +15,29 @@ require "stringio"
 require "fileutils"
 
 ITERATIONS = Integer(ENV.fetch("ITERATIONS", 200))
+# glibc's `malloc_trim`, or nil where there is none (musl, macOS, Windows).
+# Memory that has been freed stays with the process until the allocator
+# hands it back, which it does when it pleases: with threads at work the
+# resident size after a full GC swung between 68 and 107 MiB from one
+# sample to the next, and a run of high samples at the end read as 23 MiB
+# of growth in code that had passed the day before. Trimmed first, the
+# same workload sits within 0.1 MiB of 23.8 for 600 iterations, so what is
+# left to see is what is still held.
+TRIM = begin
+  require "fiddle"
+  Fiddle::Function.new(Fiddle::Handle::DEFAULT["malloc_trim"], [Fiddle::TYPE_SIZE_T], Fiddle::TYPE_INT)
+rescue LoadError, Fiddle::DLError
+  nil
+end
+
 # Growth tolerated between the middle and the last samples, in MiB: the
 # heap fragments a little, and the first samples include lazily loaded
-# code and buffers. Medians, not single samples, because RSS after a GC
-# still jumps by 10-20 MiB from one sample to the next.
-ALLOWED_MIB = Float(ENV.fetch("ALLOWED_MIB", 8))
+# code and buffers. Medians, not single samples. Without `malloc_trim`
+# the samples jump by 10-20 MiB, so more is allowed there.
+ALLOWED_MIB = Float(ENV.fetch("ALLOWED_MIB", TRIM ? 3 : 8))
 
 def rss_mib
+  TRIM&.call(0)
   if File.readable?("/proc/self/statm")
     pages = File.read("/proc/self/statm").split[1].to_i
     pages * 4096 / 1024.0 / 1024

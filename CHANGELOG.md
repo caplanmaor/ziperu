@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Internal:
+
+- The memory growth check failed a nightly run on code that had passed
+  the day before. It sampled resident memory after a full GC, but memory
+  glibc had freed and not yet returned swung the samples between 68 and
+  107 MiB. It now calls `malloc_trim` before each sample: the workload
+  then sits at 23.8 MiB for all 600 iterations, and the growth allowed
+  drops from 8 MiB to 3.
+
 ## 0.3.1 (2026-11-16)
 
 Fixed:
