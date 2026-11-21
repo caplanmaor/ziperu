@@ -27,6 +27,18 @@ where rubyzip leaves most of it to the caller:
   (`symlinks: :create`), and then only when its target resolves inside
   the destination and has no `..` after a name (which a link could
   redirect); links are created after everything else.
+- **Tar archives.** `Ziperu::Tar.extract_all` and `Ziperu.extract` place
+  entries through the same code as zip extraction, so everything above
+  holds for them. On top of that: a hard link is created only to a file
+  the same extraction wrote, never to one already on disk or outside the
+  destination; links of either kind are created after every file, so an
+  archive cannot place a link and then write through it; devices and
+  fifos are never created; setuid, setgid and owners are never restored.
+  A long name or extended header over 1 MiB is refused instead of being
+  held in memory, and so is an xz stream that needs more than 256 MiB to
+  decode. Sparse and multi-volume archives are refused, not guessed at.
+  A compressed archive is read to the end of its stream so that the
+  codec's checksum is verified; tar has none for an entry's data.
 - **Remote archives.** `RemoteIO` fetches http and https URLs only,
   sends its `headers:` only to the origin of the URL it was given (not
   to another host a redirect leads to, unless `forward_headers: true`),
@@ -47,19 +59,28 @@ where rubyzip leaves most of it to the caller:
   `Ziperu.max_total_size`, `Ziperu.max_entry_size` and
   `Ziperu.max_compression_ratio` make `File.open` and `InputStream.open`
   raise `Ziperu::LimitError` before any entry is read. They are off by
-  default; set them in an application that accepts uploads.
+  default; set them in an application that accepts uploads. A tar
+  archive has no directory to check up front, so there the limits are
+  enforced as it is read, and the compression ratio is measured over the
+  stream itself: a gzip bomb is stopped a few megabytes in. What came
+  before the entry that broke a limit has been extracted by then.
 - **Duplicate names.** Several records under one name are all listed and
   readable, but a lookup by name finds the one a reader would, and only
   that one is written back. Writing two entries with the same name to one
   stream raises.
 - **Windows names.** `extract_all(dir, sanitize: :windows)` rewrites names
   Windows refuses, so an archive cannot make extraction fail halfway on a
-  reserved device name.
+  reserved device name. Without it, on Windows, an entry with a colon in
+  its name is skipped with a warning: `a.txt:x` names a stream of
+  `a.txt`, and would be written into a file the archive has no claim to,
+  and `C:x` a file in the current directory of drive C.
 - **Memory safety.** The core is Rust (the `zip` crate, 9.x) with the
   unsafe blocks confined to the Ruby boundary and documented; the suite
   runs under GC stress, valgrind (ruby_memcheck) and a resident-size
   growth check in CI, and the parsers are fuzzed differentially against
-  Python's zipfile and rubyzip.
+  Python's zipfile and tarfile and rubyzip. The tar fuzzer also extracts
+  archives with hostile entries and corrupted bytes and checks that
+  nothing lands, or leads, outside the destination.
 
 ## What it does not
 
@@ -82,5 +103,10 @@ where rubyzip leaves most of it to the caller:
 - **Decompression time.** The limits bound the output; a hostile archive
   can still take the CPU time its declared sizes allow. Bound the
   declared total and run extraction in a worker with a timeout.
+- **Checksums on plain tar data.** An uncompressed `.tar` has no
+  checksum on file contents, so damage there cannot be detected.
+- **Tar archives you write** carry the names you give them, `..` and
+  leading slashes included, and the modes of the files added, setuid
+  bits too. `add_recursive` follows no link and records no owner.
 - **Archives you write** carry whatever names and contents you give
   them; `Entry#name=` only refuses a leading `/` and an overlong name.

@@ -19,10 +19,13 @@
 //!   be held in memory whole.
 //! - The archive ends at the first all-zero block, or at the end of the
 //!   input on a block boundary. Input that ends anywhere else is a
-//!   truncated archive.
+//!   truncated archive. An archive with no entries is two zero blocks,
+//!   as `tar` writes one; a single zero block is not an archive.
 //! - A compressed archive is then read to the end of its stream, which
 //!   is where gzip, xz and bzip2 keep the checksum of what they hold:
 //!   tar has none for an entry's data, so that is the only check on it.
+//!   Zeros after a gzip or bzip2 stream are padding, as `gzip` has it;
+//!   anything else there is refused.
 //!
 //! `extract_begin`, `extract_entry` and `extract_finish` put entries on
 //! disk through `placer.rs`, under the rules a zip's entries go by. Ruby
@@ -35,7 +38,7 @@
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::fs;
-use std::io::{self, BufReader, Cursor, Read, Write};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -61,6 +64,9 @@ const RATIO_FLOOR: u64 = 1 << 20;
 /// What an xz block's decoder may allocate, in KiB. `xz -9` needs 65 MiB;
 /// a header can ask for 4 GiB.
 const XZ_MEM_LIMIT_KB: u32 = 256 * 1024;
+/// How much `read` takes on at a time: its buffer grows as the data
+/// arrives, never to the size a header merely claims.
+const READ_STEP: usize = 1 << 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Compression {
@@ -120,6 +126,56 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
+/// Compressed streams end to end, read as one, as the command-line tools
+/// have it; zero bytes after the last are padding (a tape's, a block
+/// device's) and anything else there is an error of the decoder's.
+struct Members<R, D> {
+    current: Option<D>,
+    start: fn(R) -> D,
+    stop: fn(D) -> R,
+}
+
+impl<R: BufRead, D: Read> Members<R, D> {
+    fn new(input: R, start: fn(R) -> D, stop: fn(D) -> R) -> Self {
+        Self {
+            current: Some(start(input)),
+            start,
+            stop,
+        }
+    }
+}
+
+impl<R: BufRead, D: Read> Read for Members<R, D> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let Some(decoder) = self.current.as_mut() else {
+                return Ok(0);
+            };
+            let n = decoder.read(buf)?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            // This member is over: what comes after it?
+            let Some(decoder) = self.current.take() else {
+                return Ok(0);
+            };
+            let mut input = (self.stop)(decoder);
+            loop {
+                let chunk = input.fill_buf()?;
+                if chunk.is_empty() {
+                    return Ok(0);
+                }
+                let (len, zeros) = (chunk.len(), chunk.iter().take_while(|&&b| b == 0).count());
+                input.consume(zeros);
+                if zeros < len {
+                    break;
+                }
+            }
+            self.current = Some((self.start)(input));
+        }
+    }
+}
+
 /// The tar stream: `raw` with its compression, if any, taken off.
 fn open_input(
     raw: impl Read + Send + 'static,
@@ -147,14 +203,22 @@ fn open_input(
         Compression::None => Box::new(head),
         // Several members or frames end to end are one stream, as the
         // command-line tools have it.
-        Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(head)),
+        Compression::Gzip => Box::new(Members::new(
+            head,
+            flate2::bufread::GzDecoder::new,
+            flate2::bufread::GzDecoder::into_inner,
+        )),
         Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(head)?),
         Compression::Xz => Box::new(lzma_rust2::XzReader::new_mem_limit(
             head,
             true,
             XZ_MEM_LIMIT_KB,
         )),
-        Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(head)),
+        Compression::Bzip2 => Box::new(Members::new(
+            head,
+            bzip2::bufread::BzDecoder::new,
+            bzip2::bufread::BzDecoder::into_inner,
+        )),
     };
     Ok((compression, input))
 }
@@ -292,9 +356,7 @@ fn parse_header(block: &[u8; BLOCK]) -> Result<Raw, &'static str> {
     }
     let posix = &block[257..263] == b"ustar\0";
     let mut name = text(&block[0..100]).to_vec();
-    // An old-style directory: no type for it, a name that ends in a slash.
     let flag = block[156];
-    let old_directory = (flag == 0 || flag == b'0') && name.ends_with(b"/");
     if posix {
         let prefix = text(&block[345..500]);
         if !prefix.is_empty() {
@@ -314,7 +376,6 @@ fn parse_header(block: &[u8; BLOCK]) -> Result<Raw, &'static str> {
     let gid = number(&block[116..124]).ok_or("a header's gid is not a number")?;
     let mtime = number(&block[136..148]).ok_or("a header's time is not a number")?;
     let kind = match flag {
-        _ if old_directory => Kind::Directory,
         0 | b'0' | b'7' => Kind::File,
         b'1' => Kind::Hardlink,
         b'2' => Kind::Symlink,
@@ -402,6 +463,9 @@ fn apply_pax(meta: &mut Meta, data: &[u8]) -> Result<(), Fail> {
     let invalid = |what: &str| Fail::Invalid(format!("an extended header's {what} is not valid"));
     for (key, value) in parse_pax(data).map_err(|e| Fail::Invalid(e.to_string()))? {
         match key {
+            // A header's own name fields end at a NUL, so only here can a
+            // name hold one; no file system takes it.
+            b"path" | b"linkpath" if value.contains(&0) => return Err(invalid("name")),
             b"path" => meta.name = value.to_vec(),
             b"linkpath" => meta.link = value.to_vec(),
             b"uname" => meta.uname = value.to_vec(),
@@ -559,7 +623,14 @@ impl State {
             }
             if block.iter().all(|&b| b == 0) {
                 if offset == 0 {
-                    return Err(Fail::Invalid("not a tar archive".to_string()));
+                    // An archive of nothing is its end marker alone: two
+                    // zero blocks. Fewer, or zeros that give way to
+                    // something else, are not an archive.
+                    let mut second = [1u8; BLOCK];
+                    let have = self.take_all(&mut second)?;
+                    if have < BLOCK || second.iter().any(|&b| b != 0) {
+                        return Err(Fail::Invalid("not a tar archive".to_string()));
+                    }
                 }
                 if pending {
                     return Err(Self::truncated());
@@ -588,7 +659,8 @@ impl State {
                     long_link = Some(text(&self.metadata(size)?).to_vec());
                     continue;
                 }
-                b'x' => {
+                // 'X' is how Solaris marks the same thing.
+                b'x' | b'X' => {
                     extended = Some(self.metadata(size)?);
                     continue;
                 }
@@ -619,6 +691,14 @@ impl State {
             }
             if let Some(data) = extended.take() {
                 apply_pax(&mut meta, &data)?;
+            }
+            // An old-style directory: no type for it, a name that ends in
+            // a slash. The whole name, that is: of a long one the header
+            // holds the first hundred bytes, which can end in a slash
+            // when the name does not.
+            if matches!(flag, 0 | b'0') && meta.name.ends_with(b"/") {
+                meta.kind = Kind::Directory;
+                meta.size = 0;
             }
             self.remaining = meta.size;
             self.padding = padding_after(meta.size);
@@ -783,8 +863,18 @@ impl TarReader {
         if left == 0 {
             return Ok(None);
         }
-        let mut buf = vec![0u8; (want as u64).min(left) as usize];
-        rb_self.run(ruby, |state| state.read_data(&mut buf))?;
+        let want = (want as u64).min(left) as usize;
+        // What is left is what a header says, which may be far more than
+        // the archive holds: the buffer is for what has really arrived.
+        let mut buf = Vec::new();
+        rb_self.run(ruby, |state| {
+            while buf.len() < want {
+                let have = buf.len();
+                buf.resize(have + (want - have).min(READ_STEP), 0);
+                state.read_data(&mut buf[have..])?;
+            }
+            Ok(())
+        })?;
         Ok(Some(ruby.str_from_slice(&buf)))
     }
 
@@ -854,6 +944,7 @@ impl TarReader {
         let policy = placer.on_exists();
         if replace {
             placer.set_on_exists(OnExists::Overwrite);
+            placer.set_own(true);
         }
         // What went wrong reading the archive, as opposed to writing the
         // file: `place` only knows the second kind.
@@ -878,6 +969,7 @@ impl TarReader {
             })
         });
         placer.set_on_exists(policy);
+        placer.set_own(false);
         let notice = placer.take_notices().pop();
         drop(placer);
         drop(state);
@@ -1149,6 +1241,33 @@ mod tests {
     }
 
     #[test]
+    fn a_long_name_cut_at_a_slash_is_still_a_file() {
+        // 99 bytes and a slash fill the header's name field exactly.
+        let mut full = vec![b'd'; 99];
+        full.extend(b"/file.txt");
+        let mut name = full.clone();
+        name.push(0);
+        let mut tar = Vec::new();
+        tar.extend(header(b"././@LongLink", b'L', name.len() as u64));
+        tar.extend(padded(&name));
+        tar.extend(header(&full[..100], b'0', 600));
+        tar.extend(padded(&[7u8; 600]));
+        tar.extend(header(b"old/", b'0', 0));
+        tar.extend(header(b"after", b'0', 0));
+        tar.extend([0u8; 2 * BLOCK]);
+
+        let mut state = reader(tar);
+        let first = state.next().unwrap().unwrap();
+        assert_eq!(
+            (first.name, first.kind, first.size),
+            (full, Kind::File, 600)
+        );
+        assert_eq!(state.next().unwrap().unwrap().kind, Kind::Directory);
+        assert_eq!(state.next().unwrap().unwrap().name, b"after");
+        assert!(state.next().unwrap().is_none());
+    }
+
+    #[test]
     fn a_link_or_directory_has_no_data_whatever_its_size_says() {
         let mut tar = Vec::new();
         tar.extend(header(b"link", b'2', 4096));
@@ -1176,7 +1295,13 @@ mod tests {
         };
         assert_eq!(invalid(Vec::new()), "not a tar archive");
         assert_eq!(invalid(b"hello".to_vec()), "not a tar archive");
-        assert_eq!(invalid(vec![0u8; 2 * BLOCK]), "not a tar archive");
+        assert_eq!(invalid(vec![0u8; BLOCK]), "not a tar archive");
+        let mut zeros_then = vec![0u8; BLOCK];
+        zeros_then.extend([b'x'; BLOCK]);
+        assert_eq!(invalid(zeros_then), "not a tar archive");
+        // Its end marker alone: an archive of nothing.
+        assert!(names(vec![0u8; 2 * BLOCK]).unwrap().is_empty());
+        assert!(names(vec![0u8; 20 * BLOCK]).unwrap().is_empty());
         assert_eq!(invalid(vec![b'x'; BLOCK]), "not a tar archive");
 
         let mut cut = header(b"a.txt", b'0', 1000).to_vec();
@@ -1198,6 +1323,53 @@ mod tests {
             names(header(b"a.txt", b'0', 0).to_vec()).unwrap(),
             ["a.txt"]
         );
+    }
+
+    #[test]
+    fn zeros_after_a_compressed_stream_are_padding() {
+        let mut tar = header(b"a.txt", b'0', 5).to_vec();
+        tar.extend(padded(b"hello"));
+        tar.extend([0u8; 2 * BLOCK]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        io::Write::write_all(&mut gz, &tar).unwrap();
+        let gz = gz.finish().unwrap();
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        io::Write::write_all(&mut bz, &tar).unwrap();
+        let bz = bz.finish().unwrap();
+
+        for packed in [gz, bz] {
+            let mut zeros = packed.clone();
+            zeros.extend([0u8; 3000]);
+            assert_eq!(names(zeros).unwrap(), ["a.txt"]);
+
+            // A second stream after the padding is more of the same.
+            let mut twice = packed.clone();
+            twice.extend([0u8; 100]);
+            twice.extend(&packed);
+            assert_eq!(names(twice).unwrap(), ["a.txt"]);
+
+            let mut junk = packed.clone();
+            junk.extend([0u8; 100]);
+            junk.extend(b"not a stream");
+            assert!(matches!(names(junk), Err(Fail::Io(_))));
+
+            // A checksum that does not hold is still found.
+            let mut bad = packed.clone();
+            let at = bad.len() - 6;
+            bad[at] ^= 0xff;
+            assert!(matches!(names(bad), Err(Fail::Io(_))));
+        }
+    }
+
+    #[test]
+    fn a_name_with_a_nul_is_refused() {
+        for pax in [&b"16 path=a\0b.txt\n"[..], b"16 linkpath=a\0b\n"] {
+            let mut tar = header(b"PaxHeader", b'x', pax.len() as u64).to_vec();
+            tar.extend(padded(pax));
+            tar.extend(header(b"x", b'0', 0));
+            tar.extend([0u8; 2 * BLOCK]);
+            assert!(matches!(names(tar), Err(Fail::Invalid(_))));
+        }
     }
 
     #[test]

@@ -54,6 +54,7 @@ Dir.mktmpdir("ziperu-growth") do |dir|
   FileUtils.mkdir_p(src)
   20.times { |i| File.binwrite(File.join(src, "f#{i}.bin"), Random.new(i).bytes(30_000)) }
   big = Random.new(99).bytes(2 * 1024 * 1024)
+  tar = File.expand_path("../data/tar", __dir__)
 
   workload = lambda do |i|
     # Write: files from disk (sequential and parallel), data, a directory,
@@ -104,6 +105,30 @@ Dir.mktmpdir("ziperu-growth") do |dir|
       zos.put_next_entry("b")
       zos.write("b")
     end.each { |_| }
+    # Tar: every codec read through, from a path and from an IO; one
+    # extracted; one that fails part-way.
+    %w[gnu.tar gnu.tar.gz gnu.tar.zst gnu.tar.xz gnu.tar.bz2].each do |name|
+      Ziperu::Tar.foreach(File.join(tar, name)) { |entry| entry.read if entry.file? }
+    end
+    File.open(File.join(tar, "pax.tar"), "rb") { |io| Ziperu::Tar.foreach(io, &:name) }
+    out = File.join(dir, "tar-out")
+    FileUtils.rm_rf(out)
+    Ziperu.extract(File.join(tar, "gnu.tar.gz"), out, exclude: "tree/link")
+    begin
+      Ziperu::Tar.foreach(StringIO.new(File.binread(File.join(tar, "gnu.tar"), 3000)), &:read)
+    rescue Ziperu::Error
+      nil
+    end
+    # Written: every codec to a path, one to an IO, one left unfinished.
+    %w[w.tar w.tar.gz w.tar.zst w.tar.xz w.tar.bz2].each do |name|
+      Ziperu::Tar.create(File.join(dir, name)) do |t|
+        t.add("f0.bin", File.join(src, "f0.bin"))
+        t.add_data("n" * 150, "long name #{i}")
+        t.add("io", StringIO.new(big[0, 100_000]))
+      end
+    end
+    Ziperu::Tar.create(StringIO.new(+"".b), compression: :gzip) { |t| t.add_recursive(src) }
+    Ziperu::Tar::Writer.new(StringIO.new(+"".b), compression: :zstd).add_data("dropped", "x" * 50_000)
   end
 
   samples = []

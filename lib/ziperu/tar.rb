@@ -1,11 +1,12 @@
 # frozen_string_literal: true
 
 module Ziperu
-  # Reading and extracting tar archives: plain, or compressed with gzip,
-  # zstd, xz or bzip2. Which it is comes from the archive's first bytes,
-  # not its name.
+  # Reading, extracting and writing tar archives: plain, or compressed
+  # with gzip, zstd, xz or bzip2. When reading, which it is comes from the
+  # archive's first bytes, not its name.
   #
   #   Ziperu::Tar.extract_all('release.tar.gz', 'out')
+  #   Ziperu::Tar.create('backup.tar.zst') { |tar| tar.add_recursive('data') }
   #
   #   Ziperu::Tar.foreach('logs.tar.zst') do |entry|
   #     puts "#{entry.name} (#{entry.size} bytes)"
@@ -260,3 +261,4 @@ module Ziperu
 end
 
 require_relative 'tar/extraction'
+require_relative 'tar/writer'

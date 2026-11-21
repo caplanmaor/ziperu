@@ -280,7 +280,7 @@ class TarReaderTest < Minitest::Test
   def test_what_is_not_a_tar_archive_is_refused
     Dir.mktmpdir do |dir|
       { "empty" => "", "short" => "hello", "noise" => Random.new(2).bytes(4096),
-        "zeros" => "\0" * 4096 }.each do |name, bytes|
+        "one zero block" => "\0" * 512, "zeros, then not" => ("\0" * 512) + ("x" * 512) }.each do |name, bytes|
         path = File.join(dir, name)
         File.binwrite(path, bytes)
         error = assert_raises(Ziperu::Error, name) { Ziperu::Tar.foreach(path).to_a }
@@ -289,6 +289,12 @@ class TarReaderTest < Minitest::Test
     end
     assert_raises(Errno::ENOENT) { Ziperu::Tar.foreach("no-such-file.tar").to_a }
     assert_raises(TypeError) { Ziperu::Tar.foreach(12).to_a }
+  end
+
+  def test_an_archive_of_nothing_has_no_entries
+    # What `tar -cf empty.tar -T /dev/null` writes: twenty zero blocks.
+    assert_empty Ziperu::Tar.foreach(StringIO.new("\0" * 10_240)).to_a
+    assert_empty Ziperu::Tar.foreach(StringIO.new(gzip("\0" * 1024))).to_a
   end
 
   def test_a_truncated_archive_is_refused

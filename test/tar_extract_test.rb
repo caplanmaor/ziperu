@@ -180,6 +180,18 @@ class TarExtractTest < Minitest::Test
     assert_equal ["a.txt", "d/", "d/b.txt"], tree
   end
 
+  def test_a_long_name_whose_first_hundred_bytes_end_in_a_slash_is_a_file
+    # Found by the fuzzer: the header holds "ddd.../" and the long-name
+    # record the rest, which is what says it is a file.
+    name = "#{"d" * 99}/file.txt"
+    long = entry("././@LongLink", "#{name}\0", type: "L")
+    err = extract(archive(long, entry(name[0, 100], "contents"), entry("after", "a")))
+
+    assert_empty err
+    assert_equal "contents", read(name)
+    assert_equal "a", read("after")
+  end
+
   def test_an_absolute_name_goes_under_the_destination
     err = extract(archive(entry("/etc/passwd", "root")))
 
@@ -270,6 +282,20 @@ class TarExtractTest < Minitest::Test
     assert_equal "second", read("a")
   end
 
+  def test_a_read_only_file_gives_way_to_a_later_entry_of_its_name
+    err = extract(archive(entry("a", "first", mode: 0o444), entry("a", "second", mode: 0o444)))
+
+    assert_empty err
+    assert_equal "second", read("a")
+    refute File.writable?(File.join(@out, "a")) unless Process.respond_to?(:uid) && Process.uid.zero?
+  end
+
+  def test_an_archive_of_nothing_extracts_nothing
+    assert_empty extract(StringIO.new("\0" * 10_240))
+    assert_nil Ziperu.extract(StringIO.new("\0" * 10_240), @out)
+    refute_path_exists @out
+  end
+
   def test_a_name_given_twice_does_not_excuse_a_file_already_there
     FileUtils.mkdir_p(@out)
     File.write(File.join(@out, "a"), "mine")
@@ -339,6 +365,34 @@ class TarExtractTest < Minitest::Test
     assert_empty Dir.children(outside)
     assert_equal "x", read("d/x")
     refute File.symlink?(File.join(@out, "d"))
+  end
+
+  def test_a_chain_of_links_cannot_climb_out
+    skip "needs symlink support" unless symlinks_supported?
+    # Each link is harmless on its own terms; together `c/x` would be
+    # the destination's parent if `b/..` were allowed after a name.
+    err = extract(archive(directory("d/"),
+                          entry("d/a", type: "2", link: "."),
+                          entry("d/b", type: "2", link: "a/.."),
+                          entry("d/c", type: "2", link: "b/.."),
+                          entry("d/c/escaped", "x")),
+                  symlinks: :create)
+
+    assert_equal 2, err.scan("as a '..' after a name could lead through a link.").size
+    assert_equal ["out"], Dir.children(@tmp)
+    refute_path_exists File.join(@tmp, "escaped")
+  end
+
+  def test_a_hard_link_is_not_made_through_a_link_on_disk
+    skip "needs symlink support" unless symlinks_supported?
+    outside = File.join(@tmp, "outside")
+    FileUtils.mkdir_p([outside, @out])
+    File.symlink(outside, File.join(@out, "d"))
+
+    err = extract(archive(entry("a", "data"), entry("d/b", type: "1", link: "a")))
+
+    assert_match(%r{skipped extracting 'd/b' through the link '.*/out/d'}, err)
+    assert_empty Dir.children(outside)
   end
 
   def test_a_later_file_takes_the_place_of_a_link_and_a_later_link_of_a_file
@@ -442,6 +496,15 @@ class TarExtractTest < Minitest::Test
     assert_empty tree
   end
 
+  def test_an_extended_header_too_large_to_hold_is_refused
+    record = "path=#{"p" * (2 << 20)}\n"
+    huge = entry("PaxHeader", "#{record.bytesize + 9} #{record}", type: "x")
+
+    error = assert_raises(Ziperu::Error) { extract(archive(entry("before", "b"), huge, entry("after", "a"))) }
+    assert_match(/extended header of \d+ bytes is over/, error.message)
+    assert_equal ["before"], tree
+  end
+
   def test_a_truncated_archive_leaves_no_half_written_file
     bytes = archive(entry("whole", "w" * 2000), entry("cut", "c" * 200_000)).string[0, 100_000]
 
@@ -539,5 +602,69 @@ class TarExtractTest < Minitest::Test
 
     assert_raises(Ziperu::Error) { Ziperu.extract(path, @out) }
     assert_raises(Ziperu::Error) { Ziperu.extract(StringIO.new(""), @out) }
+  end
+
+  # ---- what a header claims ----
+
+  # An extended header for the entry that follows it.
+  def pax(records)
+    body = records.map do |key, value|
+      rest = " #{key}=#{value}\n".b
+      length = rest.bytesize + 1
+      length += 1 until length.to_s.bytesize + rest.bytesize == length
+      length.to_s.b + rest
+    end.join
+    entry("PaxHeader", body, type: "x")
+  end
+
+  def test_a_name_with_a_nul_is_an_invalid_archive
+    [archive(pax("path" => "a\0b.txt"), entry("x", "data")),
+     archive(pax("linkpath" => "a\0b"), entry("l", type: "2", link: "x")),
+     archive(pax("linkpath" => "a\0b"), entry("l", type: "1", link: "x"))].each do |source|
+      error = assert_raises(Ziperu::Error) { extract(source, symlinks: :create) }
+      assert_match(/extended header's name is not valid/, error.message)
+      assert_empty tree
+    end
+  end
+
+  def test_reading_takes_memory_for_what_is_there_not_for_what_a_header_says
+    # Sixteen terabytes, says the header; nine bytes follow.
+    bytes = pax("size" => (1 << 44).to_s) + entry("big", "only this")
+    error = assert_raises(Ziperu::Error) do
+      Ziperu::Tar.foreach(StringIO.new(bytes)) { |e| e.read(e.size) }
+    end
+    assert_match(/cut short/, error.message)
+    assert_raises(Ziperu::Error) { extract(StringIO.new(bytes)) }
+  end
+
+  def test_zeros_after_a_compressed_archive_are_padding
+    plain = archive(entry("a.txt", "hello")).string
+    packed = gzip(plain)
+    extract(StringIO.new(packed + ("\0" * 4096)))
+    assert_equal "hello", read("a.txt")
+
+    error = assert_raises(Ziperu::Error) { Ziperu::Tar.foreach(StringIO.new("#{packed}\0\0#{"junk" * 9}")).to_a }
+    assert_match(/gzip data is corrupt/, error.message)
+  end
+
+  def test_a_name_with_a_colon_is_not_written_into_another_files_stream
+    skip "a colon is an ordinary character here" unless WINDOWS
+    FileUtils.mkdir_p(@out)
+    File.write(File.join(@out, "a.txt"), "there before")
+    source = archive(entry("a.txt:evil", "payload"), entry("d/b.txt:x/c", "payload"), entry("C:drive.txt", "payload"),
+                     entry("ok.txt", "fine"))
+    err = extract(source, symlinks: :create)
+
+    assert_equal 3, err.scan("as unsafe").size, err
+    assert_equal %w[a.txt ok.txt], tree
+    assert_equal "there before", read("a.txt")
+    streams = `powershell -NoProfile -Command "(Get-Item -LiteralPath '#{File.join(@out, "a.txt")}' -Stream *).Stream"`
+    assert_equal [":$DATA"], streams.split
+  end
+
+  def test_a_name_with_a_colon_is_extracted_once_sanitized
+    skip "a colon is an ordinary character here" unless WINDOWS
+    extract(archive(entry("a.txt:evil", "payload")), sanitize: :windows)
+    assert_equal %w[a.txt_evil], tree
   end
 end

@@ -18,6 +18,7 @@ mod source;
 mod stream;
 mod stream_stats;
 mod tar;
+mod tar_writer;
 #[cfg(test)]
 mod test_rng;
 mod writer;
@@ -106,6 +107,16 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     tar.define_method("extract_entry", method!(tar::TarReader::extract_entry, 1))?;
     tar.define_method("extract_finish", method!(tar::TarReader::extract_finish, 0))?;
     tar.define_method("close", method!(tar::TarReader::close, 0))?;
+
+    let tar_writer = native.define_class("TarWriter", ruby.class_object())?;
+    tar_writer
+        .define_singleton_method("open_path", function!(tar_writer::TarWriter::open_path, 3))?;
+    tar_writer.define_singleton_method("open_io", function!(tar_writer::TarWriter::open_io, 3))?;
+    tar_writer.define_method("entry", method!(tar_writer::TarWriter::entry, 1))?;
+    tar_writer.define_method("write", method!(tar_writer::TarWriter::write, 1))?;
+    tar_writer.define_method("add_file", method!(tar_writer::TarWriter::add_file, 2))?;
+    tar_writer.define_method("close", method!(tar_writer::TarWriter::close, 0))?;
+    tar_writer.define_method("abandon", method!(tar_writer::TarWriter::abandon, 0))?;
 
     let writer = native.define_class("Writer", ruby.class_object())?;
     writer.define_singleton_method("open_path", function!(writer::Writer::open_path, 1))?;

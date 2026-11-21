@@ -508,7 +508,8 @@ module Ziperu
       dest_dir = ::File.absolute_path(destination_directory || '.')
       extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
 
-      unless extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
+      inside = extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
+      unless inside && !IOExtras.windows_stream_name?(entry_path)
         warn "WARNING: skipped extracting '#{@name}' to '#{extract_path}' as unsafe."
         return self
       end

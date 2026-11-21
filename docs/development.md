@@ -49,10 +49,22 @@ oracle on anything both still accept. CI runs three minutes of it per push
 with a fresh seed; a failure is saved under `tmp/fuzz/failures/` with the
 seed that reproduces it (`SEED=n ITERATIONS=m rake fuzz`).
 
+`rake fuzz:tar` runs [fuzz/tar_differential.rb](../fuzz/tar_differential.rb)
+against Python's `tarfile`. Python writes random archives (GNU, PAX or
+ustar; plain, gzip, bzip2 or xz) and ziperu must read back exactly what
+was specified. Archives with hostile entries among the ordinary ones are
+extracted by ziperu and by Python's "data" filter, and the files and
+directories that result must be the same. Corrupted archives must read
+and extract, or fail with ziperu's own error classes. In every case
+nothing may be written outside the destination or lead out of it. CI
+runs two minutes of it per push. The tar fixtures under `test/data/tar/`
+are rebuilt on Linux by `make.sh` there.
+
 The Rust layer is not thin. Beyond the `zip` crate (which has its own
 fuzzing) it holds a raw central-directory parser, a streaming reader with
 its own descriptor handling, a writer with ZipCrypto and in-place append,
-and the native extractor's path checks (`extract.rs`, `place.rs`). Most
+the tar header parser (`tar.rs`), and the native extractor's path checks
+(`placer.rs`, `place.rs`). Most
 of it is reachable only through the Ruby API, which is what the
 differential fuzzer drives. The pure pieces have seeded property tests
 under `cargo test`: the path check, the zip64 extra field parser and the
@@ -148,5 +160,5 @@ Three kinds of method, told apart in the source:
 - `lib/ziperu/` — the rubyzip-shaped API in Ruby: kwargs, blocks, `Enumerable`,
   the error hierarchy, extra-field parsing.
 - `test/` — minitest; `test/data/` holds fixture archives.
-- `fuzz/` — the differential fuzzer and its Python and rubyzip oracles.
+- `fuzz/` — the differential fuzzers (zip, and `tar_differential.rb` for tar) and their Python and rubyzip oracles.
 - `bench/` — the rubyzip comparison benchmark.

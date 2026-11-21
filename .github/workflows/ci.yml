@@ -118,8 +118,8 @@ jobs:
             COMPAT.md
             tmp/compat-logs/
 
-  # Differential fuzzing against Python's zipfile and rubyzip, a few
-  # minutes' worth per run with a fresh seed; failures are uploaded with
+  # Differential fuzzing against Python's zipfile, tarfile and rubyzip, a
+  # few minutes' worth per run with a fresh seed; failures are uploaded with
   # the seed to reproduce them.
   fuzz:
     runs-on: ubuntu-latest
@@ -139,13 +139,18 @@ jobs:
       - run: bundle exec rake fuzz
         env:
           TIME: "180"
+      # The tar reader and extractor against Python's tarfile.
+      - run: bundle exec rake fuzz:tar
+        env:
+          TIME: "120"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: fuzz-failures
           path: tmp/fuzz/failures/
 
-  # Archives exchanged with Info-ZIP, 7-Zip and Python's zipfile.
+  # Archives exchanged with Info-ZIP, 7-Zip and Python's zipfile, and tar
+  # archives from GNU tar, bsdtar, Python's tarfile and 7-Zip.
   interop:
     runs-on: ubuntu-latest
     steps:
@@ -155,7 +160,7 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           cargo-cache: true
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip unzip p7zip-full python3
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip unzip p7zip-full python3 libarchive-tools zstd xz-utils bzip2
       - run: bundle exec rake compile
       - run: bundle exec ruby -Ilib test/interop/run.rb
 

@@ -29,6 +29,21 @@ Added:
   told apart by the first bytes, with the options of whichever it is.
   From a pipe a tar archive is streamed; a zip is read into memory
   first, within `max_archive_size`.
+- `Ziperu::Tar.create(path_or_io) { |tar| ... }` writes a tar archive,
+  plain or compressed with gzip, zstd, xz or bzip2 (from the file's name,
+  or `compression:`, with `level:`). `add` takes a file from disk or any
+  IO, `add_data` a String, and there are `mkdir`, `symlink`, `link` and
+  `add_recursive`; `Ziperu::Tar.add_recursive(archive, dir)` does a whole
+  directory and `Ziperu::Tar.body` gives a Rack body. What is written is
+  ustar, with a PAX extended header only for what ustar cannot hold (a
+  long or non-ASCII name, a size of 8 GiB or more). It goes to a pipe or
+  socket as readily as to a file, and a file is put in place only once
+  it is whole. Owners are not recorded, and with `source_date_epoch` the
+  same input gives the same bytes.
+- [docs/tar.md](docs/tar.md) describes what is read and written and how
+  extraction behaves. CI now exchanges tar archives with GNU tar, bsdtar, Python's
+  tarfile and 7-Zip in both directions, and `rake fuzz:tar` fuzzes the
+  reader, the extractor and the writer against Python's tarfile.
 - The limits hold for tar as for zip: `max_entries`, `max_entry_size`,
   `max_total_size`, `max_archive_size` for what is read from an IO, and
   `max_compression_ratio`, which is measured over the stream as it is
@@ -38,6 +53,17 @@ Added:
   gzip, xz and bzip2 keep their checksum: tar has none for an entry's
   data. A long name or extended header over 1 MiB is refused, and an xz
   stream that asks for more than 256 MiB to decode.
+
+Fixed:
+
+- On Windows an entry with a colon in its name was written as an
+  alternate data stream: `a.txt:x` went into `a.txt`, a file that could
+  have been in the destination before and was neither replaced nor
+  reported, whatever `on_exists:` said. And `C:x`, a path relative to
+  the current directory of drive C, was written there: outside the
+  destination. Such an entry is now skipped with a warning, as one that resolves outside the destination is;
+  `sanitize: :windows` rewrites the name and extracts it. This was true
+  of zip extraction in every release so far.
 
 Internal:
 

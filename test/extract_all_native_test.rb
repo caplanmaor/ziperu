@@ -257,4 +257,32 @@ class ExtractAllNativeTest < Minitest::Test
     assert_equal 2, Spy.calls
     assert_equal "short\n", File.binread(out("short.txt"))
   end
+
+  def test_a_name_with_a_colon_is_not_written_into_another_files_stream
+    skip "a colon is an ordinary character here" unless Ziperu::RUNNING_ON_WINDOWS
+    zip = File.join(@tmp, "colon.zip")
+    Ziperu::OutputStream.open(zip) do |z|
+      z.put_next_entry("a.txt:evil")
+      z.write("payload")
+      z.put_next_entry("ok.txt")
+      z.write("fine")
+    end
+    FileUtils.mkdir_p(@dest)
+    File.write(out("a.txt"), "there before")
+
+    _, err = capture_io { Ziperu::File.open(zip) { |zf| zf.extract_all(@dest) } }
+    assert_match(/skipped extracting 'a.txt:evil' .* as unsafe/, err)
+    assert_equal %w[a.txt ok.txt], Dir.children(@dest).sort
+    streams = lambda do
+      `powershell -NoProfile -Command "(Get-Item -LiteralPath '#{out("a.txt")}' -Stream *).Stream"`.split
+    end
+    assert_equal [":$DATA"], streams.call
+
+    # One entry at a time goes by the same rule.
+    _, err = capture_io do
+      Ziperu::File.open(zip) { |zf| zf.get_entry("a.txt:evil").extract(destination_directory: @dest) }
+    end
+    assert_match(/as unsafe/, err)
+    assert_equal [":$DATA"], streams.call
+  end
 end

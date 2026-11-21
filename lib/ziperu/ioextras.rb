@@ -38,6 +38,13 @@ module Ziperu
         obj.respond_to?(:to_path) ? obj.to_path : obj.to_s
       end
 
+      # Whether Windows would take `name`, a path below a destination,
+      # for something other than a file there: with a colon it is a
+      # stream of a file ("a.txt:x" writes into `a.txt`) or a drive.
+      def windows_stream_name?(name)
+        ::Ziperu::RUNNING_ON_WINDOWS && name.to_s.include?(':')
+      end
+
       # Whether the native core can take `str` as a name or path: it wants
       # valid UTF-8.
       def native_text?(str)

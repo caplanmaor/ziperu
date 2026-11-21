@@ -148,6 +148,9 @@ pub(crate) struct Placer {
     /// The place in the batch of the spec being placed.
     at: usize,
     notices: Vec<(usize, Notice)>,
+    /// The file about to be replaced is one this run wrote (see
+    /// `set_own`).
+    own: bool,
 }
 
 impl Placer {
@@ -168,6 +171,7 @@ impl Placer {
             beneath: None,
             at: 0,
             notices: Vec::new(),
+            own: false,
         }
     }
 
@@ -189,6 +193,13 @@ impl Placer {
     /// placed from here on.
     pub(crate) fn set_on_exists(&mut self, on_exists: OnExists) {
         self.on_exists = on_exists;
+    }
+
+    /// Says whether a file the next entry replaces is one this run wrote
+    /// itself. It then gives way even if the archive marked it read-only,
+    /// which on Windows would otherwise refuse the replacement.
+    pub(crate) fn set_own(&mut self, own: bool) {
+        self.own = own;
     }
 
     pub(crate) fn on_exists(&self) -> OnExists {
@@ -394,6 +405,7 @@ impl Placer {
         // the OS can: a link swapped in since the walk is refused here.
         let (parent, leaf) = name.rsplit_once('/').unwrap_or(("", name));
         let parent = if parent.is_empty() { "/" } else { parent };
+        let own = self.own;
         let below = self.below(parent).to_string();
         let place = match self.beneath().place(Path::new(parent), &below) {
             Ok(place) => place,
@@ -436,6 +448,9 @@ impl Placer {
         drop(file);
         let outcome = outcome.and_then(|written| {
             if replace {
+                if own {
+                    make_replaceable(path);
+                }
                 place.rename(&target, leaf).map_err(at(path))?;
             }
             Ok(written)
@@ -464,6 +479,22 @@ impl Placer {
     }
 }
 
+/// Windows does not rename over a read-only file: the attribute comes
+/// off first. Elsewhere a rename asks nothing of the file it replaces.
+#[cfg(windows)]
+fn make_replaceable(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let mut perms = meta.permissions();
+        if meta.is_file() && perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn make_replaceable(_path: &Path) {}
+
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -472,7 +503,14 @@ fn path_string(path: &Path) -> String {
 /// resolves `File.join(dest, name)`, or `None` when it is not strictly
 /// inside `dest`. The one exception, as in Ruby, is a destination that is
 /// the root directory itself.
+///
+/// On Windows a name with a colon is not inside either: it names a
+/// stream of a file ("a.txt:x" writes into `a.txt`, there before or not,
+/// without replacing it) or a drive.
 fn safe_path(dest: &str, name: &str) -> Option<String> {
+    if cfg!(windows) && has_colon(name) {
+        return None;
+    }
     let resolved = resolve(dest, name);
     if dest == "/" {
         return Some(resolved);
@@ -533,6 +571,10 @@ fn resolve(dest: &str, name: &str) -> String {
     } else {
         joined
     }
+}
+
+fn has_colon(name: &str) -> bool {
+    name.contains(':')
 }
 
 fn is_drive(c: &str) -> bool {
@@ -626,6 +668,11 @@ mod tests {
             Some("C:/dest/tmp/moo")
         );
         assert_eq!(safe_path("C:/", "x").as_deref(), Some("C:/x"));
+        // Only Windows reads a colon as a stream or a drive.
+        for name in ["a.txt:evil", "a.txt::$DATA", "C:x", "d/e:f/g"] {
+            assert!(has_colon(name));
+            assert_eq!(safe_path("/p/dest", name).is_none(), cfg!(windows));
+        }
     }
 
     /// A name made of the pieces that matter to the check: separators of

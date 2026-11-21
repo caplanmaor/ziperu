@@ -2,8 +2,9 @@
 
 # Interoperability check: archives ziperu writes are read by Info-ZIP's
 # unzip, 7-Zip and Python's zipfile, and archives those tools write are read
-# by ziperu. Needs `zip`, `unzip`, `7z` (or 7zz/7za) and `python3` on PATH;
-# checks whose tool is missing are skipped. Run from the repo root:
+# by ziperu, tar archives from GNU tar, bsdtar, Python's tarfile and 7-Zip
+# among them. Needs `zip`, `unzip`, `7z` (or 7zz/7za), `python3`, GNU `tar`
+# and `bsdtar` on PATH; checks whose tool is missing are skipped. Run from the repo root:
 #
 #   ruby -Ilib test/interop/run.rb
 #
@@ -505,6 +506,137 @@ Dir.mktmpdir("interop") do |dir|
       compare_tree.call("out_c")
     end
   end
+
+  # ---- tar: ziperu writes, other tools read -----------------------------
+  # Each tool unpacks the archive, and what comes out is the source tree.
+  unpacked = lambda do |label, out, *command|
+    check("#{label} reads what ziperu wrote") do
+      FileUtils.rm_rf(out)
+      FileUtils.mkdir_p(out)
+      ok, said = sh(*command)
+      next said unless ok
+      next "it had something to say: #{said}" unless said.strip.empty?
+
+      same = compare_tree.call(File.join(out, "src"))
+      next same unless same == true
+      if File.symlink?("src/link_to_hello") && File.readlink("#{out}/src/link_to_hello") != "hello.txt"
+        next "link_to_hello is not the link it was"
+      end
+      next "mode of hello.txt was lost" unless File.stat("#{out}/src/hello.txt").mode & 0o777 == 0o755
+      unless File.mtime("#{out}/src/sub/a.txt").to_i == File.mtime("src/sub/a.txt").to_i
+        next "time of sub/a.txt was lost"
+      end
+
+      true
+    end
+  end
+  gnu_tar = have?("tar") && `tar --version 2>/dev/null`.include?("GNU tar")
+  { "w.tar" => nil, "w.tar.gz" => "gzip", "w.tar.zst" => "zstd", "w.tar.xz" => "xz",
+    "w.tar.bz2" => "bzip2" }.each do |archive, codec|
+    check("ziperu writes #{archive}") do
+      Ziperu::Tar.add_recursive(archive, "src", prefix: "src/", symlinks: :store)
+      true
+    end
+    next unless File.exist?(archive)
+
+    tag = archive.tr(".", "_")
+    if gnu_tar && (codec.nil? || have?(codec))
+      unpacked.call("GNU tar (#{archive})", "u_gnu_#{tag}", "tar", "-xf", archive, "-C", "u_gnu_#{tag}")
+    end
+    if have?("bsdtar")
+      unpacked.call("bsdtar (#{archive})", "u_bsd_#{tag}", "bsdtar", "-xf", archive, "-C", "u_bsd_#{tag}")
+    end
+    # Python reads zstd from 3.14 on.
+    unless have?("python3") && (codec != "zstd" || system("python3", "-c", "import compression.zstd", err: File::NULL))
+      next
+    end
+
+    unpacked.call("python tarfile (#{archive})", "u_py_#{tag}", "python3", "-c", <<~PY, archive, "u_py_#{tag}")
+      import sys, tarfile
+      with tarfile.open(sys.argv[1]) as t:
+          t.extractall(sys.argv[2], filter="tar") if hasattr(tarfile, "tar_filter") else t.extractall(sys.argv[2])
+    PY
+  end
+  if SEVEN && File.exist?("w.tar")
+    check("7-Zip tests what ziperu wrote") do
+      ok, said = sh(SEVEN, "t", "w.tar")
+      ok && said.include?("Everything is Ok") ? true : said
+    end
+  end
+  if gnu_tar
+    check("GNU tar lists a long and a unicode name ziperu wrote") do
+      long = "#{"d" * 99}/#{"n" * 150}.txt"
+      Ziperu::Tar.create("w_names.tar") do |tar|
+        tar.add_data(long, "x")
+        tar.add_data("ünï/名前.txt", "y")
+        tar.symlink("link", "t" * 120)
+      end
+      ok, listed = sh("tar", "--quoting-style=literal", "-tf", "w_names.tar")
+      names = listed.force_encoding("UTF-8").split("\n")
+      ok && names == [long, "ünï/名前.txt", "link"] ? true : listed
+    end
+  end
+
+  # ---- tar: other tools write, ziperu reads and extracts ----------------
+  linked = File.symlink?("src/link_to_hello")
+  tar_check = lambda do |label, source|
+    check("ziperu extracts #{label}") do
+      out = "t_out_#{label.gsub(/\W+/, "_")}"
+      FileUtils.rm_rf(out)
+      Ziperu.extract(source.respond_to?(:call) ? source.call : source, out, symlinks: :create)
+      same = compare_tree.call(File.join(out, "src"))
+      next same unless same == true
+      next "link_to_hello is not the link it was" if linked && File.readlink("#{out}/src/link_to_hello") != "hello.txt"
+      next "mode of hello.txt not restored" unless File.stat("#{out}/src/hello.txt").mode & 0o777 == 0o755
+      unless File.mtime("#{out}/src/sub/a.txt").to_i == File.mtime("src/sub/a.txt").to_i
+        next "time of sub/a.txt not restored"
+      end
+
+      true
+    end
+  end
+  # Runs the tool that writes `path`, then the check on what it wrote.
+  tar_from = lambda do |label, path, *command, input: nil|
+    ok, out = sh(*command, input: input)
+    ok ? tar_check.call(label, path) : check("#{label} writes") { out }
+  end
+
+  if gnu_tar
+    %w[gnu oldgnu pax ustar v7].each do |format|
+      tar_from.call("GNU tar --format=#{format}", "t_gnu_#{format}.tar",
+                    "tar", "--format=#{format}", "-cf", "t_gnu_#{format}.tar", "src")
+    end
+    { "gzip" => "-z", "bzip2" => "-j", "xz" => "-J", "zstd" => "--zstd" }.each do |name, flag|
+      next unless have?(name)
+
+      tar_from.call("GNU tar #{flag}", "t_gnu.tar.#{name}", "tar", flag, "-cf", "t_gnu.tar.#{name}", "src")
+    end
+    tar_check.call("GNU tar from a pipe", -> { IO.popen(%w[tar -czf - src], "rb") })
+    check("ziperu lists what GNU tar lists") do
+      _, listed = sh("tar", "-tf", "t_gnu_pax.tar")
+      names = Ziperu::Tar.foreach("t_gnu_pax.tar").map(&:name)
+      names == listed.force_encoding("UTF-8").split("\n") ? true : "#{names.inspect} against #{listed.inspect}"
+    end
+  end
+  if have?("bsdtar")
+    %w[pax ustar gnutar v7].each do |format|
+      tar_from.call("bsdtar --format=#{format}", "t_bsd_#{format}.tar",
+                    "bsdtar", "--format=#{format}", "-cf", "t_bsd_#{format}.tar", "src")
+    end
+    tar_from.call("bsdtar --zstd", "t_bsd.tar.zst", "bsdtar", "--zstd", "-cf", "t_bsd.tar.zst", "src")
+  end
+  if have?("python3")
+    [%w[USTAR_FORMAT w], %w[GNU_FORMAT w], %w[PAX_FORMAT w], %w[PAX_FORMAT w:gz], %w[PAX_FORMAT w:bz2],
+     %w[PAX_FORMAT w:xz]].each do |format, mode|
+      path = "t_py_#{format}_#{mode.delete(":")}.tar"
+      tar_from.call("python tarfile #{format} #{mode}", path, "python3", "-c", <<~PY, path, format, mode)
+        import sys, tarfile
+        with tarfile.open(sys.argv[1], sys.argv[3], format=getattr(tarfile, sys.argv[2])) as t:
+            t.add("src")
+      PY
+    end
+  end
+  tar_from.call("7-Zip tar", "t_7z.tar", SEVEN, "a", "-ttar", "-snl", "t_7z.tar", "src") if SEVEN
 end
 
 puts "\n#{$passes} passed, #{$fails.size} failed"

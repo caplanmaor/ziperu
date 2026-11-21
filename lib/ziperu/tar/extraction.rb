@@ -48,11 +48,12 @@ module Ziperu # rubocop:disable Style/Documentation -- documented in ziperu.rb
     BZIP2_MAGIC = /\ABZh[1-9](?:1AY&SY|\x17\x72\x45\x38\x50\x90)/n # :nodoc:
 
     # Whether `head`, the first 512 bytes of some input, begins a tar
-    # archive: compressed data (which a zip never starts with), or a tar
-    # header whose checksum holds.
+    # archive: compressed data (which a zip never starts with), a tar
+    # header whose checksum holds, or the zeros an empty archive is.
     def self.head?(head) # :nodoc:
       return true if COMPRESSED_MAGIC.any? { |magic| head.start_with?(magic) } || head.match?(BZIP2_MAGIC)
       return false unless head.bytesize == 512
+      return true if head.count("\0") == 512
 
       stored = head[148, 8][/[0-7]+/]&.to_i(8) or return false
       bytes = head.bytes
@@ -264,7 +265,7 @@ module Ziperu # rubocop:disable Style/Documentation -- documented in ziperu.rb
       # Whether a link may stand at `path`: inside the destination, with
       # no link on disk on the way there.
       def link_site?(entry, path)
-        unless inside?(path)
+        unless inside?(path) && !IOExtras.windows_stream_name?(path.delete_prefix(@dest))
           warn_left_out(entry, :unsafe, path)
           return false
         end

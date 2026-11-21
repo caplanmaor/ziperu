@@ -213,6 +213,8 @@ class ReadmeTest < Minitest::Test
       end
       FileUtils.mkdir_p("var/log/app")
       File.write("var/log/app/today.log", "today")
+      FileUtils.cp(fixture("tar/gnu.tar.gz"), "release.tar.gz")
+      FileUtils.cp(fixture("tar/gnu.tar.zst"), "logs.tar.zst")
     end
   end
 
@@ -222,6 +224,11 @@ class ReadmeTest < Minitest::Test
 
     assert_equal 200, result[0]
     bytes = result[2].to_a.join
+    # A tar body says so in its type.
+    if result[1]["content-type"] == "application/gzip"
+      return refute_empty(Ziperu::Tar.foreach(StringIO.new(bytes)).map(&:name))
+    end
+
     Ziperu::File.open_buffer(bytes) do |zf|
       refute_empty zf.entries
       assert_empty zf.verify
@@ -244,6 +251,10 @@ class ReadmeTest < Minitest::Test
   def check_archives
     Dir.glob(File.join(@dir, "*.zip")).each do |path|
       Ziperu::File.open(path, password: "s3cret") { |zf| assert_empty zf.verify, File.basename(path) }
+    end
+    # Every tar archive an example wrote reads to its end.
+    Dir.glob(File.join(@dir, "*.tar*")).each do |path|
+      refute_empty Ziperu::Tar.foreach(path).map { |entry| [entry.name, entry.read] }, File.basename(path)
     end
   end
 end

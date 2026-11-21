@@ -19,6 +19,11 @@ the [`zip`](https://github.com/zip-rs/zip2) crate through
 [Magnus](https://github.com/matsadler/magnus). `require "zip"` aliases
 `Zip = Ziperu`, so existing code runs unchanged.
 
+It also reads, extracts and writes tar archives (`.tar`, `.tar.gz`,
+`.tar.zst`, `.tar.xz`, `.tar.bz2`), extracting under the same safety
+rules, so one gem unpacks whatever was uploaded:
+`Ziperu.extract(upload, "out")`.
+
 Measured with ziperu 0.2.3 against rubyzip 3.7.0 on GitHub's Linux
 runners (Ruby 3.4, median of 5 runs):
 
@@ -39,9 +44,10 @@ release the GVL, so other threads (other Puma requests, say) keep running.
 - **Precompiled** for Linux (glibc and musl), macOS and Windows, on Ruby 3.3 to 4.0, with binaries for 3.1 and 3.2 as well. No toolchain, no runtime dependencies.
 - **Fast**: entries inflate and deflate in Rust with the GVL released, the central directory is parsed once, unchanged entries are copied byte for byte on commit, and a commit that only adds entries appends them in place.
 - **Reads everything**: Stored, Deflate, Deflate64, bzip2, zstd, LZMA, XZ, PPMd and the PKZIP 1.x methods; AES and ZipCrypto. Writes Deflate, Stored, bzip2, zstd, XZ, PPMd, AES and ZipCrypto.
+- **Tar as well**: `Ziperu::Tar` reads and extracts v7, ustar, GNU and PAX archives, plain or compressed with gzip, zstd, xz or bzip2, from a path or any IO including a pipe, and writes them too. See [docs/tar.md](docs/tar.md).
 - **Safe by default**: no entry inflates past its declared size, extraction skips names that resolve outside the destination and never writes through a link already on disk, symlinks are opt-in, and limits on entry count, entry size, total size and compression ratio can be set up front. [SECURITY.md](SECURITY.md) has the details.
 - **Friendlier than rubyzip where it costs nothing**: a password on the archive (`File.open(path, password: ...)`), `add` from an IO, Pathname arguments, `File#verify`, progress callbacks, and errors that fail at the call site.
-- **Checked against the field**: rubyzip's own test suite, differential fuzzing against Python's `zipfile` and rubyzip, interoperability runs with Info-ZIP, 7-Zip and Python, and the test suites of gems built on rubyzip (roo, caxlsx, rubyXL, docx, write_xlsx, sablon, gepub) run with ziperu in its place.
+- **Checked against the field**: rubyzip's own test suite, differential fuzzing against Python's `zipfile` and rubyzip, interoperability runs with Info-ZIP, 7-Zip, Python, GNU tar and bsdtar, and the test suites of gems built on rubyzip (roo, caxlsx, rubyXL, docx, write_xlsx, sablon, gepub) run with ziperu in its place.
 
 ## Installation
 
@@ -267,6 +273,41 @@ Ziperu::File.open(upload) do |zip|
 end
 ```
 
+Unpack whatever was uploaded, a zip or a tar archive, compressed or not.
+`Ziperu.extract` tells which from the first bytes. A tar archive is read
+front to back, so it can come from a pipe or a response body:
+
+```ruby
+Ziperu.extract(upload, "out", **Ziperu::Limits::UPLOAD)
+
+Ziperu::Tar.extract_all("release.tar.gz", "src", strip_components: 1)
+
+Ziperu::Tar.foreach("logs.tar.zst") do |entry|   # one entry at a time
+  process(entry.name, entry.read) if entry.file?
+end
+```
+
+Tar extraction follows the rules zip extraction does, and adds its own
+for hard links and devices; [docs/tar.md](docs/tar.md) has them, and
+what is read.
+
+Write a tar archive, to a file or to anything with `write`. The
+compression follows the file's name, or `compression:`:
+
+```ruby
+Ziperu::Tar.add_recursive("site.tar.gz", "public")
+
+Ziperu::Tar.create("backup.tar.zst", level: 10) do |tar|
+  tar.add("report.pdf", "tmp/report.pdf")        # a file from disk
+  tar.add("upload.bin", StringIO.new(bytes))     # any IO
+  tar.add_data("manifest.json", manifest.to_json)
+  tar.add_recursive("var/log/app", prefix: "logs/")
+end
+
+[200, { "content-type" => "application/gzip" },
+ Ziperu::Tar.body(compression: :gzip) { |tar| tar.add_data("report.csv", csv) }]
+```
+
 ## Migrating from rubyzip
 
 Change the Gemfile line and keep `require "zip"`: the `Zip` constant and
@@ -319,6 +360,7 @@ bundle install
 bundle exec rake compile test   # build the extension, run the suite
 bundle exec rake compat         # rubyzip's own test suite against ziperu
 bundle exec rake fuzz           # differential fuzzing (TIME=180 for three minutes)
+bundle exec rake fuzz:tar       # the same for tar, against Python's tarfile
 bundle exec rake bench          # the table above
 ```
 
@@ -332,6 +374,7 @@ run, the release pipeline and the code layout are described in
 - [Changelog](CHANGELOG.md)
 - [Migrating from rubyzip](docs/migrating.md): every deliberate difference, and what ziperu adds
 - [rubyzip compatibility report](COMPAT.md)
+- [Tar archives](docs/tar.md): what is read and written, how extraction behaves, the limits
 - [Benchmarks](docs/benchmarks.md): all three platforms, and which calls release the GVL
 - [Security](SECURITY.md): what extraction and reading guard against
 - [Development](docs/development.md): building, the fuzzer, the release pipeline

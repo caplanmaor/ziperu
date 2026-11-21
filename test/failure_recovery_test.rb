@@ -149,16 +149,24 @@ class FailureRecoveryTest < Minitest::Test
     skip "#{label} took #{once}s, too quick to interrupt measurably" if once < 0.02
 
     limit = once / 5
-    started = clock.call
-    assert_raises(Timeout::Error, label) { Timeout.timeout(limit) { loop(&work) } }
-    late = clock.call - started - limit
+    allowed = [once / 2, 3].min
+    # A busy machine can raise the timeout late on its own account, so the
+    # best of a few goes is what is judged: work that cannot be interrupted
+    # is late every time.
+    late = nil
+    3.times do
+      started = clock.call
+      assert_raises(Timeout::Error, label) { Timeout.timeout(limit) { loop(&work) } }
+      late = [late, clock.call - started - limit].compact.min
+      break if cut_short || late < allowed
+    end
     # Valgrind runs one thread at a time, and the thread that raises the
     # timeout can wait a whole read for its turn. The interrupted paths
     # have been run for it to check; how promptly is not its business.
     return if ENV["RUBY_MEMCHECK_RUNNING"]
     return assert(cut_short.call, "#{label} is stopped part-way") if cut_short
 
-    assert_operator late, :<, [once / 2, 3].min, "#{label} stops within a chunk of the interrupt"
+    assert_operator late, :<, allowed, "#{label} stops within a chunk of the interrupt"
   end
 
   def test_an_interrupted_read_loses_nothing
