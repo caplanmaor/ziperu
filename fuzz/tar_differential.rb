@@ -393,6 +393,7 @@ module TarFuzz
     def files_of(root, shared)
       return {} unless File.directory?(root)
 
+      open_up(root)
       found = {}
       Dir.glob("**/*", File::FNM_DOTMATCH, base: root).each do |name|
         next if name.end_with?("/.") || name == "."
@@ -408,6 +409,17 @@ module TarFuzz
       found
     end
 
+    # Lets the directories under `dir` be looked into. An archive may give
+    # one a mode that shuts its owner out, and it is extracted with it;
+    # only root walks such a tree as it stands.
+    def open_up(dir)
+      File.chmod(File.stat(dir).mode | 0o700, dir)
+      Dir.each_child(dir) do |child|
+        path = File.join(dir, child)
+        open_up(path) if File.directory?(path) && !File.symlink?(path)
+      end
+    end
+
     # Nothing but the destination was made beside it, the file beside it
     # is as it was, and no link under it leads out.
     def check_contained(room, dest)
@@ -419,6 +431,7 @@ module TarFuzz
       end
       return unless File.directory?(dest)
 
+      open_up(dest)
       Dir.glob("**/*", File::FNM_DOTMATCH, base: dest).each do |name|
         path = File.join(dest, name)
         next unless File.symlink?(path)
